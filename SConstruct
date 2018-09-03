@@ -147,7 +147,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
     env["CPPPATH"] += ["."]
 
     # HDF5
-    conf = Configure(Environment(), conf_dir=joinpath(buildDir, ".sconf_temp"), log_file=joinpath(buildDir, "sconf.log"))
+    conf = Configure(Environment(ENV = os.environ), conf_dir=joinpath(buildDir, ".sconf_temp"), log_file=joinpath(buildDir, "sconf.log"))
     if conf.CheckLib('hdf5') and conf.CheckLib('hdf5_hl'):
         env["PINLIBS"] += ["hdf5", "hdf5_hl"]
     elif conf.CheckLib('hdf5_serial') and conf.CheckLib('hdf5_serial_hl'):
