@@ -564,7 +564,7 @@ VOID Instruction(INS ins) {
         }
 
         // Instrument only conditional branches
-        if (INS_Category(ins) == XED_CATEGORY_COND_BR) {
+        if (INS_Category(ins) == XED_CATEGORY_COND_BR && !INS_IsXend(ins)) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) IndirectRecordBranch, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
                     IARG_INST_PTR, IARG_BRANCH_TAKEN, IARG_BRANCH_TARGET_ADDR, IARG_FALLTHROUGH_ADDR, IARG_END);
         }
