@@ -1,3 +1,15 @@
+
+What's New
+==========
+
+This repo is **NOT** the original zsim repo, not even a mirror copy. In fact, this repo contains a slightly better zsim,
+which solves a few problems of the old zsim. We list our changes made to the original zsim as follows
+
+1. Merged all changes from the stanford zsim branch, which solves the compilation problem on newer versions of Ubuntu.
+
+2. Fixed the run-time problem of not recognizing XEND instruction properly. This will cause a few simple commands to fail,
+   such as "ls -al"
+
 zsim
 ====
 
@@ -37,7 +49,7 @@ Google have a different license header with the correct copyright attribution.
 Additionally, if you use this software in your research, we request that you
 reference the zsim paper ("ZSim: Fast and Accurate Microarchitectural
 Simulation of Thousand-Core Systems", Sanchez and Kozyrakis, ISCA-40, June
-2013) as the source of the simulator in any publications that use this
+1)    as the source of the simulator in any publications that use this
 software, and that you send us a citation of your work.
 
 
