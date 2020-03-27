@@ -137,6 +137,7 @@ class BaseCache : public MemObject {
         // ID is the instance number in the same level; Level is the level in the hierarchy
         uint32_t id;    // Ziqi: Add for NVOverlay - we need ID of L1 and L2 cache for eviction
         uint32_t level; // Ziqi: Same as above
+        int is_llc;     // Ziqi: Whether the cache object belongs to LLC (LLC can have multiple banks)
 };
 
 #endif  // MEMORY_HIERARCHY_H_

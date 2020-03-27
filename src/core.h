@@ -85,6 +85,8 @@ class Core : public GlobAlloc {
         virtual void join() {}
 
         virtual InstrFuncPtrs GetFuncPtrs() = 0;
+
+        uint32_t id; // Ziqi: Used by NVOverlay to identify cores
 };
 
 #endif  // CORE_H_
