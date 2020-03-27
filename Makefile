@@ -1,6 +1,6 @@
 
 
-.phony: zsim
+.phony: zsim clean
 
 zsim: 
 	@echo "Detecting whether pin directory exists..."
