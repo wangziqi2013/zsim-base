@@ -60,6 +60,8 @@ class Cache : public BaseCache {
 
         const char* getName();
         void setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network);
+        // Ziqi: Added for nvoverlay
+        g_vector<MemObject*> *getParents();
         void setChildren(const g_vector<BaseCache*>& children, Network* network);
         void initStats(AggregateStat* parentStat);
 

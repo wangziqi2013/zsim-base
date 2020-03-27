@@ -41,6 +41,11 @@ void Cache::setParents(uint32_t childId, const g_vector<MemObject*>& parents, Ne
     cc->setParents(childId, parents, network);
 }
 
+// Ziqi: Add for nvoverlay
+g_vector<MemObject*> *Cache::getParents() {
+    return cc->getParents();
+}
+
 void Cache::setChildren(const g_vector<BaseCache*>& children, Network* network) {
     cc->setChildren(children, network);
 }
