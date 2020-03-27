@@ -443,6 +443,7 @@ static int CoreVerifyCache(CoreType *core) {
     cache = core->getL1d();
     int count = 0;
     while(1) {
+        count++;
         if(cache->id != core_id) {
             panic("Cache @ level %u ID %u does not equal core ID %u\n", cache->level, cache->id, core_id);
         } else if(cache->getParents()->size() == 0) {
@@ -454,7 +455,6 @@ static int CoreVerifyCache(CoreType *core) {
         } else if(cache->is_llc == 1) {
             break;
         }
-        count++;
     }
     return count;
 }
@@ -837,6 +837,7 @@ static void InitSystem(Config& config) {
     for (pair<string, CacheGroup*> kv : cMap) delete kv.second;
     cMap.clear();
 
+    zsim_hello_world();
     info("Initialized system");
 }
 

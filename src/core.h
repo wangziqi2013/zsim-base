@@ -31,6 +31,9 @@
 #include "g_std/g_string.h"
 #include "stats.h"
 
+#include "nvoverlay/util.h"
+#include "nvoverlay/nvoverlay.h"
+
 struct BblInfo {
     uint32_t instrs;
     uint32_t bytes;
