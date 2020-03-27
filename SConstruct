@@ -145,6 +145,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
         env["CPPFLAGS"] += " -D_WITH_DRAMSIM_=1 "
 
     env["CPPPATH"] += ["."]
+    env["CPPPATH"] += ["./nvoverlay"]
 
     # HDF5
     conf = Configure(Environment(ENV = os.environ), conf_dir=joinpath(buildDir, ".sconf_temp"), log_file=joinpath(buildDir, "sconf.log"))
