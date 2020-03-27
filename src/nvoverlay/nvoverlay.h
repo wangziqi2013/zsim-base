@@ -12,6 +12,8 @@
 // If zsim macro is defined, we use zsim's own impl of assert()
 #ifndef ZSIM_PATH
 #include <assert.h>
+#else
+#include "log.h"
 #endif
 
 #include <sys/mman.h>
@@ -815,6 +817,14 @@ inline static picl_t *nvoverlay_get_picl(nvoverlay_t *nvoverlay) { return nvover
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay);
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay);
+
+//* zsim
+
+// They are called in zsim source files, so they begin with "nvoverlay"
+#define nvoverlay_info(fmt, ...) do { fprintf(stderr, "[NVOverlay] " fmt, __func__, ##__VA_ARGS__); } while(0);
+#define nvoverlay_error(fmt, ...) do { \
+  fprintf(stderr, "[NVOverlay] %s error: " fmt, __func__, ##__VA_ARGS__); exit(1); \
+} while(0);
 
 void zsim_hello_world();
 

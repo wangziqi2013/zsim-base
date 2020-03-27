@@ -12,6 +12,8 @@
 // If zsim macro is defined, we use zsim's own impl of assert()
 #ifndef ZSIM_PATH
 #include <assert.h>
+#else
+#include "log.h"
 #endif
 
 // Error reporting and system call assertion

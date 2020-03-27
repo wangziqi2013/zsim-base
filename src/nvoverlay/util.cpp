@@ -82,7 +82,8 @@ conf_t *conf_init(const char *filename) {
   while(ftell(fp) < sz) {
     curr_line++;
     //printf("%d\n", curr_line);
-    fgets(buf, 1024, fp);   // This will add a '\0' automatically and also append '\n' if there is one
+    char *fgets_ret = fgets(buf, 1024, fp);   // This will add a '\0' automatically and also append '\n' if there is one
+    (void)fgets_ret; // Required by stricter rule of some compilers
     //printf("Read line \"%s\"\n", buf);
     int len = strlen(buf);
     assert(len < 1024);
