@@ -435,24 +435,28 @@ CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal,
 // Ziqi: This function is used by NVOverlay sim to verify that all cores are connected to the same-ID cache
 // We recursively go up the hierarchy until we see the LLC
 // CoreType must be OOO/Timing/Simple core
+// Returns number of caches checked
 template <class CoreType>
-static void CoreVerifyCache(CoreType *core) {
+static int CoreVerifyCache(CoreType *core) {
     uint32_t core_id = core->id;
     Cache *cache;
-    cache = core->l1d;
-    while(cache->is_llc != 1) {
+    cache = core->getL1d();
+    int count = 0;
+    while(1) {
         if(cache->id != core_id) {
             panic("Cache @ level %u ID %u does not equal core ID %u\n", cache->level, cache->id, core_id);
-        }
-        if(cache->getParents()->size() != 1) {
-            panic("Cache @ level %u ID %u has more than one parent\n", cache->level, cache->id);
+        } else if(cache->getParents()->size() == 0) {
+            panic("Cache @ level %u ID %u has no parent\n", cache->level, cache->id);
         }
         cache = dynamic_cast<Cache *>(cache->getParents()->at(0));
         if(cache == nullptr) {
             panic("Dynamic cast from MemObj to cache failed\n");
+        } else if(cache->is_llc == 1) {
+            break;
         }
+        count++;
     }
-    return;
+    return count;
 }
 
 static void InitSystem(Config& config) {
@@ -700,7 +704,8 @@ static void InitSystem(Config& config) {
 
                 if (!assignedCaches.count(icache)) panic("%s: Invalid icache parameter %s", group, icache.c_str());
                 if (!assignedCaches.count(dcache)) panic("%s: Invalid dcache parameter %s", group, dcache.c_str());
-
+                // Ziqi: Added to count number of caches checked
+                int verify_count = 0;
                 for (uint32_t j = 0; j < cores; j++) {
                     stringstream ss;
                     ss << group << "-" << j;
@@ -729,29 +734,32 @@ static void InitSystem(Config& config) {
                     assignedCaches[dcache]++;
 
                     //Build the core
-                    // Ziqi: cache connection is done in core's constructor
                     if (type == "Simple") {
-                        core = new (&simpleCores[j]) SimpleCore(ic, dc, name);
-                        CoreVerifyCache<SimpleCore>(ocore);
+                        SimpleCore *score;
+                        core = score = new (&simpleCores[j]) SimpleCore(ic, dc, name);
+                        core->id = j; // Ziqi: Assign NVOverlay ID to the core object
+                        verify_count += CoreVerifyCache<SimpleCore>(score);
                     } else if (type == "Timing") {
                         uint32_t domain = j*zinfo->numDomains/cores;
                         TimingCore* tcore = new (&timingCores[j]) TimingCore(ic, dc, domain, name);
                         zinfo->eventRecorders[coreIdx] = tcore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = tcore;
-                        CoreVerifyCache<TimingCore>(ocore);
+                        core->id = j; // Ziqi: Assign NVOverlay ID to the core object
+                        verify_count += CoreVerifyCache<TimingCore>(tcore);
                     } else {
                         assert(type == "OOO");
                         OOOCore* ocore = new (&oooCores[j]) OOOCore(ic, dc, name);
                         zinfo->eventRecorders[coreIdx] = ocore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = ocore;
-                        CoreVerifyCache<OOOCore>(ocore);
+                        core->id = j; // Ziqi: Assign NVOverlay ID to the core object
+                        verify_count += CoreVerifyCache<OOOCore>(ocore);
                     }
                     coreMap[group].push_back(core);
                     coreIdx++;
-                    core->id = j; // Ziqi: Assign NVOverlay ID to the core object
                 }
+                printf("[NVOverlay] Verified %d cache objects (%u cores)\n", verify_count, cores);
             } else {
                 assert(type == "Null");
                 for (uint32_t j = 0; j < cores; j++) {
