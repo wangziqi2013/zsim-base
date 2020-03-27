@@ -59,6 +59,9 @@ class CC : public GlobAlloc {
         //Repl policy interface
         virtual uint32_t numSharers(uint32_t lineId) = 0;
         virtual bool isValid(uint32_t lineId) = 0;
+
+        // Ziqi: Add virtual intf for getting parents
+        virtual g_vector<MemObject*> *getParents() = 0;
 };
 
 
@@ -165,6 +168,11 @@ class MESIBottomCC : public GlobAlloc {
         /* Replacement policy query interface */
         inline bool isValid(uint32_t lineId) {
             return array[lineId] != I;
+        }
+
+        // Ziqi: Add for NVOverlay
+        inline g_vector<MemObject*> *getParents() {
+            return &parents;
         }
 
         //Could extend with isExclusive, isDirty, etc, but not needed for now.
@@ -290,6 +298,11 @@ class MESICC : public CC {
         void setParents(uint32_t childId, const g_vector<MemObject*>& parents, Network* network) {
             bcc = new MESIBottomCC(numLines, childId, nonInclusiveHack);
             bcc->init(parents, network, name.c_str());
+        }
+
+        // Ziqi: Add for NVOverlay
+        g_vector<MemObject*> *getParents() {
+            return bcc->getParents();
         }
 
         void setChildren(const g_vector<BaseCache*>& children, Network* network) {
@@ -421,6 +434,11 @@ class MESITerminalCC : public CC {
         void setParents(uint32_t childId, const g_vector<MemObject*>& parents, Network* network) {
             bcc = new MESIBottomCC(numLines, childId, false /*inclusive*/);
             bcc->init(parents, network, name.c_str());
+        }
+
+        // Ziqi: Add for NVOverlay
+        g_vector<MemObject*> *getParents() {
+            return bcc->getParents();
         }
 
         void setChildren(const g_vector<BaseCache*>& children, Network* network) {
