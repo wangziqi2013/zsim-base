@@ -2,13 +2,27 @@
 What's New
 ==========
 
-This repo is **NOT** the original zsim repo, not even a mirror copy. In fact, this repo contains a slightly better zsim,
-which solves a few problems of the old zsim. We list our changes made to the original zsim as follows
+This repo is **NOT** the original zsim repo, not even a mirror copy. In fact, this repo contains a slightly better zsim. 
+We list our changes made to the original zsim as follows:
 
 1. Merged all changes from the stanford zsim branch, which solves the compilation problem on newer versions of Ubuntu.
 
-2. Fixed the run-time problem of not recognizing XEND instruction properly. This will cause a few simple commands to fail,
-   such as "ls -al"
+2. Fixed the run-time problem of not recognizing XEND instruction properly. This problem will cause a few simple commands 
+   to fail, such as `ls -al`
+
+3. Added a makefile, which is easier to use than scons. We hardcoded the PIN path to `./pin-2.14`. You need to download
+   this version of PIN and extract it under zsim directory (Intel no longer provides download of this version). 
+   The makefile will report error if this directory is not found.
+
+4. Changed injection mode from parent to child. Otherwise zsim will not start.
+
+5. Many zsim users report that they cannot rebuild the project from the scratch after they deleted `./build` directory. 
+   The compilation system will report error which makes no sense.
+   This is caused by a hidden database file, `.sconsign.dblite`, under zsim directory. We added a `make clean` command
+   to remove this file before recompliting the entire project.
+
+To compile, execute `make` or `make zsim`; To run zsim, execute `./build/opt/zsim [conf file]`; To completely remove the current build, 
+execution `make clean`.
 
 zsim
 ====
