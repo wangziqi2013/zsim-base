@@ -437,6 +437,8 @@ class OOOCore : public Core {
         OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name);
 
         void initStats(AggregateStat* parentStat);
+        // Ziqi: Added to access L1d
+        FilterCache *getL1d() { return l1d; }
 
         uint64_t getInstrs() const;
         uint64_t getPhaseCycles() const;

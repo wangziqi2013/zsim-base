@@ -48,6 +48,9 @@ class SimpleCore : public Core {
         SimpleCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name);
         void initStats(AggregateStat* parentStat);
 
+        // Ziqi: Added to access L1d
+        FilterCache *getL1d() { return l1d; }
+
         uint64_t getInstrs() const {return instrs;}
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return curCycle - haltedCycles;}
