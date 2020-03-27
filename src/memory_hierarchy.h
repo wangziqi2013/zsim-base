@@ -134,6 +134,9 @@ class BaseCache : public MemObject {
         virtual void setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network) = 0;
         virtual void setChildren(const g_vector<BaseCache*>& children, Network* network) = 0;
         virtual uint64_t invalidate(const InvReq& req) = 0;
+        // ID is the instance number in the same level; Level is the level in the hierarchy
+        uint32_t id;    // Ziqi: Add for NVOverlay - we need ID of L1 and L2 cache for eviction
+        uint32_t level; // Ziqi: Same as above
 };
 
 #endif  // MEMORY_HIERARCHY_H_
