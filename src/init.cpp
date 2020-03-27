@@ -369,9 +369,10 @@ MemObject* BuildMemoryController(Config& config, uint32_t lineSize, uint32_t fre
     return mem;
 }
 
+// Ziqi: Cache groups are 2-D cache arrays (instance * bank)
 typedef vector<vector<BaseCache*>> CacheGroup;
 
-CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal) {
+CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal, bool isLLC) {
     CacheGroup* cgp = new CacheGroup;
     CacheGroup& cg = *cgp;
 
@@ -393,16 +394,22 @@ CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal)
 
     uint32_t size = config.get<uint32_t>(prefix + "size", 64*1024);
     uint32_t banks = config.get<uint32_t>(prefix + "banks", 1);
-    uint32_t caches = config.get<uint32_t>(prefix + "caches", 1);
+    uint32_t caches = config.get<uint32_t>(prefix + "caches", 1); // Number of instances in this group
+    uint32_t level = config.get<uint32_t>(prefix + "level", -1U);
+    if(level == -1U) {
+        panic("Cache group \"%s\" must have \"level\" set to a non-zero positive number", name.c_str());
+    }
 
     uint32_t bankSize = size/banks;
     if (size % banks != 0) {
         panic("%s: banks (%d) does not divide the size (%d bytes)", name.c_str(), banks, size);
     }
 
+    // First dimension is instance; Second dimension is bank
     cg.resize(caches);
     for (vector<BaseCache*>& bg : cg) bg.resize(banks);
 
+    // Loop var "i" is also the ID of the cache object - need to for L2 eviction
     for (uint32_t i = 0; i < caches; i++) {
         for (uint32_t j = 0; j < banks; j++) {
             stringstream ss;
@@ -413,13 +420,43 @@ CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal)
             g_string bankName(ss.str().c_str());
             uint32_t domain = (i*banks + j)*zinfo->numDomains/(caches*banks); //(banks > 1)? nextDomain() : (i*banks + j)*zinfo->numDomains/(caches*banks);
             cg[i][j] = BuildCacheBank(config, prefix, bankName, bankSize, isTerminal, domain);
+            // Ziqi: Assign ID and level to cache objects
+            // NOTE: Cache ID should be consistent with Core ID; We only support per-core caches and single global cache
+            // Each core must have its ID equalling all private cache's ID, but not the global cache ID
+            cg[i][j]->id = i;
+            cg[i][j]->level = level;
+            cg[i][j]->is_llc = isLLC;
         }
     }
 
     return cgp;
 }
 
+// Ziqi: This function is used by NVOverlay sim to verify that all cores are connected to the same-ID cache
+// We recursively go up the hierarchy until we see the LLC
+// CoreType must be OOO/Timing/Simple core
+template <class CoreType>
+static void CoreVerifyCache(CoreType *core) {
+    uint32_t core_id = core->id;
+    Cache *cache;
+    cache = core->l1d;
+    while(cache->is_llc != 1) {
+        if(cache->id != core_id) {
+            panic("Cache @ level %u ID %u does not equal core ID %u\n", cache->level, cache->id, core_id);
+        }
+        if(cache->getParents()->size() != 1) {
+            panic("Cache @ level %u ID %u has more than one parent\n", cache->level, cache->id);
+        }
+        cache = dynamic_cast<Cache *>(cache->getParents()->at(0));
+        if(cache == nullptr) {
+            panic("Dynamic cast from MemObj to cache failed\n");
+        }
+    }
+    return;
+}
+
 static void InitSystem(Config& config) {
+    // Ziqi: These two maps use the group name, not individual cache object
     unordered_map<string, string> parentMap; //child -> parent
     unordered_map<string, vector<vector<string>>> childMap; //parent -> children (a parent may have multiple children)
 
@@ -427,6 +464,10 @@ static void InitSystem(Config& config) {
         // 1st dim: concatenated caches; 2nd dim: interleaved caches
         // Example: "l2-beefy l1i-wimpy|l1d-wimpy" produces [["l2-beefy"], ["l1i-wimpy", "l1d-wimpy"]]
         // If there are 2 of each cache, the final vector will be l2-beefy-0 l2-beefy-1 l1i-wimpy-0 l1d-wimpy-0 l1i-wimpy-1 l1d-wimpy-1
+        // Ziqi: Multiple children caches are represeted using "|"
+        //       Concatenated caches are represented using " " (space)
+        // "|" has higher precedence than " "
+        // The first level in the child map is interleave, second level is multiple children
         vector<string> concatGroups = ParseList<string>(children);
         vector<vector<string>> cVec;
         for (string cg : concatGroups) cVec.push_back(ParseList<string>(cg, "|"));
@@ -438,6 +479,8 @@ static void InitSystem(Config& config) {
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
 
     // Build the caches
+    // Ziqi: Cache groups are "levels" we used to use in other contexts; zSim builds caches level by level
+    // Although it is possible that two cache groups exist in one level, e.g. L1i, L1d
     vector<const char*> cacheGroupNames;
     config.subgroups("sys.caches", cacheGroupNames);
     string prefix = "sys.caches.";
@@ -475,6 +518,7 @@ static void InitSystem(Config& config) {
     };
 
     // Build each of the groups, starting with the LLC
+    // Ziqi: cMap maps group names to cache group instances (which contains object instances)
     unordered_map<string, CacheGroup*> cMap;
     list<string> fringe;  // FIFO
     fringe.push_back(llc);
@@ -482,7 +526,7 @@ static void InitSystem(Config& config) {
         string group = fringe.front();
         fringe.pop_front();
         if (cMap.count(group)) panic("The cache 'tree' has a loop at %s", group.c_str());
-        cMap[group] = BuildCacheGroup(config, group, isTerminal(group));
+        cMap[group] = BuildCacheGroup(config, group, isTerminal(group), group == llc);
         for (auto& childVec : childMap[group]) fringe.insert(fringe.end(), childVec.begin(), childVec.end());
     }
 
@@ -617,6 +661,10 @@ static void InitSystem(Config& config) {
         config.subgroups("sys.cores", coreGroupNames);
 
         uint32_t coreIdx = 0;
+        // Ziqi: We can only handle 1 core group, otherwise do not know how to assign IDs
+        if(coreGroupNames.size() != 1) {
+            panic("NVOverlay simulation requires that there be only 1 core group (see %lu)\n", coreGroupNames.size());
+        }
         for (const char* group : coreGroupNames) {
             if (parentMap.count(group)) panic("Core group name %s is invalid, a cache group already has that name", group);
 
@@ -681,23 +729,28 @@ static void InitSystem(Config& config) {
                     assignedCaches[dcache]++;
 
                     //Build the core
+                    // Ziqi: cache connection is done in core's constructor
                     if (type == "Simple") {
                         core = new (&simpleCores[j]) SimpleCore(ic, dc, name);
+                        CoreVerifyCache<SimpleCore>(ocore);
                     } else if (type == "Timing") {
                         uint32_t domain = j*zinfo->numDomains/cores;
                         TimingCore* tcore = new (&timingCores[j]) TimingCore(ic, dc, domain, name);
                         zinfo->eventRecorders[coreIdx] = tcore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = tcore;
+                        CoreVerifyCache<TimingCore>(ocore);
                     } else {
                         assert(type == "OOO");
                         OOOCore* ocore = new (&oooCores[j]) OOOCore(ic, dc, name);
                         zinfo->eventRecorders[coreIdx] = ocore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = ocore;
+                        CoreVerifyCache<OOOCore>(ocore);
                     }
                     coreMap[group].push_back(core);
                     coreIdx++;
+                    core->id = j; // Ziqi: Assign NVOverlay ID to the core object
                 }
             } else {
                 assert(type == "Null");
@@ -708,6 +761,7 @@ static void InitSystem(Config& config) {
                     Core* core = new (&nullCores[j]) NullCore(name);
                     coreMap[group].push_back(core);
                     coreIdx++;
+                    core->id = j; // Ziqi: Same as above
                 }
             }
         }
