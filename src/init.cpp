@@ -445,18 +445,24 @@ static int CoreVerifyCache(CoreType *core) {
     while(1) {
         count++;
         if(cache->id != core_id) {
-            panic("Cache @ level %u ID %u does not equal core ID %u\n", cache->level, cache->id, core_id);
+            nvoverlay_error("Cache @ level %u ID %u does not equal core ID %u\n", cache->level, cache->id, core_id);
         } else if(cache->getParents()->size() == 0) {
-            panic("Cache @ level %u ID %u has no parent\n", cache->level, cache->id);
+            nvoverlay_error("Cache @ level %u ID %u has no parent\n", cache->level, cache->id);
         }
         cache = dynamic_cast<Cache *>(cache->getParents()->at(0));
         if(cache == nullptr) {
-            panic("Dynamic cast from MemObj to cache failed\n");
+            nvoverlay_error("Dynamic cast from MemObj to cache failed\n");
         } else if(cache->is_llc == 1) {
             break;
         }
     }
     return count;
+}
+
+void EnumConfig(Config &config) {
+    for(auto it = config.begin();it != config.end();it++) {
+        nvoverlay_printf("key %s\n", it->getName());
+    }
 }
 
 static void InitSystem(Config& config) {
@@ -667,7 +673,7 @@ static void InitSystem(Config& config) {
         uint32_t coreIdx = 0;
         // Ziqi: We can only handle 1 core group, otherwise do not know how to assign IDs
         if(coreGroupNames.size() != 1) {
-            panic("NVOverlay simulation requires that there be only 1 core group (see %lu)\n", coreGroupNames.size());
+            nvoverlay_error("NVOverlay simulation requires that there be only 1 core group (see %lu)\n", coreGroupNames.size());
         }
         for (const char* group : coreGroupNames) {
             if (parentMap.count(group)) panic("Core group name %s is invalid, a cache group already has that name", group);
@@ -759,7 +765,8 @@ static void InitSystem(Config& config) {
                     coreMap[group].push_back(core);
                     coreIdx++;
                 }
-                printf("[NVOverlay] Verified %d cache objects (%u cores)\n", verify_count, cores);
+                // Ziqi: Print verification
+                nvoverlay_printf("Verified %d cache objects (%u cores)\n", verify_count, cores);
             } else {
                 assert(type == "Null");
                 for (uint32_t j = 0; j < cores; j++) {
@@ -837,7 +844,8 @@ static void InitSystem(Config& config) {
     for (pair<string, CacheGroup*> kv : cMap) delete kv.second;
     cMap.clear();
 
-    zsim_hello_world();
+    nvoverlay_hello_world();
+    EnumConfig(config);
     info("Initialized system");
 }
 
@@ -1008,6 +1016,14 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
 
         uint32_t schedQuantum = config.get<uint32_t>("sim.schedQuantum", 10000); //phases
         zinfo->sched = new Scheduler(EndOfPhaseActions, parallelism, zinfo->numCores, schedQuantum);
+
+        // Ziqi: Initialize the nvoverlay object using its own conf file
+        const char *nvoverlay_conf = config.get<const char *>("sim.nvoverlay_conf", NULL); //conf file
+        if(nvoverlay_conf == NULL) {
+            nvoverlay_error("Please specify conf file path using \"sim.nvoverlay_conf\"\n");
+        }
+        zinfo->nvoverlay = nvoverlay_init(nvoverlay_conf);
+        nvoverlay_conf_print(zinfo->nvoverlay);
     } else {
         zinfo->sched = nullptr;
     }

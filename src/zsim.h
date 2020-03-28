@@ -32,6 +32,7 @@
 #include "debug.h"
 #include "locks.h"
 #include "pad.h"
+#include "nvoverlay/nvoverlay.h"
 
 class Core;
 class Scheduler;
@@ -181,6 +182,8 @@ struct GlobSimInfo {
     // Trace-driven simulation (no cores)
     bool traceDriven;
     TraceDriver* traceDriver;
+    // Ziqi: NVOverlay main object
+    nvoverlay_t *nvoverlay;
 };
 
 
