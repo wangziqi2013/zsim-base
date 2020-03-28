@@ -828,7 +828,6 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay);
 } while(0);
 
 void nvoverlay_hello_world(); // Called in zsim's init
-void nvoverlay_check_core_count(nvoverlay_t *nvoverlay, uint64_t core_count); // Checks whether zsim core count equals nvoverlay's core count
-void nvoverlay_check_cache(nvoverlay_t *nvoverlay, uint64_t size, uint64_t ways, const char *name); // Checks cache param
+void nvoverlay_check_conf(nvoverlay_t *nvoverlay);
 
 #endif

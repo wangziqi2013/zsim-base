@@ -879,6 +879,7 @@ static void InitSystem(Config& config) {
     nvoverlay_hello_world();
     int conf_count = NVOverlayEnumConfig(config);
     nvoverlay_printf("Added %d configuration nodes from zsim to nvoverlay\n", conf_count);
+    nvoverlay_check_conf(zinfo->nvoverlay);
     info("Initialized system");
 }
 

@@ -2315,10 +2315,14 @@ void nvoverlay_hello_world() {
   return;
 }
 
-void nvoverlay_check_core_count(nvoverlay_t *nvoverlay, uint64_t core_count) {
-
-}
-
-void nvoverlay_check_cache(nvoverlay_t *nvoverlay, uint64_t size, uint64_t ways, const char *name) {
-
+// Make sure that zsim and nvoverlay uses the same argument
+void nvoverlay_check_conf(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  int line_size = conf_find_int32_range(conf, "zsim.sys.lineSize", 0, 0, 0);
+  if(line_size != UTIL_CACHE_LINE_SIZE) {
+    error_exit("zsim.sys.lineSize = %d; UTIL_CACHE_LINE_SIZE = %lu\n", line_size, UTIL_CACHE_LINE_SIZE);
+  }
+  nvoverlay_printf("Finished cross-checking zsim/nvoverlay parameters. Here is a summary:\n");
+  nvoverlay_printf("Cache line size: %d bytes\n", line_size);
+  return;
 }
