@@ -70,6 +70,10 @@ Config::~Config() {
     delete outCfg;
 }
 
+// Ziqi: Iterator impl.
+libconfig::SettingIterator Config::begin() { return inCfg->getRoot().begin(); }
+libconfig::SettingIterator Config::end()   { return inCfg->getRoot().end(); }
+
 // Helper function: Add "*"-prefixed vars, which are used by our scripts but not zsim, to outCfg
 // Returns number of copied vars
 static uint32_t copyNonSimVars(libconfig::Setting& s1, libconfig::Setting& s2, std::string prefix) {

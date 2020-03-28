@@ -35,11 +35,13 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include "libconfig.h++"
 #include "log.h"
 
 namespace libconfig {
     class Config;
     class Setting;
+    //class SettingIterator; // Ziqi: Added for enumerating config key-value pairs
 };
 
 
@@ -72,6 +74,10 @@ class Config {
         //Get subgroups in a specific key
         void subgroups(const char* key, std::vector<const char*>& grps);
         void subgroups(const std::string& key, std::vector<const char*>& grps) {subgroups(key.c_str(), grps);}
+
+        // Ziqi: Iterator intreface on configuration file
+        libconfig::SettingIterator begin();
+        libconfig::SettingIterator end();
 
     private:
         template<typename T> T genericGet(const char* key);
