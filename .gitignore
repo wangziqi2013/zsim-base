@@ -6,3 +6,4 @@ build
 *.h5
 heartbeat
 out.cfg
+nvoverlay_test_*
