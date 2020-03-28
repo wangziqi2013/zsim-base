@@ -24,6 +24,9 @@ We list our changes made to the original zsim as follows:
 To compile, execute `make` or `make zsim`; To run zsim, execute `./build/opt/zsim [conf file]`; To completely remove the current build, 
 execution `make clean`.
 
+If the binary reports error and requires `-injection child` to be enabled, you need to add the following options under key "sim":
+`pinOptions = "-injection child";`.
+
 The master branch contains a clean copy of baseline zsim. My own works are in other branchs. Feel free to check them out.
 
 zsim
