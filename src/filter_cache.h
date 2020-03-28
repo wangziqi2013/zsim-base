@@ -101,6 +101,8 @@ class FilterCache : public Cache {
 
         inline uint64_t load(Address vAddr, uint64_t curCycle) {
             Address vLineAddr = vAddr >> lineBits;
+            // Ziqi: Insert load
+            if(this->id != -1U) nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, vAddr, curCycle);
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
             if (vLineAddr == filterArray[idx].rdAddr) {
@@ -113,6 +115,8 @@ class FilterCache : public Cache {
 
         inline uint64_t store(Address vAddr, uint64_t curCycle) {
             Address vLineAddr = vAddr >> lineBits;
+            // Ziqi: Insert store
+            if(this->id != -1U) nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, vAddr, curCycle);
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
             if (vLineAddr == filterArray[idx].wrAddr) {

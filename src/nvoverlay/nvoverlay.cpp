@@ -886,6 +886,20 @@ void cpu_tag_print(cpu_t *cpu, int level) {
   return;
 }
 
+int cpu_tag_get_ways(cpu_t *cpu, int level) {
+  assert(level >= 0 && level < CPU_TAG_MAX);
+  cpu_tag_t *tag_array = &cpu->tag_arrays[level];
+  assert(tag_array->tags != NULL);
+  return tag_array->ways;
+}
+
+int cpu_tag_get_sets(cpu_t *cpu, int level) {
+  assert(level >= 0 && level < CPU_TAG_MAX);
+  cpu_tag_t *tag_array = &cpu->tag_arrays[level];
+  assert(tag_array->tags != NULL);
+  return tag_array->sets;
+}
+
 void cpu_conf_print(cpu_t *cpu) {
   printf("---------- cpu_t ----------\n");
   printf("Cores: %d\n", cpu->core_count);
@@ -1823,16 +1837,19 @@ const char *nvoverlay_mode_names[] = {
 nvoverlay_intf_t nvoverlay_intf_full = {
   nvoverlay_full_load, nvoverlay_full_store,
   nvoverlay_full_l1_evict, nvoverlay_full_l2_evict, nvoverlay_full_l3_evict,
+  nvoverlay_other, 0UL,
 };
 
 nvoverlay_intf_t nvoverlay_intf_tracer = {
   nvoverlay_tracer_load, nvoverlay_tracer_store,
   nvoverlay_tracer_l1_evict, nvoverlay_tracer_l2_evict, nvoverlay_tracer_l3_evict,
+  nvoverlay_other, 0UL,
 };
 
 nvoverlay_intf_t nvoverlay_intf_picl = {
   nvoverlay_picl_load, nvoverlay_picl_store,
   nvoverlay_picl_l1_evict, nvoverlay_picl_l2_evict, nvoverlay_picl_l3_evict,
+  nvoverlay_other, 0UL,
 };
 
 // This is the public interface object
@@ -2307,6 +2324,12 @@ void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
   return;
 }
 
+void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+  nvoverlay_printf("Interface successfully attached. mode = %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+  (void)nvoverlay; (void)id; (void)line_addr; (void)cycle;
+  return;
+}
+
 //* zsim
 
 // Make sure that the file is actually linked
@@ -2315,14 +2338,75 @@ void nvoverlay_hello_world() {
   return;
 }
 
+// Check cache parameters
+static void nvoverlay_check_conf_cache(nvoverlay_t *nvoverlay, const char *ways_key, 
+  const char *size_key, int level, const char *name, int *ways_p, int *sets_p, int *size_p) {
+  conf_t *conf = nvoverlay->conf;
+  int mode = nvoverlay->mode;
+  int ways = conf_find_int32_mandatory(conf, ways_key);
+  if(mode == NVOVERLAY_MODE_FULL) {
+    int cpu_ways = cpu_tag_get_ways(nvoverlay->cpu, level);
+    if(cpu_ways !=ways) {
+      error_exit("%s = %d; cpu_t %s ways = %d\n", ways_key, ways, name, cpu_ways);
+    }
+  }
+  
+  int size = conf_find_int32_mandatory(conf, size_key);
+  int sets = 0;
+  if(mode == NVOVERLAY_MODE_FULL) {
+    int cpu_sets = cpu_tag_get_sets(nvoverlay->cpu, level);
+    int lines = size / (int)UTIL_CACHE_LINE_SIZE;
+    if(lines % ways != 0) {
+      error_exit("%s lines %d must be a multiple of ways %d (size %d)\n", name, lines, ways, size);
+    }
+    sets = lines / ways;
+    if(cpu_sets != sets) {
+      error_exit("%s sets = %d; cpu_t L1 sets = %d\n", name, sets, cpu_sets);
+    }
+  }
+  *ways_p = ways;
+  *sets_p = sets;
+  *size_p = size;
+  return;
+}
+
 // Make sure that zsim and nvoverlay uses the same argument
 void nvoverlay_check_conf(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
-  int line_size = conf_find_int32_range(conf, "zsim.sys.lineSize", 0, 0, 0);
+  int mode = nvoverlay->mode;
+  int line_size = conf_find_int32_mandatory(conf, "zsim.sys.lineSize");
   if(line_size != UTIL_CACHE_LINE_SIZE) {
     error_exit("zsim.sys.lineSize = %d; UTIL_CACHE_LINE_SIZE = %lu\n", line_size, UTIL_CACHE_LINE_SIZE);
   }
+  const char *core_count_key = "zsim.sys.cores.beefy.cores";
+  int core_count = conf_find_int32_mandatory(conf, core_count_key);
+  if(mode == NVOVERLAY_MODE_TRACER) {
+    assert(nvoverlay->tracer);
+    int tracer_cc = tracer_get_core_count(nvoverlay->tracer);
+    if(core_count != tracer_cc) {
+      error_exit("%s = %d; tracer_t core count = %d\n", core_count_key, core_count, tracer_cc);
+    }
+  } else if(mode == NVOVERLAY_MODE_FULL) {
+    assert(nvoverlay->cpu);
+    int cpu_cc = cpu_get_core_count(nvoverlay->cpu);
+    if(core_count != cpu_cc) {
+      error_exit("%s = %d; cpu_t core count = %d\n", core_count_key, core_count, cpu_cc);
+    }
+  }
+  // L1 and L2 parameters
+  const char *l1_ways_key = "zsim.sys.caches.l1d.array.ways";
+  const char *l1_size_key = "zsim.sys.caches.l1d.size";
+  int l1_ways, l1_sets, l1_size;
+  nvoverlay_check_conf_cache(nvoverlay, l1_ways_key, l1_size_key, CPU_TAG_L1, "L1", &l1_ways, &l1_sets, &l1_size);
+  const char *l2_ways_key = "zsim.sys.caches.l2.array.ways";
+  const char *l2_size_key = "zsim.sys.caches.l2.size";
+  int l2_ways, l2_sets, l2_size;
+  nvoverlay_check_conf_cache(nvoverlay, l2_ways_key, l2_size_key, CPU_TAG_L2, "L2", &l2_ways, &l2_sets, &l2_size);
+
   nvoverlay_printf("Finished cross-checking zsim/nvoverlay parameters. Here is a summary:\n");
-  nvoverlay_printf("Cache line size: %d bytes\n", line_size);
+  nvoverlay_printf("- Cache line size: %d bytes\n", line_size);
+  nvoverlay_printf("- Core count: %d\n", core_count);
+  nvoverlay_printf("- L1 ways %d sets %d (size %d)\n", l1_ways, l1_sets, l1_size);
+  nvoverlay_printf("- L2 ways %d sets %d (size %d)\n", l2_ways, l2_sets, l2_size);
   return;
 }

@@ -378,6 +378,8 @@ inline static core_t *cpu_get_core(cpu_t *cpu, int index) {
 }
 
 inline static int cpu_get_core_count(cpu_t *cpu) { return cpu->core_count; }
+int cpu_tag_get_ways(cpu_t *cpu, int level);
+int cpu_tag_get_sets(cpu_t *cpu, int level);
 
 // Called by nvoverlay after init
 void cpu_conf_print(cpu_t *cpu);
@@ -767,6 +769,8 @@ typedef struct {
   nvoverlay_intf_cb_t l1_evict_cb;
   nvoverlay_intf_cb_t l2_evict_cb;
   nvoverlay_intf_cb_t l3_evict_cb;
+  nvoverlay_intf_cb_t other_cb;    // Generic interface
+  uint64_t other_arg;              // Generic argument
 } nvoverlay_intf_t;
 
 // This function inits the conf and nvoverlay object
@@ -805,6 +809,8 @@ void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
 void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
 void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
 void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
+
+void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
 
 extern nvoverlay_intf_t nvoverlay_intf; // This is the one used by external applications
 

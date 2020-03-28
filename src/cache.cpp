@@ -77,6 +77,25 @@ uint64_t Cache::access(MemReq& req) {
             lineId = array->preinsert(req.lineAddr, &req, &wbLineAddr); //find the lineId to replace
             trace(Cache, "[%s] Evicting 0x%lx", name.c_str(), wbLineAddr);
 
+            // Ziqi: Instrumentation for line eviction
+            switch(this->level) {
+                case 1: {
+                    nvoverlay_intf.l1_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                    break;
+                } case 2: {
+                    nvoverlay_intf.l2_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                    break;
+                } case 3: {
+                    nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                    break;
+                } case -1U: {
+                    break; // -1 is inst cache
+                } default: {
+                    nvoverlay_error("Unknown cache level %u at ID %u\n", this->level, this->id);
+                    break;
+                }
+            }
+
             //Evictions are not in the critical path in any sane implementation -- we do not include their delays
             //NOTE: We might be "evicting" an invalid line for all we know. Coherence controllers will know what to do
             cc->processEviction(req, wbLineAddr, lineId, respCycle); //1. if needed, send invalidates/downgrades to lower level

@@ -87,6 +87,7 @@ inline static int streq(const char *a, const char *b) { return strcmp(a, b) == 0
 //* conf_t
 
 // Used in "options" of find_* functions
+#define CONF_NONE   0x00000000
 // Whether the number should be power of two
 #define CONF_POWER2 0x00000001
 // Whether the number should be in a range (given by params)
@@ -141,6 +142,13 @@ int conf_find_bool_mandatory(conf_t *conf, const char *key);  // The boolean key
 int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int options); // Returns the value
 uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options); // Returns the value
 uint64_t conf_find_uint64_abbr_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options); // Returns the value
+// The following two are just short hands
+inline static int conf_find_int32_mandatory(conf_t *conf, const char *key) { 
+  return conf_find_int32_range(conf, key, 0, 0, CONF_NONE);
+}
+inline static int conf_find_uint64_mandatory(conf_t *conf, const char *key) { 
+  return conf_find_uint64_range(conf, key, 0UL, 0UL, CONF_NONE);
+}
 
 void conf_print(conf_t *conf);
 int conf_selfcheck(conf_t *conf);
@@ -276,6 +284,8 @@ void tracer_print(tracer_t *tracer, int id, uint64_t begin, uint64_t count);
 
 void tracer_begin(tracer_t *tracer);
 tracer_record_t *tracer_next(tracer_t *tracer);
+
+inline static int tracer_get_core_count(tracer_t *tracer) { return tracer->core_count; }
 
 void tracer_conf_print(tracer_t *tracer);
 void tracer_stat_print(tracer_t *tracer);

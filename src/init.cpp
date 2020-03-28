@@ -89,6 +89,9 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
         assert(zinfo->traceDriven);
         assert(isTerminal);
         return new TraceDriverProxyCache(name);
+    } else if(type != "Simple") {
+        // Ziqi: Only support simple cache since we only instrumented that class
+        nvoverlay_error("Right now only support simple cache (type = \"Simple\")\n");
     }
 
     uint32_t lineSize = zinfo->lineSize;
@@ -395,8 +398,8 @@ CacheGroup* BuildCacheGroup(Config& config, const string& name, bool isTerminal,
     uint32_t size = config.get<uint32_t>(prefix + "size", 64*1024);
     uint32_t banks = config.get<uint32_t>(prefix + "banks", 1);
     uint32_t caches = config.get<uint32_t>(prefix + "caches", 1); // Number of instances in this group
-    uint32_t level = config.get<uint32_t>(prefix + "level", -1U);
-    if(level == -1U) {
+    uint32_t level = config.get<uint32_t>(prefix + "level", 0);
+    if(level == 0) {
         panic("Cache group \"%s\" must have \"level\" set to a non-zero positive number", name.c_str());
     }
 
@@ -879,7 +882,9 @@ static void InitSystem(Config& config) {
     nvoverlay_hello_world();
     int conf_count = NVOverlayEnumConfig(config);
     nvoverlay_printf("Added %d configuration nodes from zsim to nvoverlay\n", conf_count);
+    conf_dump(nvoverlay_get_conf(zinfo->nvoverlay), "nvoverlay_zsim_dump.txt"); // Dump the conf file
     nvoverlay_check_conf(zinfo->nvoverlay);
+    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0);
     info("Initialized system");
 }
 
