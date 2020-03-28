@@ -78,21 +78,24 @@ uint64_t Cache::access(MemReq& req) {
             trace(Cache, "[%s] Evicting 0x%lx", name.c_str(), wbLineAddr);
 
             // Ziqi: Instrumentation for line eviction
-            switch(this->level) {
-                case 1: {
-                    nvoverlay_intf.l1_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
-                    break;
-                } case 2: {
-                    nvoverlay_intf.l2_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
-                    break;
-                } case 3: {
-                    nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
-                    break;
-                } case -1U: {
-                    break; // -1 is instruction cache
-                } default: {
-                    nvoverlay_error("Unknown cache level %u at ID %u\n", this->level, this->id);
-                    break;
+            // Note: Only evict valid lines
+            if(cc->isValid(lineId) == true) {
+                switch(this->level) {
+                    case 1: {
+                        nvoverlay_intf.l1_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        break;
+                    } case 2: {
+                        nvoverlay_intf.l2_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        break;
+                    } case 3: {
+                        nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        break;
+                    } case -1U: {
+                        break; // -1 is instruction cache
+                    } default: {
+                        nvoverlay_error("Unknown cache level %u at ID %u\n", this->level, this->id);
+                        break;
+                    }
                 }
             }
 
