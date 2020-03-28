@@ -821,11 +821,13 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay);
 //* zsim
 
 // They are called in zsim source files, so they begin with "nvoverlay"
-#define nvoverlay_info(fmt, ...) do { fprintf(stderr, "[NVOverlay] " fmt, __func__, ##__VA_ARGS__); } while(0);
+#define nvoverlay_printf(fmt, ...) do { fprintf(stdout, "[NVOverlay] " fmt, ##__VA_ARGS__); } while(0);
 #define nvoverlay_error(fmt, ...) do { \
   fprintf(stderr, "[NVOverlay] %s error: " fmt, __func__, ##__VA_ARGS__); exit(1); \
 } while(0);
 
-void zsim_hello_world();
+void nvoverlay_hello_world(); // Called in zsim's init
+void nvoverlay_check_core_count(nvoverlay_t *nvoverlay, uint64_t core_count); // Checks whether zsim core count equals nvoverlay's core count
+void nvoverlay_check_cache(nvoverlay_t *nvoverlay, uint64_t size, uint64_t ways, const char *name); // Checks cache param
 
 #endif

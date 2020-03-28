@@ -2310,7 +2310,15 @@ void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
 //* zsim
 
 // Make sure that the file is actually linked
-void zsim_hello_world() {
-  printf("[NVOverlay] zsim Hello World!\n");
+void nvoverlay_hello_world() {
+  nvoverlay_printf("zsim Hello World!\n");
   return;
+}
+
+void nvoverlay_check_core_count(nvoverlay_t *nvoverlay, uint64_t core_count) {
+
+}
+
+void nvoverlay_check_cache(nvoverlay_t *nvoverlay, uint64_t size, uint64_t ways, const char *name) {
+
 }
