@@ -89,7 +89,7 @@ uint64_t Cache::access(MemReq& req) {
                     nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
                     break;
                 } case -1U: {
-                    break; // -1 is inst cache
+                    break; // -1 is instruction cache
                 } default: {
                     nvoverlay_error("Unknown cache level %u at ID %u\n", this->level, this->id);
                     break;

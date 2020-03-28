@@ -1,0 +1,126 @@
+zsim.process0.command = ls -al
+
+zsim.sim.nvoverlay_conf = /home/ziqiw/data_disk_2/zsim-nvoverlay/tests/nvoverlay-test.txt
+
+zsim.sim.schedQuantum = 100
+
+zsim.sim.phaseLength = 200
+
+zsim.sim.gmMBytes = 1024
+
+zsim.sim.parallelism = 16
+
+zsim.sim.pinOptions = -injection child
+
+zsim.sys.mem.tech = DDR3-1333-CL10
+
+zsim.sys.mem.controllers = 4
+
+zsim.sys.mem.type = DDR
+
+zsim.sys.caches.l3.level = 3
+
+zsim.sys.caches.l3.children = l2
+
+zsim.sys.caches.l3.array.ways = 16
+
+zsim.sys.caches.l3.array.hash = H3
+
+zsim.sys.caches.l3.array.type = SetAssoc
+
+zsim.sys.caches.l3.latency = 30
+
+zsim.sys.caches.l3.size = 33554432
+
+zsim.sys.caches.l3.banks = 64
+
+zsim.sys.caches.l3.caches = 1
+
+zsim.sys.caches.l2.level = 2
+
+zsim.sys.caches.l2.children = l1i|l1d
+
+zsim.sys.caches.l2.latency = 8
+
+zsim.sys.caches.l2.array.ways = 8
+
+zsim.sys.caches.l2.array.type = SetAssoc
+
+zsim.sys.caches.l2.size = 262144
+
+zsim.sys.caches.l2.caches = 16
+
+zsim.sys.caches.l1i.level = 0
+
+zsim.sys.caches.l1i.latency = 4
+
+zsim.sys.caches.l1i.array.ways = 8
+
+zsim.sys.caches.l1i.array.type = SetAssoc
+
+zsim.sys.caches.l1i.size = 32768
+
+zsim.sys.caches.l1i.caches = 16
+
+zsim.sys.caches.l1d.level = 1
+
+zsim.sys.caches.l1d.latency = 4
+
+zsim.sys.caches.l1d.array.ways = 8
+
+zsim.sys.caches.l1d.array.type = SetAssoc
+
+zsim.sys.caches.l1d.size = 32768
+
+zsim.sys.caches.l1d.caches = 16
+
+zsim.sys.cores.beefy.dcache = l1d
+
+zsim.sys.cores.beefy.icache = l1i
+
+zsim.sys.cores.beefy.cores = 16
+
+zsim.sys.cores.beefy.type = OOO
+
+zsim.sys.frequency = 3100
+
+zsim.sys.lineSize = 64
+
+picl.epoch_size = 17
+
+tracer.cleanup = false
+
+tracer.mode = write
+
+tracer.cores = 16
+
+tracer.filename = nvoverlay_test
+
+nvoverlay.tag_walk_freq = 1
+
+nvoverlay.epoch_size = 10
+
+nvoverlay.trace_driven = false
+
+nvoverlay.mode = tracer
+
+cpu.l2.size = 256KB
+
+cpu.l2.ways = 8
+
+cpu.l1.size = 32KB
+
+cpu.l1.ways = 8
+
+cpu.cores = 16
+
+omcbuf.ways = 1
+
+omcbuf.sets = 1024
+
+nvm.banks = 16
+
+nvm.wlat = 400
+
+nvm.rlat = 200
+
