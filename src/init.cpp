@@ -459,10 +459,42 @@ static int CoreVerifyCache(CoreType *core) {
     return count;
 }
 
-void EnumConfig(Config &config) {
-    for(auto it = config.begin();it != config.end();it++) {
-        nvoverlay_printf("key %s\n", it->getName());
+// Recursive version
+static int _NVOverlayEnumConfig(string prefix, libconfig::Setting &setting) {
+    int count = 0;
+    string curr = prefix + "." + string(setting.getName());
+    // Note: Could not use iterator on non-group
+    if(setting.isGroup() == false) {
+        count = 1;
+        if(setting.isNumber()) {
+            char buf[32];
+            //nvoverlay_printf("Converting %s to num\n", curr.c_str());
+            uint32_t num = static_cast<uint32_t>(setting);
+            //nvoverlay_printf("num key %s val %u\n", curr.c_str(), num);
+            sprintf(buf, "%u", num);
+            conf_insert_ext(nvoverlay_get_conf(zinfo->nvoverlay), curr.c_str(), buf);
+        } else {
+            //nvoverlay_printf("Converting %s to str\n", curr.c_str());
+            //nvoverlay_printf("str key %s val %s\n", curr.c_str(), setting.c_str());
+            conf_insert_ext(nvoverlay_get_conf(zinfo->nvoverlay), curr.c_str(), setting.c_str());
+        }
+    } else {
+        for(libconfig::SettingIterator it = setting.begin();it != setting.end();it++) {
+            count += _NVOverlayEnumConfig(curr, *it);
+        }
     }
+    return count;
+}
+
+static int NVOverlayEnumConfig(Config &config) {
+    int count = 0;
+    if(zinfo->nvoverlay == nullptr) {
+        nvoverlay_error("You must initialize nvoverlay object first\n");
+    }
+    for(libconfig::SettingIterator it = config.begin();it != config.end();it++) {
+        count += _NVOverlayEnumConfig(string("zsim"), *it); // All confs start with "zsim." to avoid name conflicts
+    }
+    return count;
 }
 
 static void InitSystem(Config& config) {
@@ -845,7 +877,8 @@ static void InitSystem(Config& config) {
     cMap.clear();
 
     nvoverlay_hello_world();
-    EnumConfig(config);
+    int conf_count = NVOverlayEnumConfig(config);
+    nvoverlay_printf("Added %d configuration nodes from zsim to nvoverlay\n", conf_count);
     info("Initialized system");
 }
 
@@ -1056,6 +1089,7 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
     zinfo->pinCmd = new PinCmd(&config, nullptr /*don't pass config file to children --- can go either way, it's optional*/, outputDir, shmid);
 
     //Caches, cores, memory controllers
+    // Ziqi: NVOverlay object must have already been initialized at this point
     InitSystem(config);
 
     //Sched stats (deferred because of circular deps)

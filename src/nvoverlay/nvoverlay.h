@@ -814,6 +814,7 @@ extern nvoverlay_intf_t nvoverlaay_intf_tracer; // Only log the trace into a fil
 
 inline static nvm_t *nvoverlay_get_nvm(nvoverlay_t *nvoverlay) { return nvoverlay->nvm; }
 inline static picl_t *nvoverlay_get_picl(nvoverlay_t *nvoverlay) { return nvoverlay->picl; }
+inline static conf_t *nvoverlay_get_conf(nvoverlay_t *nvoverlay) { return nvoverlay->conf; }
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay);
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay);

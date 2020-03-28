@@ -120,7 +120,8 @@ typedef struct conf_struct_t {
 
 void conf_node_free(conf_node_t *node);
 
-void conf_insert(conf_t *conf, char *k, char *v, int klen, int vlen, int line);
+void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line);
+void conf_insert_ext(conf_t *conf, const char *k, const char *v); // Insert external files, line is set to -1
 conf_t *conf_init(const char *filename);                    // Open a file and load contents into the conf buffer
 void conf_free(conf_t *conf);
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists

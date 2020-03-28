@@ -41,7 +41,6 @@
 namespace libconfig {
     class Config;
     class Setting;
-    //class SettingIterator; // Ziqi: Added for enumerating config key-value pairs
 };
 
 

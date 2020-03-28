@@ -39,7 +39,7 @@ void assert_uint64_power2(uint64_t num, const char *name) {
 //* conf_t
 
 // There is no guarantee that k and v are zero term string
-void conf_insert(conf_t *conf, char *k, char *v, int klen, int vlen, int line) {
+void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line) {
   conf_node_t *node = (conf_node_t *)malloc(sizeof(conf_node_t));
   SYSEXPECT(node != NULL);
   memset(node, 0x00, sizeof(conf_node_t));
@@ -59,6 +59,12 @@ void conf_insert(conf_t *conf, char *k, char *v, int klen, int vlen, int line) {
   node->line = line;
   conf->head = node;
   conf->item_count++;
+  return;
+}
+
+// Both k and v are null-terminated string
+void conf_insert_ext(conf_t *conf, const char *k, const char *v) {
+  conf_insert(conf, k, v, strlen(k), strlen(v), -1);
   return;
 }
 
