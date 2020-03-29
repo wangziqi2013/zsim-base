@@ -36,6 +36,18 @@
 
 class Network;
 
+/*
+typedef struct {
+    int pending;
+    int id;
+    uint64_t line_addr;
+    int is_store;
+    uint64_t cycle;
+} pending_access_t;
+*/
+
+//extern pending_access_t pending_access;
+
 /* General coherent modular cache. The replacement policy and cache array are
  * pretty much mix and match. The coherence controller interfaces are general
  * too, but to avoid virtual function call overheads we work with MESI
