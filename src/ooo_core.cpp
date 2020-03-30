@@ -371,7 +371,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
     // Model fetch-decode delay (fixed, weak predec/IQ assumption)
     uint64_t fetchCycle = decodeCycle - (DECODE_STAGE - FETCH_STAGE);
-    uint32_t lineSize = 1 << lineBits;
+    // Ziqi: Fix compilation
+    //uint32_t lineSize = 1 << lineBits;
 
     // Simulate branch prediction
     if (branchPc && !branchPred.predict(branchPc, branchTaken)) {
@@ -401,6 +402,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
         // info("Mispredicted branch, %ld %ld %ld | %ld %ld", decodeCycle, curCycle, lastCommitCycle,
         //         lastCommitCycle-decodeCycle, lastCommitCycle-curCycle);
+        // Ziqi: Commented out bc we do not model icache
+        /*
         Address wrongPathAddr = branchTaken? branchNotTakenNpc : branchTakenNpc;
         uint64_t reqCycle = fetchCycle;
         for (uint32_t i = 0; i < 5*64/lineSize; i++) {
@@ -413,12 +416,15 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
             // Model fetch throughput limit
             reqCycle = respCycle + lineSize/FETCH_BYTES_PER_CYCLE;
         }
+        */
 
         fetchCycle = lastCommitCycle;
     }
     branchPc = 0;  // clear for next BBL
 
     // Simulate current bbl ifetch
+    // Ziqi: Commented out bc we do not model icache
+    /*
     Address endAddr = bblAddr + bblInfo->bytes;
     for (Address fetchAddr = bblAddr; fetchAddr < endAddr; fetchAddr += lineSize) {
         // The Nehalem frontend fetches instructions in 16-byte-wide accesses.
@@ -429,6 +435,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         cRec.record(curCycle, curCycle, curCycle + fetchLat);
         fetchCycle += fetchLat;
     }
+    */
 
     // If fetch rules, take into account delay between fetch and decode;
     // If decode rules, different BBLs make the decoders skip a cycle
