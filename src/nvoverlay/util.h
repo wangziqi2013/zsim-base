@@ -243,7 +243,7 @@ typedef struct {
 typedef struct {
   int core_count;             // Number of trace buffers
   tracer_core_t **cores;      // One buffer per core
-  const char *basename;       // Base file name without serial number
+  char *basename;             // Base file name without serial number
   int mode;                   // TRACER_MODE_WRITE or READ; tracer.mode = "read" | "write"
   int cap_mode;               // tracer.cap_mode = "none" | "inst" | "load" | "store" | "memop"
   uint64_t cap;               // Maximum number of records (per core) to be logged; 0 means not capped; tracer.cap = ###
@@ -252,6 +252,7 @@ typedef struct {
 } tracer_t;
 
 void tracer_record_print(tracer_record_t *rec);
+void tracer_record_print_buf(tracer_record_t *rec, char *buffer, int size);
 
 tracer_core_t *tracer_core_init(const char *basename, int index, int mode);
 void tracer_core_free(tracer_core_t *tracer_core, int do_flush);
@@ -286,6 +287,9 @@ void tracer_begin(tracer_t *tracer);
 tracer_record_t *tracer_next(tracer_t *tracer);
 
 inline static int tracer_get_core_count(tracer_t *tracer) { return tracer->core_count; }
+uint64_t tracer_get_record_count(tracer_t *tracer);
+// Per-core record count
+uint64_t tracer_get_core_record_count(tracer_t *tracer, int id);
 
 void tracer_conf_print(tracer_t *tracer);
 void tracer_stat_print(tracer_t *tracer);

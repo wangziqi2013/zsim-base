@@ -24,6 +24,8 @@
 struct nvoverlay_struct_t; 
 struct overlay_struct_t;
 struct overlay_epoch_struct_t;
+struct vtable_struct_t;
+struct ver_struct_t;
 
 //* ht64_t
 
@@ -358,11 +360,19 @@ inline static struct ver_struct_t **cpu_core_tag_end(cpu_t *cpu, int level, stru
 // The tag array is driven by coherence actions in vtable
 void cpu_tag_insert(cpu_t *cpu, int level, int core, struct ver_struct_t *ver);
 void cpu_tag_remove(cpu_t *cpu, int level, int core, struct ver_struct_t *ver);
+struct ver_struct_t **cpu_tag_find(cpu_t *cpu, int level, int core, uint64_t line_addr);
 void cpu_tag_op(cpu_t *cpu, int op, int level, int core, struct ver_struct_t *ver);
 
 void cpu_tag_walk(cpu_t *cpu, int id, uint64_t cycle, uint64_t target_epoch); // Performs tag walk and changes state of versions
 
 void cpu_tag_print(cpu_t *cpu, int level); // Prints an entire level
+
+// Check consistency between tag and ver_t stored in it
+// We need vtable to check whether versions are missing
+void cpu_tag_selfcheck(cpu_t *cpu, struct vtable_struct_t *vtable, int level, int core); 
+// Checks a single core, both levels, and also consistency between levels
+void cpu_tag_selfcheck_core(cpu_t *cpu, struct vtable_struct_t *vtable, int core);
+void cpu_tag_selfcheck_all(cpu_t *cpu, struct vtable_struct_t *vtable);
 
 // Only used for debugging - generate addresses for a particular set
 inline static uint64_t cpu_addr_gen(cpu_t *cpu, int level, uint64_t tag, int set_index) {
@@ -427,7 +437,7 @@ typedef void (*vtable_core_recv_cb_t)(struct nvoverlay_struct_t *, int, uint64_t
 // the core that we set
 typedef void (*vtable_core_tag_cb_t)(struct nvoverlay_struct_t *, int, int, int, ver_t *);
 
-typedef struct {
+typedef struct vtable_struct_t {
   ht64_t *vers;                         // Index for ver_t
   vtable_evict_cb_t evict_cb;           // Eviction call back function - we have test version and release version
   vtable_core_recv_cb_t core_recv_cb;   // Core data receival function - same as above
@@ -455,6 +465,8 @@ inline static void vtable_evict_wrapper(vtable_t *vtable, uint64_t addr, int id,
   vtable->evict_cb(vtable->nvoverlay, addr, id, version, cycle, type);
   return;
 }
+
+inline static ht64_t *vtable_get_vers(vtable_t *vtable) { return vtable->vers; }
 
 void ver_sharer_print(bitmap64_t *bitmap);
 void ver_print(ver_t *ver);
@@ -735,13 +747,32 @@ void picl_stat_print(picl_t *picl);
 
 extern const char *nvoverlay_mode_names[];
 
+// Call back type for instrumenting trace driven engine
+typedef void (*nvoverlay_trace_driven_cb_t)(struct nvoverlay_struct_t *, tracer_record_t *);
+
+// Call back types for external interface
+typedef void (*nvoverlay_intf_cb_t)(struct nvoverlay_struct_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
+
+// NVOverlay inteface call back functions
+typedef struct {
+  nvoverlay_intf_cb_t load_cb;
+  nvoverlay_intf_cb_t store_cb;
+  nvoverlay_intf_cb_t l1_evict_cb;
+  nvoverlay_intf_cb_t l2_evict_cb;
+  nvoverlay_intf_cb_t l3_evict_cb;
+  nvoverlay_intf_cb_t other_cb;    // Generic interface
+  uint64_t other_arg;              // Generic argument
+} nvoverlay_intf_t;
+
 typedef struct nvoverlay_struct_t {
   // NVOverlay member variable
   int mode;
+  int trace_driven_enabled;   // Whether TD is enabled
   uint64_t epoch_size;        // Epoch size for nvoverlay full (picl epoch size is picl.epoch_size)
   uint64_t tag_walk_freq;     // Tag walk frequency, in # of epochs advanced since last walk
   uint64_t *stable_epochs;    // Last epoch when a tag walk is done - compute current stable epoch
   uint64_t last_stable_epoch; // Last stable epoch - updated when we compute current stable epoch
+  nvoverlay_trace_driven_cb_t trace_driven_cb; // Trace driven call back  - called for every record. ignored if NULL
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions
@@ -757,29 +788,20 @@ typedef struct nvoverlay_struct_t {
   // Statistics
   uint64_t evict_omc_count;  // Eviction to OMC from L2
   uint64_t evict_llc_count;  // Eviction to LLC from L2
+  uint64_t tag_walk_count;   // Number of tag walks
 } nvoverlay_t;
-
-// Call back types for external interface
-typedef void (*nvoverlay_intf_cb_t)(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle);
-
-// NVOverlay inteface call back functions
-typedef struct {
-  nvoverlay_intf_cb_t load_cb;
-  nvoverlay_intf_cb_t store_cb;
-  nvoverlay_intf_cb_t l1_evict_cb;
-  nvoverlay_intf_cb_t l2_evict_cb;
-  nvoverlay_intf_cb_t l3_evict_cb;
-  nvoverlay_intf_cb_t other_cb;    // Generic interface
-  uint64_t other_arg;              // Generic argument
-} nvoverlay_intf_t;
 
 // This function inits the conf and nvoverlay object
 nvoverlay_t *nvoverlay_init(const char *conf_file);
 // This function frees the conf and nvoverlay object
 void nvoverlay_free(nvoverlay_t *nvoverlay);
 
-void nvoverlay_trace_driven_engine(nvoverlay_t *nvoverlay);
+void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay);
 void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay);
+inline static void nvoverlay_set_trace_driven_cb(nvoverlay_t *nvoverlay, nvoverlay_trace_driven_cb_t cb) {
+  nvoverlay->trace_driven_cb = cb;
+  return;
+}
 
 // Following init/free functions do not need to free nvoverlay and conf
 // They can also assume that the mode variable is already set
@@ -821,6 +843,9 @@ extern nvoverlay_intf_t nvoverlaay_intf_tracer; // Only log the trace into a fil
 inline static nvm_t *nvoverlay_get_nvm(nvoverlay_t *nvoverlay) { return nvoverlay->nvm; }
 inline static picl_t *nvoverlay_get_picl(nvoverlay_t *nvoverlay) { return nvoverlay->picl; }
 inline static conf_t *nvoverlay_get_conf(nvoverlay_t *nvoverlay) { return nvoverlay->conf; }
+inline static tracer_t *nvoverlay_get_tracer(nvoverlay_t *nvoverlay) { return nvoverlay->tracer; }
+inline static vtable_t *nvoverlay_get_vtable(nvoverlay_t *nvoverlay) { return nvoverlay->vtable; }
+inline static cpu_t *nvoverlay_get_cpu(nvoverlay_t *nvoverlay) { return nvoverlay->cpu; }
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay);
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay);

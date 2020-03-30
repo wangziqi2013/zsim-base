@@ -433,9 +433,15 @@ const char *tracer_core_status_names[2] = {
   "ACTIVE", "HALTED",
 };
 
+// Both functions do not append new line after the print
 void tracer_record_print(tracer_record_t *rec) {
   printf("type %s (%d) id %d addr 0x%lX cycle %lu",
-      tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle);
+    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle);
+}
+
+void tracer_record_print_buf(tracer_record_t *rec, char *buffer, int size) {
+  snprintf(buffer, size, "type %s (%d) id %d addr 0x%lX cycle %lu",
+    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle);
 }
 
 // mode is passed from the tracer init function
@@ -576,7 +582,10 @@ tracer_t *tracer_init(const char *basename, int core_count, int mode) {
   memset(tracer, 0x00, sizeof(tracer_t));
   tracer->core_count = core_count;
   tracer->active_core_count = core_count;
-  tracer->basename = basename;
+  // Allocate memory for base name
+  tracer->basename = (char *)malloc(strlen(basename) + 1);
+  SYSEXPECT(tracer->basename != NULL);
+  strcpy(tracer->basename, basename);
   tracer->cores = (tracer_core_t **)malloc(sizeof(tracer_core_t *) * core_count);
   SYSEXPECT(tracer->cores != NULL);
   for(int i = 0;i < core_count;i++) {
@@ -597,6 +606,7 @@ void tracer_free(tracer_t *tracer) {
     tracer_core_free(tracer->cores[i], tracer->mode == TRACER_MODE_WRITE);
   }
   free(tracer->cores);
+  free(tracer->basename);
   free(tracer);
   return;
 }
@@ -741,6 +751,23 @@ tracer_record_t *tracer_next(tracer_t *tracer) {
   }
   if(min_index != -1) tracer_core_next(tracer->cores[min_index]);
   return min_rec; // Could be NULL meaning all cores are done
+}
+
+uint64_t tracer_get_record_count(tracer_t *tracer) {
+  uint64_t ret = 0UL;
+  for(int i = 0;i < tracer->core_count;i++) {
+    tracer_core_t *core = tracer->cores[i];
+    ret += core->record_count;
+  }
+  return ret;
+}
+
+uint64_t tracer_get_core_record_count(tracer_t *tracer, int id) {
+  if(id < 0 || id >= tracer->core_count) {
+    error_exit("Core ID is out of the range: 0 - %d (see %d))\n", tracer->core_count - 1, id);
+  }
+  tracer_core_t *core = tracer->cores[id];
+  return core->record_count;
 }
 
 void tracer_conf_print(tracer_t *tracer) {

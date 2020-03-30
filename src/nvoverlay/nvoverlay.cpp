@@ -780,6 +780,21 @@ void cpu_tag_remove(cpu_t *cpu, int level, int id, ver_t *ver) {
   return;
 }
 
+// Return NULL if the addr is not found in the given core and level tag array
+ver_t **cpu_tag_find(cpu_t *cpu, int level, int core, uint64_t line_addr) {
+  ver_t **begin = cpu_addr_tag_begin(cpu, level, core, line_addr);
+  ver_t **end = cpu_addr_tag_end(cpu, level, begin);
+  assert(begin < end);
+  while(begin != end) {
+    ver_t *ver = *begin;
+    if(ver != NULL && ver->addr == line_addr) {
+      return begin;
+    }
+    begin++;
+  }
+  return NULL;
+}
+
 // Operations on the tag array; This will be called in the runtime by the vtable
 // When the op is CPU_TAG_OP_SET, the version object should be before the bit is actually set on the version bitmap
 void cpu_tag_op(cpu_t *cpu, int op, int level, int core, ver_t *ver) {
@@ -867,6 +882,136 @@ void cpu_tag_walk(cpu_t *cpu, int id, uint64_t cycle, uint64_t target_epoch) {
       }
     }
     begin++;
+  }
+  return;
+}
+
+// Report error and exit if inconsistency is found
+void cpu_tag_selfcheck(cpu_t *cpu, vtable_t *vtable, int level, int core) {
+  if(level < 0 || level >= CPU_TAG_MAX) {
+    error_exit("Invalid tag array level (see %d)\n", level);
+  } else if(core < 0 || core >= cpu->core_count) {
+    error_exit("Invalid core ID (see %d)\n", core);
+  }
+  ht64_t *ht = ht64_init();
+  ver_t **begin = cpu_core_tag_begin(cpu, level, core);
+  ver_t **end = cpu_core_tag_end(cpu, level, begin);
+  uint64_t ver_count = 0UL;
+  while(begin != end) {
+    ver_t *ver = *begin;
+    if(ver == NULL) {
+      begin++;
+      continue;
+    }
+    ver_count++;
+    // Check whether the ver object is mapped by vtable
+    ver_t *ret_ver = vtable_find(vtable, ver->addr);
+    if(ret_ver == NULL) {
+      error_exit("Version 0x%lX is not mapped by vtable\n", ver->addr);
+    } else if(ret_ver != ver) {
+      error_exit("Version 0x%lX is mapped by vtable using a different object\n", ver->addr);
+    }
+    // Basic check: If ver is in the tag array, it must also be in the bitmap
+    bitmap64_t *bitmap;
+    if(level == CPU_TAG_L1) bitmap = &ver->l1_bitmap;
+    else bitmap = &ver->l2_bitmap;
+    if(bitmap64_is_set(bitmap, core) == 0) {
+      error_exit("Version 0x%lX is not set in core %d level %d\n", ver->addr, core, level);
+    }
+    // Ownership and bitmap consistency test
+    if(ver->owner == OWNER_L1) {
+      // If owner is L1, and we see them, then popcount must be 1, and both levels current core
+      if(bitmap64_popcount(&ver->l1_bitmap) != 1 || bitmap64_popcount(&ver->l2_bitmap) != 1) {
+        error_exit("Version 0x%lX is shared by more than one L1 or L2 (core %d level %d)\n",
+          ver->addr, core, level);
+      } else if(bitmap64_pos(&ver->l1_bitmap) != core || bitmap64_pos(&ver->l2_bitmap) != core) {
+        error_exit("Version 0x%lX is shared by wrong L1 or L2 (core %d level %d)\n",
+          ver->addr, core, level);
+      }
+    } else if(ver->owner == OWNER_L2) {
+      if(bitmap64_popcount(&ver->l2_bitmap) != 1) {
+        error_exit("Version 0x%lX is shared by more than one L2 (core %d level %d)\n",
+          ver->addr, core, level);
+      } else if(bitmap64_pos(&ver->l2_bitmap) != core) {
+        error_exit("Version 0x%lX is shared by wrong L2 (core %d level %d)\n",
+          ver->addr, core, level);
+      }
+    } 
+    // Note: We insert address of the ver object here
+    int insert_ret = ht64_insert(ht, (uint64_t)ver, 1UL);
+    if(insert_ret == 0) {
+      error_exit("Version 0x%lX already exists in core %d level %d\n", ver->addr, core, level);
+    }
+    begin++;
+  }
+  assert(ver_count == ht64_get_item_count(ht));
+  //printf("Scan tag version count %lu\n", ver_count);
+  // Then iterate over all versions in the vtable, and for each each ver in the current cache
+  // according to the bitmap, make sure they are all in the hash table
+  // Otherwise, we have versions missing from the tag array
+  ht64_it_t it;
+  uint64_t total_count = 0; // Total number of versions we iterate through
+  uint64_t count = 0; // Total number of versions in the current level and core
+  ht64_begin(vtable_get_vers(vtable), &it);
+  while(ht64_is_end(vtable_get_vers(vtable), &it) == 0) {
+    total_count++;
+    uint64_t addr = ht64_it_key(&it);
+    ver_t *ver = (ver_t *)ht64_it_value(&it);
+    assert(ver->addr == addr);
+    bitmap64_t *bitmap;
+    if(level == CPU_TAG_L1) bitmap = &ver->l1_bitmap;
+    else bitmap = &ver->l2_bitmap;
+    // Does not matter - this version does not exist in the core
+    if(bitmap64_is_set(bitmap, core) == 0) {
+      ht64_next(vtable_get_vers(vtable), &it);
+      continue;
+    }
+    count++;
+    // If the version object exists in the core, then it must be inserted into the ht
+    // Otherwise we are missing a version
+    uint64_t find_ret = ht64_find(ht, (uint64_t)ver, 0UL);
+    if(find_ret == 0UL) {
+      error_exit("Version 0x%lX is in vtable, but missing in core %d level %d\n", ver->addr, core, level);
+    }
+    ht64_next(vtable_get_vers(vtable), &it);
+  }
+  printf("vtable versions %lu; bitmap versions %lu; core %d level %d tag scan versions %lu\n", 
+    total_count, count, core, level, ver_count);
+  if(ver_count != count) {
+    error_exit("Version counts are inconsistent (tag scan count %lu vtable count %lu)\n",
+      count, ver_count);
+  }
+  ht64_free(ht);
+  (void)ver_count;
+  return;
+}
+
+void cpu_tag_selfcheck_core(cpu_t *cpu, struct vtable_struct_t *vtable, int core) {
+  for(int level = CPU_TAG_L1; level < CPU_TAG_MAX;level++) {
+    cpu_tag_selfcheck(cpu, vtable, level, core);
+  }
+  // Check consistency between cores - Those in L1 must also be in L2
+  ver_t **begin, **end;
+  begin = cpu_core_tag_begin(cpu, CPU_TAG_L1, core);
+  end = cpu_core_tag_end(cpu, CPU_TAG_L1, begin);
+  while(begin != end) {
+    ver_t *ver = *begin;
+    if(ver == NULL) {
+      begin++;
+      continue;
+    }
+    ver_t **find_ret = cpu_tag_find(cpu, CPU_TAG_L2, core, ver->addr);
+    if(find_ret == NULL) {
+      error_exit("Inclusion property broken: Version 0x%lX found in L1 but not in L2\n", ver->addr);
+    }
+    begin++;
+  }
+  return;
+}
+
+void cpu_tag_selfcheck_all(cpu_t *cpu, vtable_t *vtable) {
+  for(int core = 0;core < cpu->core_count;core++) {
+    cpu_tag_selfcheck_core(cpu, vtable, core);
   }
   return;
 }
@@ -1287,8 +1432,8 @@ void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
 // Case 1: Owner is OTHER; Just clear the sharers list in both L1 and L2
 // Case 2: Owner is any cache; Transfer ownership to LLC (w/ possible WB) and clear the sharer list
 // We call higher level eviction function to avoid duplicating the logic here
+// ID is not used, although we do pass it around as parameter
 void vtable_l3_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle) {
-  (void)epoch; (void)id;
   ver_t *ver = vtable_insert(vtable, addr);
   if(ver->owner == OWNER_OTHER) {
     // Case 1. In this case there can be multiple upper level caches that have the address
@@ -1914,13 +2059,18 @@ void nvoverlay_free(nvoverlay_t *nvoverlay) {
   return;
 }
 
-void nvoverlay_trace_driven_engine(nvoverlay_t *nvoverlay) {
+void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
+  if(nvoverlay->trace_driven_enabled == 0) {
+    error_exit("Trace-driven simulation is disabled (set \"nvoverlaay.trace_driven\" to \"true\" to enable it)\n");
+  }
   tracer_t *tracer = nvoverlay->tracer;
   assert(tracer);
   uint64_t last_cycle;
   tracer_record_t *rec;
   tracer_begin(tracer);
+  nvoverlay_trace_driven_cb_t cb = nvoverlay->trace_driven_cb;
   while((rec = tracer_next(tracer)) != NULL) {
+    if(cb) cb(nvoverlay, rec); 
     last_cycle = rec->cycle;
     switch(rec->type) {
       case TRACER_LOAD: {
@@ -1944,6 +2094,7 @@ void nvoverlay_trace_driven_engine(nvoverlay_t *nvoverlay) {
     }
   }
   printf("*** Finished trace-driven simulation @ cycle %lu\n", last_cycle);
+  printf("*** Total records: %lu\n", tracer_get_record_count(nvoverlay->tracer));
   nvoverlay_stat_print(nvoverlay);
   exit(0);
 }
@@ -1961,8 +2112,9 @@ void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay) {
   char *filename = conf_find_str_mandatory(conf, "tracer.filename");
   assert(nvoverlay->tracer == NULL);
   nvoverlay->tracer = tracer_init(filename, tracer_core_count, TRACER_MODE_READ);
+  nvoverlay->trace_driven_enabled = 1;
   printf("*** Trace driven enabled (file %s cores %d)\n", filename, tracer_core_count);
-  nvoverlay_trace_driven_engine(nvoverlay);
+  //nvoverlay_trace_driven_engine(nvoverlay);
   return;
 }
 
@@ -2191,6 +2343,7 @@ static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64
 
 static void nvoverlay_vtable_core_tag_cb(nvoverlay_t *nvoverlay, int op, int level, int id, ver_t *ver) {
   assert(nvoverlay != NULL);
+  // Comment out the following to disable tag simulation
   cpu_tag_op(nvoverlay->cpu, op, level, id, ver);
   return;
 }
@@ -2252,9 +2405,10 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
         // This may trigger page GC and overlay GC; overlay size may change
         overlay_epoch_merge(nvoverlay->overlay, epoch, nvoverlay->omt);
       }
+      nvoverlay->last_stable_epoch = min_epoch;
     }
   }
-  // TODO: TRACK OVERLAY SIZE
+  // TODO: TRACK OVERLAY SIZE IN TIME SERIES GRAPH
   return;
 } 
 void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
@@ -2380,6 +2534,7 @@ void nvoverlay_check_conf(nvoverlay_t *nvoverlay) {
   }
   const char *core_count_key = "zsim.sys.cores.beefy.cores";
   int core_count = conf_find_int32_mandatory(conf, core_count_key);
+  // Note: PiCL does not care about core count, since all cores run the same epoch
   if(mode == NVOVERLAY_MODE_TRACER) {
     assert(nvoverlay->tracer);
     int tracer_cc = tracer_get_core_count(nvoverlay->tracer);
@@ -2408,5 +2563,9 @@ void nvoverlay_check_conf(nvoverlay_t *nvoverlay) {
   nvoverlay_printf("- Core count: %d\n", core_count);
   nvoverlay_printf("- L1 ways %d sets %d (size %d)\n", l1_ways, l1_sets, l1_size);
   nvoverlay_printf("- L2 ways %d sets %d (size %d)\n", l2_ways, l2_sets, l2_size);
+  if(l1_sets == 0) {
+    assert(l2_sets == 0);
+    nvoverlay_printf("  Sets = 0 is normal for non-nvoverlay designs\n");
+  }
   return;
 }
