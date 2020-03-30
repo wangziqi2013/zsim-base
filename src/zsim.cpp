@@ -1116,6 +1116,10 @@ VOID SimEnd() {
         for (AccessTraceWriter* t : *(zinfo->traceWriters)) t->dump(false);  // flushes trace writer
 
         if (zinfo->sched) zinfo->sched->notifyTermination();
+        // Ziqi: Deallocate nvoverlay, since it will not be auto freed
+        // This will flush traces that have not been written into the file
+        nvoverlay_free(zinfo->nvoverlay);
+        nvoverlay_printf("Decallocated NVOverlay instance\n");
     }
 
     //Uncomment when debugging termination races, which can be rare because they are triggered by threads of a dying process
