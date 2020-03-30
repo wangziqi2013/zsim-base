@@ -121,7 +121,8 @@ class FilterCache : public Cache {
                 // Ziqi: This may generate evictions (or not generate evictions)
                 uint64_t ret = replace(vLineAddr, idx, true, curCycle);
                 if(this->id != -1U) {
-                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, curCycle);
+                    // Ziqi: Note we use return value from L1 access()
+                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, ret);
                 }
                 return ret;
             }
@@ -136,8 +137,7 @@ class FilterCache : public Cache {
                 // Ziqi: Insert store
                 // Cache store hit - do not need to worry about evictions
                 if(this->id != -1U) {
-                    // Ziqi: Note we use return value from L1 access()
-                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, ret);
+                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, curCycle);
                 }
                 //NOTE: Stores don't modify availCycle; we'll catch matches in the core
                 //filterArray[idx].availCycle = curCycle; //do optimistic store-load forwarding
