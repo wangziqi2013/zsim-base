@@ -72,7 +72,13 @@ uint64_t Cache::access(MemReq& req) {
         bool updateReplacement = (req.type == GETS) || (req.type == GETX);
         int32_t lineId = array->lookup(req.lineAddr, &req, updateReplacement);
         respCycle += accLat;
-
+        /*
+        if((req.lineAddr << lineBits) == 0x7FFFF7DD9F00UL) {
+            nvoverlay_printf("id %d level %d 0x%lX lineId %d (record = %lu)\n", 
+                this->id, this->level, req.lineAddr << lineBits, lineId,
+                tracer_get_record_count(nvoverlay_get_tracer(zinfo->nvoverlay)));
+        }
+        */
         if (lineId == -1 && cc->shouldAllocate(req)) {
             //Make space for new line
             Address wbLineAddr;
@@ -92,8 +98,8 @@ uint64_t Cache::access(MemReq& req) {
                     } case 3: {
                         nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
                         break;
-                    } case -1U: {
-                        break; // -1 is instruction cache
+                    } case -1: {
+                        break; // Ignore instruction L1 cache's eviction
                     } default: {
                         nvoverlay_error("Unknown cache level %u at ID %u\n", this->level, this->id);
                         break;

@@ -100,7 +100,9 @@ class FilterCache : public Cache {
         }
 
         inline uint64_t load(Address vAddr, uint64_t curCycle) {
+            // Ziqi: vLineAddr is shifted tag
             Address vLineAddr = vAddr >> lineBits;
+            uint64_t line_addr = vAddr & UTIL_CACHE_LINE_MSB_MASK;
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
             if (vLineAddr == filterArray[idx].rdAddr) {
@@ -108,21 +110,28 @@ class FilterCache : public Cache {
                 // Ziqi: Insert load
                 // Note that vAddr is also collected from the memory trace - it is not necessarily aligned
                 // L0 hit - no need to worry about evictions
-                if(this->id != -1U) {
-                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, curCycle);
+                if(this->level != -1U) {
+                    /*
+                    if(line_addr == 0x7FFFF7DD9F00UL) {
+                        nvoverlay_printf("Load 0x%lX hits L0 filter cache (record = %lu)\n", 
+                            line_addr, tracer_get_record_count(nvoverlay_get_tracer(zinfo->nvoverlay)));
+                    }
+                    */
+                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, curCycle);
                 }
                 return MAX(curCycle, availCycle);
             } else {
-                //pending_access.pending = 1;
-                //pending_access.id = this->id;
-                //pending_access.is_store = 0;
-                //pending_access.line_addr = vAddr & UTIL_CACHE_LINE_MSB_MASK;
-                //pending_access.cycle = curCycle;
                 // Ziqi: This may generate evictions (or not generate evictions)
                 uint64_t ret = replace(vLineAddr, idx, true, curCycle);
-                if(this->id != -1U) {
+                if(this->level != -1U) {
                     // Ziqi: Note we use return value from L1 access()
-                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, ret);
+                    /*
+                    if(line_addr == 0x7FFFF7DD9F00UL) {
+                        nvoverlay_printf("Load 0x%lX misses L0 filter cache (record = %lu)\n", 
+                            line_addr, tracer_get_record_count(nvoverlay_get_tracer(zinfo->nvoverlay)));
+                    }
+                    */
+                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, ret);
                 }
                 return ret;
             }
@@ -130,29 +139,25 @@ class FilterCache : public Cache {
 
         inline uint64_t store(Address vAddr, uint64_t curCycle) {
             Address vLineAddr = vAddr >> lineBits;
+            uint64_t line_addr = vAddr & UTIL_CACHE_LINE_MSB_MASK;
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
             if (vLineAddr == filterArray[idx].wrAddr) {
                 fGETXHit++;
                 // Ziqi: Insert store
                 // Cache store hit - do not need to worry about evictions
-                if(this->id != -1U) {
-                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, curCycle);
+                if(this->level != -1U) {
+                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, curCycle);
                 }
                 //NOTE: Stores don't modify availCycle; we'll catch matches in the core
                 //filterArray[idx].availCycle = curCycle; //do optimistic store-load forwarding
                 return MAX(curCycle, availCycle);
             } else {
-                //pending_access.pending = 1;
-                //pending_access.id = this->id;
-                //pending_access.is_store = 1;
-                //pending_access.line_addr = vAddr & UTIL_CACHE_LINE_MSB_MASK;
-                //pending_access.cycle = curCycle;
                 // Ziqi: This may generate evictions (or not generate evictions)
                 uint64_t ret = replace(vLineAddr, idx, false, curCycle);
-                if(this->id != -1U) {
-                    // Ziqi: Note we use return value from L1 access()
-                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, vAddr & UTIL_CACHE_LINE_MSB_MASK, ret);
+                if(this->level != -1U) {
+                    // Ziqi: Note we use return value from L1 access() method to order the store after eviction
+                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, ret);
                 }
                 return ret;
             }
@@ -160,6 +165,8 @@ class FilterCache : public Cache {
 
         uint64_t replace(Address vLineAddr, uint32_t idx, bool isLoad, uint64_t curCycle) {
             Address pLineAddr = procMask | vLineAddr;
+            // procMask = 0x0
+            //nvoverlay_error("procMask 0x%lX vline 0x%lX pline 0x%lX\n", procMask, vLineAddr, pLineAddr);
             MESIState dummyState = MESIState::I;
             futex_lock(&filterLock);
             MemReq req = {pLineAddr, isLoad? GETS : GETX, 0, &dummyState, curCycle, &filterLock, dummyState, srcId, reqFlags};
