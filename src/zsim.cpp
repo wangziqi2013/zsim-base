@@ -1077,6 +1077,11 @@ VOID AfterForkInChild(THREADID tid, const CONTEXT* ctxt, VOID * arg) {
 
 VOID Fini(int code, VOID * v) {
     info("Finished, code %d", code);
+    // Ziqi: Deallocate nvoverlay, since it will not be auto freed
+    // This will flush traces that have not been written into the file
+    nvoverlay_free(zinfo->nvoverlay);
+    fprintf(stderr, "[NVOverlay] Decallocated NVOverlay instance\n");
+    fprintf(stderr, "[NVOverlay] Simulation finished. Exit now\n");
     //NOTE: In fini, it appears that info() and writes to stdout in general won't work; warn() and stderr still work fine.
     SimEnd();
 }
@@ -1116,15 +1121,10 @@ VOID SimEnd() {
         for (AccessTraceWriter* t : *(zinfo->traceWriters)) t->dump(false);  // flushes trace writer
 
         if (zinfo->sched) zinfo->sched->notifyTermination();
-        // Ziqi: Deallocate nvoverlay, since it will not be auto freed
-        // This will flush traces that have not been written into the file
-        nvoverlay_free(zinfo->nvoverlay);
-        nvoverlay_printf("Decallocated NVOverlay instance\n");
     }
 
     //Uncomment when debugging termination races, which can be rare because they are triggered by threads of a dying process
     //sleep(5);
-
     exit(0);
 }
 
