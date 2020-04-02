@@ -36,6 +36,76 @@ void assert_uint64_power2(uint64_t num, const char *name) {
   if(popcount_uint64(num) != 1) error_exit("\"%s\" must be a power of two (see %lu)\n", name, num);
 }
 
+convertq_t convert_queue;
+
+// Removes trailing zeros for floating point numbers; Integers remain the same
+static void crop_trailing_zero(char *buf) {
+  char *p = buf;
+  int after_point = 0; // Whether we have seen decimal point
+  char *point = NULL;
+  while(*p) {
+    if(*p == '.') {
+      after_point = 1;
+      point = p;
+    } else if(after_point && *p == '0') {
+      int see_nonzero = 0;
+      char *q = p;
+      while(*q != '\0') {
+        if(*q != '0') {
+          see_nonzero = 1;
+          break;
+        }
+        q++;
+      }
+      if(see_nonzero == 0) {
+        *p = '\0';
+        break;
+      }
+    }
+    p++;
+  }
+  // Avoid trailing decimal point
+  if(point[1] == '\0') point[0] = '\0';
+  return;
+}
+
+const char *to_abbr(uint64_t n) {
+  char *buf = convertq_advance();
+  if(n >= 1000000UL) {
+    snprintf(buf, CONVERT_BUFFER_SIZE - 1, "%.3lf", (double)n / 1000000.0);
+    crop_trailing_zero(buf);
+    strcat(buf, "M");
+  } else if(n >= 1000UL) {
+    snprintf(buf, CONVERT_BUFFER_SIZE - 1, "%.3lf", (double)n / 1000.0);
+    crop_trailing_zero(buf);
+    strcat(buf, "K");
+  } else {
+    sprintf(buf, "%lu", n);
+  }
+  return buf;
+}
+
+// Convert uint64_t to size representation (using KB, MB, GB suffix)
+const char *to_size(uint64_t n) {
+  char *buf = convertq_advance();
+  if(n >= 1024UL * 1024UL * 1024UL) {
+    snprintf(buf, CONVERT_BUFFER_SIZE - 2, "%.3lf", (double)n / (1024.0 * 1024.0 * 1024.0));
+    crop_trailing_zero(buf);
+    strcat(buf, "GB");
+  } else if(n >= 1024UL * 1024UL) {
+    snprintf(buf, CONVERT_BUFFER_SIZE - 2, "%.3lf", (double)n / (1024.0 * 1024.0));
+    crop_trailing_zero(buf);
+    strcat(buf, "MB");
+  } else if(n >= 1024UL) {
+    snprintf(buf, CONVERT_BUFFER_SIZE - 2, "%.3lf", (double)n / 1024.0);
+    crop_trailing_zero(buf);
+    strcat(buf, "KB");
+  } else {
+    sprintf(buf, "%lu", n);
+  }
+  return buf;
+}
+
 //* conf_t
 
 // There is no guarantee that k and v are zero term string
@@ -435,13 +505,13 @@ const char *tracer_core_status_names[2] = {
 
 // Both functions do not append new line after the print
 void tracer_record_print(tracer_record_t *rec) {
-  printf("type %s (%d) id %d addr 0x%lX cycle %lu",
-    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle);
+  printf("type %s (%d) id %d addr 0x%lX cycle %lu serial %lu",
+    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle, rec->serial);
 }
 
 void tracer_record_print_buf(tracer_record_t *rec, char *buffer, int size) {
-  snprintf(buffer, size, "type %s (%d) id %d addr 0x%lX cycle %lu",
-    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle);
+  snprintf(buffer, size, "type %s (%d) id %d addr 0x%lX cycle %lu serial %lu",
+    tracer_record_type_names[rec->type], rec->type, rec->id, rec->line_addr, rec->cycle, rec->serial);
 }
 
 // mode is passed from the tracer init function
@@ -543,6 +613,13 @@ void tracer_core_begin(tracer_core_t *core) {
   core->read_index = core->max_index = 0; // This will trigger fill on first read
   core->read_count = 0UL;
   fseek(core->fp, 0, SEEK_SET);
+  // The next three will be updated
+  core->load_count = 0UL;
+  core->store_count = 0UL;
+  core->memop_count = 0UL;
+  core->l1_evict_count = 0UL;
+  core->l2_evict_count = 0UL;
+  core->l3_evict_count = 0UL;
   return;
 }
 
@@ -631,7 +708,7 @@ void tracer_set_cleanup(tracer_t *tracer, int value) {
 
 // Note: Cores calling this function concurrently may call flush() concurrently.
 // This will not have race condition, since we write to different files
-void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint64_t cycle) {
+void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   if(unlikely(tracer->mode != TRACER_MODE_WRITE)) {
     error_exit("Insert can only be called under write mode (see %d)\n", tracer->mode);
   }
@@ -650,6 +727,7 @@ void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint6
   core->buffer[index].id = id;
   core->buffer[index].line_addr = line_addr;
   core->buffer[index].cycle = cycle;
+  core->buffer[index].serial = serial;
   core->write_index++;
   core->record_count++;
   switch(type) {
@@ -660,6 +738,15 @@ void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint6
     case TRACER_STORE: {
       core->store_count++;
       core->memop_count++;
+    } break;
+    case TRACER_L1_EVICT: {
+      core->l1_evict_count++;
+    } break;
+    case TRACER_L2_EVICT: {
+      core->l2_evict_count++;
+    } break;
+    case TRACER_L3_EVICT: {
+      core->l3_evict_count++;
     } break;
     default: break;
   }
@@ -735,21 +822,47 @@ void tracer_begin(tracer_t *tracer) {
 
 // Selects a record with min cycle and return
 tracer_record_t *tracer_next(tracer_t *tracer) {
-  uint64_t min_cycle = -1UL;
+  uint64_t min_serial = -1UL;
   tracer_record_t *min_rec = NULL;
-  int min_index = -1;
+  tracer_core_t *min_core = NULL;
   for(int i = 0;i < tracer->core_count;i++) {
     tracer_core_t *core = tracer->cores[i];
     tracer_record_t *rec = tracer_core_peek(core);
     if(rec == NULL) {
       continue;
-    } else if(rec->cycle < min_cycle) {
-      min_cycle = rec->cycle;
+    } else if(rec->serial < min_serial) {
+      min_serial = rec->serial;
       min_rec = rec;
-      min_index = i;
+      min_core = core;
     }
   }
-  if(min_index != -1) tracer_core_next(tracer->cores[min_index]);
+  if(min_core != NULL) tracer_core_next(min_core);
+  // Count loads and stores
+  if(min_core != NULL) {
+    assert(min_rec != NULL);
+    switch(min_rec->type) {
+      case TRACER_LOAD: {
+        min_core->load_count++; 
+        min_core->memop_count++;
+        break;
+      } case TRACER_STORE: {
+        min_core->store_count++; 
+        min_core->memop_count++;
+        break;
+      } case TRACER_L1_EVICT: {
+        min_core->l1_evict_count++;
+        break;
+      } case TRACER_L2_EVICT: {
+        min_core->l2_evict_count++;
+        break;
+      } case TRACER_L3_EVICT: {
+        min_core->l3_evict_count++;
+        break;
+      } default: {
+        break;
+      }
+    }
+  }
   return min_rec; // Could be NULL meaning all cores are done
 }
 
@@ -782,28 +895,33 @@ void tracer_stat_print(tracer_t *tracer) {
   printf("---------- tracer_t ----------\n");
   uint64_t total_load = 0, total_store = 0, total_inst = 0, total_memop = 0;
   uint64_t total_record = 0, total_read = 0, total_fread = 0, total_fwrite = 0;
+  uint64_t total_l1_evict = 0, total_l2_evict = 0, total_l3_evict = 0;
   for(int i = 0;i < tracer->core_count;i++) {
     tracer_core_t *core = tracer->cores[i];
     tracer_core_flush(core);
-    printf("Core %d: load %lu store %lu inst %lu memop %lu record %lu reads %lu status %s\n",
-      core->id, core->load_count, core->store_count, core->inst_count, core->memop_count, core->record_count,
-      core->read_count, tracer_core_status_names[core->status]);
-    printf("  fread %lu fwrite %lu\n", core->fread_count, core->fwrite_count);
+    printf("Core %d: load %lu store %lu memop %lu inst %lu Evict L1 %lu L2 %lu L3 %lu\n",
+      core->id, core->load_count, core->store_count, core->memop_count, core->inst_count,
+      core->l1_evict_count, core->l2_evict_count, core->l3_evict_count);
+    printf("       %srecord %lu reads %lu status %s\n", core->id >= 10 ? "  " : " ",
+      core->record_count, core->read_count, tracer_core_status_names[core->status]);
+    printf("       %sfread %lu fwrite %lu sz %lu\n", core->id >= 10 ? "  " : " ",
+      core->fread_count, core->fwrite_count, core->filesize);
     total_load += core->load_count;
     total_store += core->store_count;
     total_inst += core->inst_count;
     total_memop += core->memop_count;
     total_record += core->record_count;
+    total_l1_evict += core->l1_evict_count;
+    total_l2_evict += core->l2_evict_count;
+    total_l3_evict += core->l3_evict_count;
     total_read += core->read_count;
     total_fread += core->fread_count;
     total_fwrite += core->fwrite_count;
-    if(tracer->mode == TRACER_MODE_READ) {
-      printf("    file size %lu\n", core->filesize);
-    }
   }
-  printf("Total: load %lu store %lu inst %lu memop %lu reocrd %lu reads %lu\n",
-    total_load, total_store, total_inst, total_memop, total_record, total_read);
-  printf("  fread %lu fwrite %lu\n", total_fread, total_fwrite);
+  printf("Total: load %lu store %lu memop %lu inst %lu Evict L1 %lu L2 %lu L3 %lu\n",
+    total_load, total_store, total_memop, total_inst, total_l1_evict, total_l2_evict, total_l3_evict);
+  printf("       reocrd %lu reads %lu fread %lu fwrite %lu\n", 
+    total_record, total_read, total_fread, total_fwrite);
   return;
 }
 

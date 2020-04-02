@@ -1,6 +1,51 @@
 
 #include "nvoverlay.h"
 
+//* fifo_t
+
+fifo_node_t *fifo_node_init() {
+  fifo_node_t *fifo_node = (fifo_node_t *)malloc(sizeof(fifo_node_t));
+  SYSEXPECT(fifo_node != NULL);
+  memset(fifo_node, 0x00, sizeof(fifo_node_t));
+  return fifo_node;
+}
+void fifo_node_free(fifo_node_t *fifo_node) { free(fifo_node); }
+
+fifo_t *fifo_init() {
+  fifo_t *fifo = (fifo_t *)malloc(sizeof(fifo_t));
+  SYSEXPECT(fifo != NULL);
+  memset(fifo, 0x00, sizeof(fifo_t));
+  return fifo;
+}
+
+void fifo_free(fifo_t *fifo) {
+  fifo_node_t *curr = fifo->head;
+  while(curr) {
+    fifo_node_t *next = curr->next;
+    fifo_node_free(curr);
+    curr = next;
+  }
+  free(fifo);
+  return;
+}
+
+void fifo_insert(fifo_t *fifo, uint64_t value, uint64_t cycle) {
+  fifo_node_t *node = fifo_node_init();
+  node->cycle = cycle;
+  node->value = value;
+  if(fifo->head == NULL) {
+    assert(fifo->tail == NULL);
+    node->next = NULL;
+    fifo->head = fifo->tail = node;
+  } else {
+    assert(fifo->tail != NULL);
+    fifo->tail->next = node;
+    fifo->tail = node;
+  }
+  fifo->item_count++;
+  return;
+}
+
 //* ht64_t
 
 ht64_node_t *ht64_node_init(uint64_t key, uint64_t value, ht64_node_t *next) {
@@ -635,9 +680,14 @@ overlay_epoch_t *omt_merge_line(omt_t *omt, overlay_epoch_t *overlay_epoch, uint
   // we always update the leaf node. If new pages are inserted we also add writes for 
   // updating new pages
   omt->write_count += (after_pages - before_pages + 1);
+  omt->merge_line_count++; // Incremented for every merge line
   // Swap out old and write new
   overlay_epoch_t *old_overlay_epoch = *overlay_epoch_p;
   *overlay_epoch_p = overlay_epoch;
+  // There is no previous data, and now we merge one line, so working set size + 64 bytes
+  if(old_overlay_epoch == NULL) {
+    omt->working_set_size += 64UL;
+  }
   return old_overlay_epoch;
 }
 
@@ -649,7 +699,9 @@ void omt_conf_print(omt_t *omt) {
 
 void omt_stat_print(omt_t *omt) {
   printf("---------- omt_t ----------\n");
-  printf("Table pages %lu size %lu\n", mtable_get_page_count(omt->mtable), mtable_get_size(omt->mtable));
+  printf("Table pages %lu table size %lu merges %lu working set size %lu\n", 
+    mtable_get_page_count(omt->mtable), mtable_get_size(omt->mtable),
+    omt->merge_line_count, omt->working_set_size);
   printf("Writes %lu (table merging)\n", omt->write_count);
   return;
 }
@@ -724,6 +776,17 @@ uint64_t cpu_min_epoch(cpu_t *cpu) {
     }
   }
   return min_epoch;
+}
+
+// Returns the max epoch. This is used for computing skew
+uint64_t cpu_max_epoch(cpu_t *cpu) {
+  uint64_t max_epoch = 0UL;
+  for(int i = 0;i < cpu->core_count;i++) {
+    if(cpu->cores[i].epoch > max_epoch) {
+      max_epoch = cpu->cores[i].epoch;
+    }
+  }
+  return max_epoch;
 }
 
 void cpu_tag_init(cpu_t *cpu, int level, int sets, int ways) {
@@ -884,6 +947,39 @@ void cpu_tag_walk(cpu_t *cpu, int id, uint64_t cycle, uint64_t target_epoch) {
     begin++;
   }
   return;
+}
+
+// Returns min_epoch or 0UL if the cache is empty
+// The caller will only merge epoch less than the return value
+uint64_t cpu_tag_walk_passive(cpu_t *cpu, int id) {
+  ver_t **begin = cpu_core_tag_begin(cpu, CPU_TAG_L2, id);
+  ver_t **end = cpu_core_tag_end(cpu, CPU_TAG_L2, begin);
+  uint64_t min_epoch = -1UL; // This is the maximum value
+  while(begin != end) {
+    ver_t *ver = *begin;
+    if(ver == NULL) { 
+      begin++; 
+      continue; 
+    }
+    // Find min dirty version in L1 and L2
+    uint64_t ver_min = -1UL; // By default it will not change ver_min, so setting it to largest
+    if(ver->owner != OWNER_OTHER) {
+      assert(ver->l2_state != STATE_I); // The version must be in L2
+      // L1 ver and L2 ver and states are available
+      if(ver->l2_state == STATE_M) {
+        // L1-L2 state being M-M or S-M or I-M
+        ver_min = ver->l2_ver;
+      } else if(ver->l1_state == STATE_M) {
+        // L1-L2 state being M-S
+        ver_min = ver->l1_ver;
+      }
+    }
+    // Update min epoch using current address's min
+    if(ver_min < min_epoch) min_epoch = ver_min;
+    begin++;
+  }
+  if(min_epoch == -1UL) min_epoch = 0UL;
+  return min_epoch;
 }
 
 // Report error and exit if inconsistency is found
@@ -1061,10 +1157,12 @@ void cpu_stat_print(cpu_t *cpu) {
   printf("---------- cpu_t ----------\n");
   printf("total advance %lu coherence %lu skip %lu\n", 
     cpu->total_advance_count, cpu->coherence_advance_count, cpu->skip_epoch_count);
+  printf("epoch min %lu max %lu\n", cpu_min_epoch(cpu), cpu_max_epoch(cpu));
   for(int i = 0;i < cpu->core_count;i++) {
     core_t *core = cpu_get_core(cpu, i);
-    printf("  Core %d: epoch st %lu total st %lu last walk %lu walk evict %lu\n", 
-      i, core->epoch_store_count, core->total_store_count, core->last_walk_epoch, core->tag_walk_evict_count);
+    printf("  Core %d: epoch st %lu total st %lu last walk %lu walk evict %lu walks %lu\n", 
+      i, core->epoch_store_count, core->total_store_count, core->last_walk_epoch, core->tag_walk_evict_count,
+      core->tag_walk_count);
   }
   return;
 }
@@ -1231,7 +1329,8 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
 // 2. Owner current L2 (must be dirty): Just fetch to L1 and let L1 store directly (see trick below) 
 // 3. Owner LLC + DRAM: Just fetch the block to L2 as clean and L1 as dirty in the same version
 //    There can be potentially shared cached version in other caches; Just invalidate them
-// 4. Owner other L1: Write back L2 if dirty; Ownership transfers to current L1
+// 4. Owner other L1: Write back L2 if dirty and version smaller; Ownership transfers to current L1 + L2
+// 5. Owner other L2: Transfer ownership to current L1 + L2; Both have same version number
 void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle) {
   ver_t *ver = vtable_insert(vtable, addr);
   assert(ver);
@@ -1304,11 +1403,12 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     vtable->core_recv_cb(vtable->nvoverlay, id, recv_version);
   } else {
     // Case 5
-    assert(ver->owner == OWNER_L2 && vtable_l1_sharer(ver) != id);
+    assert(ver->owner == OWNER_L2);
     assert(vtable_l1_num_sharer(ver) <= 1 && vtable_l2_num_sharer(ver) == 1);
     assert(ver->l2_state == STATE_M);
     if(vtable_l1_num_sharer(ver) == 1) {
       assert(vtable_l1_sharer(ver) == vtable_l2_sharer(ver));
+      assert(vtable_l1_sharer(ver) != id);
       assert(ver->l1_state == STATE_S);
     } else {
       assert(ver->l1_state == STATE_I);
@@ -1511,6 +1611,8 @@ void omcbuf_insert(omcbuf_t *omcbuf, uint64_t addr, uint64_t epoch, uint64_t cyc
       curr->epoch = epoch;
       curr->lru = ++omcbuf->lru_counter;
       omcbuf->miss_count++;
+      omcbuf->item_count++;
+      assert(omcbuf->item_count <= (uint64_t)omcbuf->ways * (uint64_t)omcbuf->sets);
       return;
     }
     curr++;
@@ -1538,6 +1640,27 @@ void omcbuf_insert(omcbuf_t *omcbuf, uint64_t addr, uint64_t epoch, uint64_t cyc
   return;
 }
 
+// Evict all versions < target epoch
+void omcbuf_tag_walk(omcbuf_t *omcbuf, uint64_t target_epoch, uint64_t cycle) {
+  int total = omcbuf->sets * omcbuf->ways;
+  int set_index = -1; // Since this will ++ on first iteration, we set it to -1 before loop
+  for(int i = 0;i < total;i++) {
+    omcbuf_entry_t *entry = omcbuf->array + i;
+    if(i % omcbuf->ways == 0) set_index++;
+    if(entry->epoch == -1UL) continue; // -1UL means invalid entry
+    if(entry->epoch < target_epoch) {
+      uint64_t evict_addr = ((entry->tag << omcbuf->set_idx_bits) | (uint64_t)set_index) << UTIL_CACHE_LINE_BITS;
+      omcbuf->evict_cb(omcbuf->nvoverlay, evict_addr, entry->epoch, cycle);
+      omcbuf->evict_count++;
+      omcbuf->tag_walk_evict_count++;
+      assert(omcbuf->item_count != 0UL);
+      omcbuf->item_count--;
+      entry->epoch = -1UL;
+    }
+  }
+  return;
+}
+
 void omcbuf_conf_print(omcbuf_t *omcbuf) {
   printf("---------- omcbuf_t ----------\n");
   printf("sets %d ways %d (size %lu bytes) mask 0x%lX set bits %d\n", omcbuf->sets, omcbuf->ways, 
@@ -1547,8 +1670,9 @@ void omcbuf_conf_print(omcbuf_t *omcbuf) {
 
 void omcbuf_stat_print(omcbuf_t *omcbuf) {
   printf("---------- omcbuf_t ----------\n");
-  printf("Access %lu hit %lu miss %lu evict %lu\n", 
-    omcbuf->access_count, omcbuf->hit_count, omcbuf->miss_count, omcbuf->evict_count);
+  printf("Access %lu hit %lu miss %lu evict %lu tag walk evict %lu\n", 
+    omcbuf->access_count, omcbuf->hit_count, omcbuf->miss_count, omcbuf->evict_count,
+    omcbuf->tag_walk_evict_count);
   return;
 }
 
@@ -1588,7 +1712,7 @@ void overlay_epoch_free(void *overlay_epoch) {
 }
 
 uint64_t overlay_page_size_class(int line_count) {
-  assert(line_count >= 0 && line_count < (int)(UTIL_PAGE_SIZE / UTIL_CACHE_LINE_SIZE));
+  assert(line_count >= 0 && line_count <= (int)(UTIL_PAGE_SIZE / UTIL_CACHE_LINE_SIZE));
   if(line_count <= 3) return 256UL;
   else if(line_count <= 7) return 512UL;
   else if(line_count <= 15) return 1024UL;
@@ -1701,7 +1825,7 @@ void overlay_insert(overlay_t *overlay, uint64_t addr, uint64_t epoch) {
   }
   assert(overlay_epoch->epoch == epoch);
   if(overlay_epoch->merged != 0) {
-    error_exit("Overlay epoch %lu has been merged; Insert is disabled\n", epoch);
+    error_exit("Overlay epoch %lu addr 0x%lX has been merged; Insert is disabled\n", epoch, addr);
   }
   overlay->size += overlay_epoch_insert(overlay_epoch, addr);
   return;
@@ -1763,9 +1887,15 @@ static void overlay_merge_epoch_cb(uint64_t page_addr, void *node, void *_arg) {
 void overlay_epoch_merge(overlay_t *overlay, uint64_t epoch, omt_t *omt) {
   // This will report error if epoch does not exist
   overlay_epoch_t *overlay_epoch = overlay_find(overlay, epoch);
-  assert(overlay_epoch != NULL);
+  // Trying to merge a non-existing epoch
+  if(overlay_epoch == NULL) {
+    return;
+  }
+  //assert(overlay_epoch != NULL);
   assert(overlay_epoch->merged == 0);
   overlay_epoch->merged = 1;
+  overlay->merge_count++; // Increment merge count
+  //printf("Merge epoch %lu\n", epoch);
   overlay_merge_cb_arg_t arg = {overlay, overlay_epoch, omt};
   overlay_epoch_traverse(overlay_epoch, overlay_merge_epoch_cb, &arg);
   return;
@@ -1815,8 +1945,9 @@ void overlay_conf_print(overlay_t *overlay) {
 void overlay_stat_print(overlay_t *overlay) {
   printf("---------- overlay_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(overlay->epochs), ht64_get_bucket_count(overlay->epochs));
-  printf("Active %lu init %lu gc'ed %lu size %lu (bytes)\n",
-    overlay->epoch_count, overlay->epoch_init_count, overlay->epoch_gc_count, overlay->size);
+  printf("Active %lu init %lu gc'ed %lu size %lu (bytes) merges %lu\n",
+    overlay->epoch_count, overlay->epoch_init_count, overlay->epoch_gc_count, overlay->size,
+    overlay->merge_count);
   return;
 }
 
@@ -2059,43 +2190,88 @@ void nvoverlay_free(nvoverlay_t *nvoverlay) {
   return;
 }
 
+// Check whether CPU mask matches active cores in tracer
+void nvoverlay_trace_driven_check_core_mask(nvoverlay_t *nvoverlay) {
+  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL);
+  int tracer_core_count = tracer_get_core_count(nvoverlay->tracer);
+  int cpu_core_count = cpu_get_core_count(nvoverlay->cpu);
+  if(tracer_core_count != cpu_core_count) {
+    printf("WARNING: Tracer core count (%d) does not equal CPU core count (%d)\n",
+      tracer_core_count, cpu_core_count);
+  }
+  int core_count = tracer_core_count < cpu_core_count ? tracer_core_count : cpu_core_count;
+  for(int i = 0;i < core_count;i++) {
+    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0 && 
+       tracer_get_core_record_count(nvoverlay->tracer, i) != 0) {
+      printf("WARNING: Core %d has record but is not set in the mask\n", i);
+      printf("Core mask: ");
+      bitmap64_print_bitstr(&nvoverlay->core_mask);
+      putchar('\n');
+      error_exit("Please see above error message\n");
+    } 
+  }
+  return;
+}
+
 void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
   if(nvoverlay->trace_driven_enabled == 0) {
     error_exit("Trace-driven simulation is disabled (set \"nvoverlaay.trace_driven\" to \"true\" to enable it)\n");
   }
   tracer_t *tracer = nvoverlay->tracer;
   assert(tracer);
-  uint64_t last_cycle;
+  uint64_t last_cycle = 0UL;
+  printf("*** Starting trace-driven simulation\n");
+  printf("0%%"); // Starting of the progress bar
   tracer_record_t *rec;
   tracer_begin(tracer);
   nvoverlay_trace_driven_cb_t cb = nvoverlay->trace_driven_cb;
+  // Only check this for full mode
+  if(nvoverlay->mode == NVOVERLAY_MODE_FULL) {
+    nvoverlay_trace_driven_check_core_mask(nvoverlay);
+  }
+  uint64_t count = 0UL;
+  int percent = 0;
+  const uint64_t quantum = tracer_get_record_count(nvoverlay->tracer) / 50;
   while((rec = tracer_next(tracer)) != NULL) {
     if(cb) cb(nvoverlay, rec); 
     last_cycle = rec->cycle;
     switch(rec->type) {
       case TRACER_LOAD: {
-        nvoverlay_intf.load_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle);
+        nvoverlay_intf.load_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       case TRACER_STORE: {
-        nvoverlay_intf.store_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle);
+        nvoverlay_intf.store_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       case TRACER_L1_EVICT: {
-        nvoverlay_intf.l1_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle);
+        nvoverlay_intf.l1_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       case TRACER_L2_EVICT: {
-        nvoverlay_intf.l2_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle);
+        nvoverlay_intf.l2_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       case TRACER_L3_EVICT: {
-        nvoverlay_intf.l3_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle);
+        nvoverlay_intf.l3_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       default: {
         error_exit("Unknown record type: %d\n", rec->type);
       } break;
     }
+    // Update progress bar
+    count++;
+    if(count == quantum) {
+      count = 0UL;
+      putchar('.');
+      // Percentage
+      percent += 2;
+      if(percent % 10 == 0) printf("%d%%", percent);
+      fflush(stdout); // Force display
+    }
   }
+  putchar('\n');
   printf("*** Finished trace-driven simulation @ cycle %lu\n", last_cycle);
   printf("*** Total records: %lu\n", tracer_get_record_count(nvoverlay->tracer));
   nvoverlay_stat_print(nvoverlay);
+  // Destroy the object
+  nvoverlay_free(nvoverlay);
   exit(0);
 }
 
@@ -2174,6 +2350,16 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   memset(nvoverlay->stable_epochs, 0x00, sizeof(uint64_t) * cpu_get_core_count(nvoverlay->cpu));
   // Must be after all options are read
   conf_print_unused(conf);
+  // Initialize the stable epoch mask to all-one, i.e. we use all cores
+  bitmap64_set_all_one(&nvoverlay->core_mask);
+  int passive_ret = conf_find_bool(conf, "nvoverlay.tag_walk_passive", &nvoverlay->tag_walk_passive);
+  if(passive_ret == 0) nvoverlay->tag_walk_passive = 0; // Proactive tag walk by default
+  // Sample frequency - if not then by default set to zero
+  if(conf_exists(conf, "nvoverlay.sample_freq") == 1) {
+    nvoverlay->sample_freq = conf_find_uint64_range(conf, "nvoverlay.sample_freq", 0, 0, CONF_ABBR);
+  } else {
+    nvoverlay->sample_freq = 0UL;
+  }
   // Trace-driven - This must be at the very end of the function
   nvoverlay_trace_driven_init(nvoverlay);
   return;
@@ -2187,6 +2373,11 @@ void nvoverlay_free_full(nvoverlay_t *nvoverlay) {
   overlay_free(nvoverlay->overlay);
   omcbuf_free(nvoverlay->omcbuf);
   nvm_free(nvoverlay->nvm);
+  // When trace driven is enabled we should also free the tracer
+  if(nvoverlay->tracer) {
+    assert(nvoverlay->trace_driven_enabled == 1);
+    tracer_free(nvoverlay->tracer);
+  }
   return;
 }
 
@@ -2262,7 +2453,62 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
 void nvoverlay_free_picl(nvoverlay_t *nvoverlay) {
   picl_free(nvoverlay->picl);
   nvm_free(nvoverlay->nvm);
+  if(nvoverlay->tracer) {
+    assert(nvoverlay->trace_driven_enabled == 1);
+    tracer_free(nvoverlay->tracer);
+  }
   return;
+}
+
+void nvoverlay_core_mask_add(nvoverlay_t *nvoverlay, int pos) {
+  if(pos < 0 || pos > BITMAP64_MAX_POS) {
+    error_exit("Illegal core ID (valid [0, %d], see %d)\n", pos, BITMAP64_MAX_POS);
+  }
+  bitmap64_add(&nvoverlay->core_mask, pos);
+  return;
+}
+
+void nvoverlay_core_mask_remove(nvoverlay_t *nvoverlay, int pos) {
+  if(pos < 0 || pos > BITMAP64_MAX_POS) {
+    error_exit("Illegal core ID (valid [0, %d], see %d)\n", pos, BITMAP64_MAX_POS);
+  }
+  bitmap64_remove(&nvoverlay->core_mask, pos);
+  return;
+}
+
+void nvoverlay_core_mask_set(nvoverlay_t *nvoverlay, int pos) { 
+  if(pos < 0 || pos > BITMAP64_MAX_POS) {
+    error_exit("Illegal core ID (valid [0, %d], see %d)\n", pos, BITMAP64_MAX_POS);
+  }
+  nvoverlay_core_mask_clear(nvoverlay); 
+  nvoverlay_core_mask_add(nvoverlay, pos);
+  return;
+}
+
+uint64_t nvoverlay_get_min_epoch(nvoverlay_t *nvoverlay) {
+  cpu_t *cpu = nvoverlay->cpu;
+  uint64_t min_epoch = -1UL;
+  for(int i = 0;i < nvoverlay->cpu->core_count;i++) {
+    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0) {
+      continue; // If the core is not in active core list just skip
+    } else if(cpu->cores[i].epoch < min_epoch) {
+      min_epoch = cpu->cores[i].epoch;
+    }
+  }
+  return min_epoch;
+}
+
+uint64_t nvoverlay_get_max_epoch(nvoverlay_t *nvoverlay) {
+  cpu_t *cpu = nvoverlay->cpu;
+  uint64_t max_epoch = 0UL;
+  for(int i = 0;i < nvoverlay->cpu->core_count;i++) {
+    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0) {
+      continue; // If the core is not in active core list just skip
+    } else if(cpu->cores[i].epoch > max_epoch) {
+      max_epoch = cpu->cores[i].epoch;
+    }
+  }
+  return max_epoch;
 }
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
@@ -2277,7 +2523,11 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
       overlay_conf_print(nvoverlay->overlay);
       nvm_conf_print(nvoverlay->nvm);
       printf("---------- nvoverlay_t ----------\n");
-      printf("Epoch size %lu tag walk freq %lu\n", nvoverlay->epoch_size, nvoverlay->tag_walk_freq);
+      printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
+        nvoverlay->epoch_size, nvoverlay->tag_walk_freq, nvoverlay->tag_walk_passive, nvoverlay->sample_freq);
+      printf("Core mask ");
+      bitmap64_print_bitstr(&nvoverlay->core_mask);
+      putchar('\n');
     } break;
     case NVOVERLAY_MODE_PICL: {
       nvm_conf_print(nvoverlay->nvm);
@@ -2297,6 +2547,10 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
   printf("++++++++++ nvoverlay_t stat ++++++++++\n");
   switch(nvoverlay->mode) {
     case NVOVERLAY_MODE_FULL: {
+      // Print tracer stat at the beginning if trace driven is enabled
+      if(nvoverlay->trace_driven_enabled == 1) {
+        tracer_stat_print(nvoverlay->tracer);
+      }
       omt_stat_print(nvoverlay->omt);
       cpu_stat_print(nvoverlay->cpu);
       vtable_stat_print(nvoverlay->vtable);
@@ -2304,9 +2558,18 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
       overlay_stat_print(nvoverlay->overlay);
       nvm_stat_print(nvoverlay->nvm);
       printf("---------- nvoverlay_t ----------\n");
-      printf("Last stable epoch %lu\n", nvoverlay->last_stable_epoch);
+      printf("Last stable epoch %lu; Total walks %lu\n", 
+        nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
+      printf("Masked cores: epoch min %lu max %lu\n", 
+        nvoverlay_get_min_epoch(nvoverlay), nvoverlay_get_max_epoch(nvoverlay));
+      printf("Samples %lu\n", nvoverlay->sample_count);
+      // Although it is not stat, print here to help interpret data
+      printf("Tag walk mode: %s\n", nvoverlay->tag_walk_passive ? "Passive" : "Normal");
     } break;
     case NVOVERLAY_MODE_PICL: {
+      if(nvoverlay->trace_driven_enabled == 1) {
+        tracer_stat_print(nvoverlay->tracer);
+      }
       nvm_stat_print(nvoverlay->nvm);
       picl_stat_print(nvoverlay->picl);
     } break;
@@ -2371,13 +2634,14 @@ static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, 
   return;
 }
 
-void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   // VTABLE drives tag array, OMCBUF, overlay and core epochs
   vtable_l1_load(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
+  (void)serial;
   return;
 }
-void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   cpu_t *cpu = nvoverlay->cpu;
   core_t *core = cpu_get_core(cpu, id);
   // This may trigger eviction, OMC write, overlay insert. Overlay GC is not included.
@@ -2389,18 +2653,40 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
     assert(core->epoch_store_count == 0UL);
   }
   assert(core->epoch >= core->last_walk_epoch);
+  // Determine whether we need tag walk on the core (tag walks are per-core)
   if(core->epoch - core->last_walk_epoch >= nvoverlay->tag_walk_freq) {
     // Perform tag walk
-    cpu_tag_walk(cpu, id, cycle, core->epoch);  // Make sure no version < epoch exists
+    if(nvoverlay->tag_walk_passive == 0) {
+      // Proactive tag walk: Evict cache lines older than current epoch of the core
+      cpu_tag_walk(cpu, id, cycle, core->epoch);  // Make sure no version < epoch exists
+      nvoverlay->stable_epochs[id] = core->epoch; // Update stable epoch (all ver < current epoch are evicted)
+    } else {
+      // Passive tag walk: Only scan the tag array and return min version in L2;
+      // It is guaranteed that no older version will be evicted in the future
+      uint64_t stable_epoch = cpu_tag_walk_passive(cpu, id);
+      if(stable_epoch > nvoverlay->stable_epochs[id]) {
+        nvoverlay->stable_epochs[id] = stable_epoch;
+      }
+    }
+    // Increment both local and global tag walk counter
+    nvoverlay->tag_walk_count++;
+    core->tag_walk_count++;
     core->last_walk_epoch = core->epoch;
-    nvoverlay->stable_epochs[id] = core->epoch; // Update stable epoch for the core (we use current epoch)
     // Compute global stable epoch
-    uint64_t min_epoch = -1UL;
+    uint64_t min_epoch = -1UL; // Largest value
     for(int i = 0;i < cpu_get_core_count(nvoverlay->cpu);i++) {
-      if(nvoverlay->stable_epochs[i] < min_epoch) min_epoch = nvoverlay->stable_epochs[i];
+      if(nvoverlay->stable_epochs[i] < min_epoch) {
+        // Only use the core to compute min stable epoch if the bit is set
+        if(bitmap64_is_set(&nvoverlay->core_mask, i)) {
+          min_epoch = nvoverlay->stable_epochs[i];
+        }
+      }
     }
     // Merge overlay to the master table in range [stable, min_epoch)
-    if(min_epoch > nvoverlay->last_stable_epoch) {
+    // -1UL means no core is compared in the previous loop
+    if(min_epoch != -1UL && min_epoch > nvoverlay->last_stable_epoch) {
+      // Also flush omcbuf to avoid writing cache lines back to overlay after the tag walk
+      omcbuf_tag_walk(nvoverlay->omcbuf, min_epoch, cycle); 
       for(uint64_t epoch = nvoverlay->last_stable_epoch; epoch < min_epoch;epoch++) {
         // This may trigger page GC and overlay GC; overlay size may change
         overlay_epoch_merge(nvoverlay->overlay, epoch, nvoverlay->omt);
@@ -2409,52 +2695,56 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
     }
   }
   // TODO: TRACK OVERLAY SIZE IN TIME SERIES GRAPH
+  (void)serial;
   return;
 } 
-void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l1_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
+  (void)serial;
   return;
 }
-void nvoverlay_full_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_full_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l2_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
+  (void)serial;
   return;
 }
-void nvoverlay_full_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_full_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l3_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
+  (void)serial;
   return;
 }
 
-void nvoverlay_tracer_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  tracer_insert(nvoverlay->tracer, TRACER_LOAD, id, line_addr, cycle);
+void nvoverlay_tracer_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  tracer_insert(nvoverlay->tracer, TRACER_LOAD, id, line_addr, cycle, serial);
   return;
 }
-void nvoverlay_tracer_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  tracer_insert(nvoverlay->tracer, TRACER_STORE, id, line_addr, cycle);
+void nvoverlay_tracer_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  tracer_insert(nvoverlay->tracer, TRACER_STORE, id, line_addr, cycle, serial);
   return;
 } 
-void nvoverlay_tracer_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  tracer_insert(nvoverlay->tracer, TRACER_L1_EVICT, id, line_addr, cycle);
+void nvoverlay_tracer_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  tracer_insert(nvoverlay->tracer, TRACER_L1_EVICT, id, line_addr, cycle, serial);
   return;
 }
-void nvoverlay_tracer_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  tracer_insert(nvoverlay->tracer, TRACER_L2_EVICT, id, line_addr, cycle);
+void nvoverlay_tracer_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  tracer_insert(nvoverlay->tracer, TRACER_L2_EVICT, id, line_addr, cycle, serial);
   return;
 }
-void nvoverlay_tracer_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  tracer_insert(nvoverlay->tracer, TRACER_L3_EVICT, id, line_addr, cycle);
+void nvoverlay_tracer_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  tracer_insert(nvoverlay->tracer, TRACER_L3_EVICT, id, line_addr, cycle, serial);
   return;
 }
 
-void nvoverlay_picl_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_picl_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   // Nothing to do
-  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle;
+  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle; (void)serial;
   return;
 }
-void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  (void)id;
+void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  (void)id; (void)serial;
   picl_t *picl = nvoverlay->picl;
   picl_store(picl, line_addr, cycle);
   if(picl_get_epoch_store_count(picl) == picl_get_epoch_size(picl)) {
@@ -2462,25 +2752,38 @@ void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
   }
   return;
 }
-void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   // Nothing to do
-  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle;
+  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle; (void)serial;
   return;
 }
-void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
+void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   // Nothing to do
-  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle;
+  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle; (void)serial;
   return;
 }
-void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  (void)id;
+void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  (void)id; (void)serial;
   picl_l3_eviction(nvoverlay->picl, line_addr, cycle);
   return;
 }
 
-void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle) {
-  nvoverlay_printf("Interface successfully attached. mode = %s\n", nvoverlay_mode_names[nvoverlay->mode]);
-  (void)nvoverlay; (void)id; (void)line_addr; (void)cycle;
+// This is the call back function shared by all modes; This function accepts the same arguments plus an extra
+// 64 bit integer in nvoverlay_intf object. It is called to fulfill all other purposes including some control tasks.
+void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  uint64_t arg = nvoverlay_intf.other_arg;
+  switch(arg) {
+    case NVOVERLAY_OTHER_HELLO: {
+      nvoverlay_printf("Interface successfully attached. mode = %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+      break;
+    } case NVOVERLAY_OTHER_INST: {
+      break;
+    } default: {
+      nvoverlay_error("Unknown arg: %lu\n", arg);
+      break;
+    }
+  }
+  (void)nvoverlay; (void)id; (void)line_addr; (void)cycle; (void)serial;
   return;
 }
 

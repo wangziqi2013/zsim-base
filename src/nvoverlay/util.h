@@ -84,6 +84,59 @@ void assert_uint64_power2(uint64_t num, const char *name);
 
 inline static int streq(const char *a, const char *b) { return strcmp(a, b) == 0; }
 
+// We can support 32 outstanding calls to the convert function
+#define CONVERT_BUFFER_COUNT 32
+#define CONVERT_BUFFER_SIZE  16
+typedef struct {
+  // First dimension buffer index; second dimension printed content
+  char buf[CONVERT_BUFFER_COUNT][CONVERT_BUFFER_SIZE];
+  int index; // Points to the next buffer
+} convertq_t;
+
+extern convertq_t convert_queue; // Inited to zero
+
+// Returns a pointer for use, and advance the index with possible wrap back
+inline static char *convertq_advance() {
+  char *buf = &convert_queue.buf[convert_queue.index][0];
+  convert_queue.index++;
+  if(convert_queue.index == CONVERT_BUFFER_COUNT) {
+    convert_queue.index = 0;
+  }
+  return buf;
+}
+
+// All converting functions preserve four effective digits (using %4lf)
+// Convert uint64_t type to abbr. form (using K or M suffix)
+const char *to_abbr(uint64_t n);
+// Convert uint64_t to size representation (using KB, MB, GB suffix)
+const char *to_size(uint64_t n);
+
+//* spinlock_t
+
+typedef struct {
+  volatile unsigned long flag;
+  unsigned long padding[7]; 
+} __attribute__ ((aligned(64))) spinlock_t;
+
+#ifndef _mm_pause_private
+#define _mm_pause_private() asm volatile(".byte 0xF3, 0x90" ::: "memory")
+#endif
+
+static inline void spinlock_init(volatile spinlock_t *lock) { lock->flag = 0; }
+static inline void spinlock_acquire(volatile spinlock_t *lock) { 
+  while(lock->flag == 1UL || __sync_lock_test_and_set(&lock->flag, 1UL) == 1UL) _mm_pause_private(); 
+}
+static inline void spinlock_release(volatile spinlock_t *lock) {
+  __sync_lock_release(&lock->flag);
+}
+static inline int spinlock_isfree(volatile spinlock_t *lock) {
+  return lock->flag == 0;
+}
+// Wait for the lock be become free, but do not acquire the lock
+static inline void spinlock_wait(volatile spinlock_t *lock) {
+  while(!spinlock_isfree(lock)) _mm_pause_private();
+}
+
 //* conf_t
 
 // Used in "options" of find_* functions
@@ -128,6 +181,7 @@ void conf_free(conf_t *conf);
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists
 int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns if the entry exists
 conf_node_t *conf_find(conf_t *conf, const char *key);        // Returns node pointer
+inline static int conf_exists(conf_t *conf, const char *key) { return conf_find(conf, key) != NULL; }
 int conf_find_str(conf_t *conf, const char *key, char **ret); // Returns 1 if found; 0 if not
 int conf_find_int32(conf_t *conf, const char *key, int *ret);       // Returns 1 if converts successfully
 int conf_find_uint64(conf_t *conf, const char *key, uint64_t *ret); // Returns 1 if converts successfully
@@ -217,6 +271,7 @@ typedef struct {
   uint8_t id;           // Core ID
   uint64_t line_addr;   // Address of the memop
   uint64_t cycle;       // Cycle of the op
+  uint64_t serial;      // Serial number for multicore running - use this to sort
 } tracer_record_t;
 
 typedef struct {
@@ -229,12 +284,16 @@ typedef struct {
   int id;          // Core ID
   int status;      // Set to 0 if it stops accepting traces
   // Statistics
-  uint64_t filesize;
-  uint64_t record_count; // Set for both reads and writes
-  uint64_t load_count;
-  uint64_t store_count;
+  uint64_t filesize;     // Set on open file on read; Updated on flush for writes
+  uint64_t record_count; // Set on open file on read; Updated on flush for writes
+  uint64_t load_count;   // Updated on tracer_insert() for write, and tracer_next() for read
+  uint64_t store_count;  // Same as above
+  uint64_t memop_count;  // Equals load + store, update rule same as above
+  // Same as above
+  uint64_t l1_evict_count;
+  uint64_t l2_evict_count;
+  uint64_t l3_evict_count;
   uint64_t inst_count;   // This is only sync'ed on loads or stores (core must support)
-  uint64_t memop_count;  // Equals load + store
   uint64_t read_count;   // Only used for read - number of records read from the file
   uint64_t fread_count;  // Library call counts
   uint64_t fwrite_count;
@@ -279,7 +338,7 @@ void tracer_set_cap_mode(tracer_t *trace, int cap_mode, uint64_t cap);
 void tracer_set_cleanup(tracer_t *tracer, int value);
 
 void tracer_halt_core(tracer_t *tracer, int id);
-void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint64_t cycle);
+void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 // Print [begin, begin + count) records
 void tracer_print(tracer_t *tracer, int id, uint64_t begin, uint64_t count); 
 
