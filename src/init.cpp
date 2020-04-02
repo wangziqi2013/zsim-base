@@ -884,7 +884,9 @@ static void InitSystem(Config& config) {
     nvoverlay_printf("Added %d configuration nodes from zsim to nvoverlay\n", conf_count);
     conf_dump(nvoverlay_get_conf(zinfo->nvoverlay), "nvoverlay_zsim_dump.txt"); // Dump the conf file
     nvoverlay_check_conf(zinfo->nvoverlay);
-    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0);
+    // Print hello world as interface test
+    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_HELLO;
+    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
     info("Initialized system");
 }
 
