@@ -31,6 +31,9 @@
 #include "galloc.h"
 #include "zsim.h"
 
+// Ziqi: Serializing access in real-time order
+extern uint64_t core_serial;
+
 /* Extends Cache with an L0 direct-mapped cache, optimized to hell for hits
  *
  * L1 lookups are dominated by several kinds of overhead (grab the cache locks,
@@ -117,7 +120,7 @@ class FilterCache : public Cache {
                             line_addr, tracer_get_record_count(nvoverlay_get_tracer(zinfo->nvoverlay)));
                     }
                     */
-                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, curCycle);
+                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, curCycle, core_serial++);
                 }
                 return MAX(curCycle, availCycle);
             } else {
@@ -131,7 +134,7 @@ class FilterCache : public Cache {
                             line_addr, tracer_get_record_count(nvoverlay_get_tracer(zinfo->nvoverlay)));
                     }
                     */
-                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, ret);
+                    nvoverlay_intf.load_cb(zinfo->nvoverlay, this->id, line_addr, ret, core_serial++);
                 }
                 return ret;
             }
@@ -147,7 +150,7 @@ class FilterCache : public Cache {
                 // Ziqi: Insert store
                 // Cache store hit - do not need to worry about evictions
                 if(this->level != -1U) {
-                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, curCycle);
+                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, curCycle, core_serial++);
                 }
                 //NOTE: Stores don't modify availCycle; we'll catch matches in the core
                 //filterArray[idx].availCycle = curCycle; //do optimistic store-load forwarding
@@ -157,7 +160,7 @@ class FilterCache : public Cache {
                 uint64_t ret = replace(vLineAddr, idx, false, curCycle);
                 if(this->level != -1U) {
                     // Ziqi: Note we use return value from L1 access() method to order the store after eviction
-                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, ret);
+                    nvoverlay_intf.store_cb(zinfo->nvoverlay, this->id, line_addr, ret, core_serial++);
                 }
                 return ret;
             }

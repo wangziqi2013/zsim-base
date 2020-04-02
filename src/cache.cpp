@@ -30,8 +30,6 @@
 #include "timing_event.h"
 #include "zsim.h"
 
-//pending_access_t pending_access;
-
 Cache::Cache(uint32_t _numLines, CC* _cc, CacheArray* _array, ReplPolicy* _rp, uint32_t _accLat, uint32_t _invLat, const g_string& _name)
     : cc(_cc), array(_array), rp(_rp), numLines(_numLines), accLat(_accLat), invLat(_invLat), name(_name) {}
 
@@ -90,13 +88,13 @@ uint64_t Cache::access(MemReq& req) {
             if(cc->isValid(lineId) == true) {
                 switch(this->level) {
                     case 1: {
-                        nvoverlay_intf.l1_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        nvoverlay_intf.l1_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle, core_serial++);
                         break;
                     } case 2: {
-                        nvoverlay_intf.l2_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        nvoverlay_intf.l2_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle, core_serial++);
                         break;
                     } case 3: {
-                        nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle);
+                        nvoverlay_intf.l3_evict_cb(zinfo->nvoverlay, this->id, wbLineAddr << lineBits, respCycle, core_serial++);
                         break;
                     } case -1: {
                         break; // Ignore instruction L1 cache's eviction

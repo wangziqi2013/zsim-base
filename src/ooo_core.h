@@ -40,6 +40,10 @@
 
 class FilterCache;
 
+// Global lock for core memory access serialization
+extern spinlock_t core_lock;
+extern uint64_t core_serial;
+
 /* 2-level branch predictor:
  *  - L1: Branch history shift registers (bshr): 2^NB entries, HB bits of history/entry, indexed by XOR'd PC
  *  - L2: Pattern history table (pht): 2^LB entries, 2-bit sat counters, indexed by XOR'd bshr contents

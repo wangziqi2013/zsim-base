@@ -36,6 +36,9 @@
 
 class Network;
 
+// Ziqi: Serializing access in real-time order
+extern uint64_t core_serial;
+
 /*
 typedef struct {
     int pending;

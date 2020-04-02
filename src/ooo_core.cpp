@@ -41,6 +41,9 @@
 #define DEBUG_MSG(args...)
 //#define DEBUG_MSG(args...) info(args)
 
+spinlock_t core_lock;
+uint64_t core_serial = 0UL;
+
 // Core parameters
 // TODO(dsm): Make OOOCore templated, subsuming these
 
@@ -268,7 +271,10 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     Address addr = loadAddrs[loadIdx++];
                     uint64_t reqSatisfiedCycle = dispatchCycle;
                     if (addr != ((Address)-1L)) {
+                        // Ziqi: Serialize core load and store
+                        spinlock_acquire(&core_lock);
                         reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
+                        spinlock_release(&core_lock);
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
                     }
 
@@ -305,7 +311,10 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
                     Address addr = storeAddrs[storeIdx++];
+                    // Ziqi: Serialize core load and store
+                    spinlock_acquire(&core_lock);
                     uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
+                    spinlock_release(&core_lock);
                     cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
 
                     // Fill the forwarding table
