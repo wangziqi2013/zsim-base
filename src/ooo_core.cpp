@@ -358,6 +358,10 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     bbls++;
     approxInstrs += bbl->approxInstrs;
 
+    // Ziqi: Report instruction count to NVOverlay
+    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
+    nvoverlay_intf.other_cb(zinfo->nvoverlay, this->id, 0UL, instrs, 0UL);
+
 #ifdef BBL_PROFILING
     if (approxInstrs) Decoder::profileBbl(bbl->bblIdx);
 #endif
