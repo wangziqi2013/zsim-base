@@ -73,6 +73,10 @@ enum ProcExitStatus {
     PROC_RESTARTME  = 2
 };
 
+// Global lock for core memory access serialization
+extern spinlock_t core_lock;
+extern uint64_t core_serial;
+
 struct GlobSimInfo {
     //System configuration values, all read-only, set at initialization
     uint32_t numCores;

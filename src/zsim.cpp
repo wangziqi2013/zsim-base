@@ -584,10 +584,9 @@ VOID Instruction(INS ins) {
             case REG_R8: { // Sim begin
                 break;
             } case REG_R9: { // Sim end
-                // TODO: CALL INTF TO PRINT STAT AND CONF IF FULL MODE
                 if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
                    nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
-                    nvoverlay_printf("Finished simulation\n");
+                    nvoverlay_printf("Finished online simulation.\n");
                     // Print conf
                     nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
                     nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
@@ -595,12 +594,24 @@ VOID Instruction(INS ins) {
                     nvoverlay_intf.other_arg = NVOVERLAY_OTHER_STAT;
                     nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
                 } else if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_TRACER) {
-                    for()
-                    zinfo->
+                    nvoverlay_printf("Finished tracer generation simulation.\n");
+                    nvoverlay_printf("Inserting core inst count for %u cores\n", zinfo->numCores);
+                    for(int i = 0;i < (int)zinfo->numCores;i++) {
+                        Core *core = zinfo->cores[i];
+                        uint64_t inst_count = core->getInstrs();
+                        // Insert a record for inst count into tracer which is the last record
+                        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
+                        // This should only be run under single thread mode, but we acquire the lock just in case
+                        spinlock_acquire(&core_lock);
+                        // Pass inst count as argument "cycle"
+                        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, inst_count, core_serial++);
+                        spinlock_release(&core_lock);
+                    }
                 }
                 nvoverlay_printf("Decallocating NVOverlay object\n");
                 nvoverlay_free(zinfo->nvoverlay);
                 zinfo->nvoverlay = NULL;
+                nvoverlay_intf = nvoverlay_intf_noop;
                 nvoverlay_printf("Done\n");
                 break;
             } case REG_R10: { // Mt sim begin
@@ -608,8 +619,8 @@ VOID Instruction(INS ins) {
             } default: {
                 break;
             }
-        }
-    }
+        } // NVOverlay defined magic op switch branch
+    } // Magic op if branch
 
     if (INS_Opcode(ins) == XED_ICLASS_CPUID) {
        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) FakeCPUIDPre, IARG_THREAD_ID, IARG_REG_VALUE, REG_EAX, IARG_REG_VALUE, REG_ECX, IARG_END);
