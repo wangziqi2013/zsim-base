@@ -578,6 +578,37 @@ VOID Instruction(INS ins) {
     if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == REG_RCX && INS_OperandReg(ins, 1) == REG_RCX) {
         //info("Instrumenting magic op");
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
+    } else if(INS_IsXchg(ins) && INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
+        // Ziqi: Handle magic code here
+        switch(INS_OperandReg(ins, 0)) {
+            case REG_R8: { // Sim begin
+                break;
+            } case REG_R9: { // Sim end
+                // TODO: CALL INTF TO PRINT STAT AND CONF IF FULL MODE
+                if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
+                   nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
+                    nvoverlay_printf("Finished simulation\n");
+                    // Print conf
+                    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
+                    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
+                    // Print stat
+                    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_STAT;
+                    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
+                } else if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_TRACER) {
+                    for()
+                    zinfo->
+                }
+                nvoverlay_printf("Decallocating NVOverlay object\n");
+                nvoverlay_free(zinfo->nvoverlay);
+                zinfo->nvoverlay = NULL;
+                nvoverlay_printf("Done\n");
+                break;
+            } case REG_R10: { // Mt sim begin
+                break;
+            } default: {
+                break;
+            }
+        }
     }
 
     if (INS_Opcode(ins) == XED_ICLASS_CPUID) {
@@ -1077,11 +1108,6 @@ VOID AfterForkInChild(THREADID tid, const CONTEXT* ctxt, VOID * arg) {
 
 VOID Fini(int code, VOID * v) {
     info("Finished, code %d", code);
-    // Ziqi: Deallocate nvoverlay, since it will not be auto freed
-    // This will flush traces that have not been written into the file
-    nvoverlay_free(zinfo->nvoverlay);
-    fprintf(stderr, "[NVOverlay] Decallocated NVOverlay instance\n");
-    fprintf(stderr, "[NVOverlay] Simulation finished. Exit now\n");
     //NOTE: In fini, it appears that info() and writes to stdout in general won't work; warn() and stderr still work fine.
     SimEnd();
 }
