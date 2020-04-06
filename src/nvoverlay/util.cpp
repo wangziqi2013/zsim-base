@@ -1,6 +1,12 @@
 
 #include "util.h"
 
+uint64_t round_up_power2_uint64(uint64_t n) {
+	n--;
+	while (n & (n - 1)) n = n & (n - 1);
+	return n << 1;
+}
+
 // Returning the log2 of the input number which must itself be power of two
 // Report error and exit if not; The name is a string for the error message
 int util_log2_int32(int num, const char *name) {
@@ -491,8 +497,8 @@ const char *tracer_cap_mode_names[5] = {
   "CAP_MODE_STORE", "CAP_MODE_MEMOP",
 };
 
-const char *tracer_record_type_names[5] = {
-  "LOAD", "STORE", "L1-EVICT", "L2-EVICT", "L3-EVICT",
+const char *tracer_record_type_names[7] = {
+  "LOAD", "STORE", "L1-EVICT", "L2-EVICT", "L3-EVICT", "INST", "CYCLE",
 };
 
 const char *tracer_cleanup_names[2] = {
@@ -748,7 +754,7 @@ void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint6
     case TRACER_L3_EVICT: {
       core->l3_evict_count++;
     } break;
-    default: break;
+    default: break; // There can be other types of records
   }
   if((tracer->cap_mode == TRACER_CAP_MODE_LOAD && core->load_count == tracer->cap) || 
      (tracer->cap_mode == TRACER_CAP_MODE_STORE && core->store_count == tracer->cap) || 
@@ -763,7 +769,7 @@ void tracer_insert(tracer_t *tracer, int type, int id, uint64_t line_addr, uint6
       printf("*** Configuration\n");
       tracer_conf_print(tracer);
       printf("*** Statistics\n");
-      tracer_stat_print(tracer);
+      tracer_stat_print(tracer, 1); // Always verbose
 #ifdef UTIL_TEST
       printf("*** tracer->cap_debug != 0 resume normal execution!\n");
 #else
@@ -891,7 +897,7 @@ void tracer_conf_print(tracer_t *tracer) {
   return;
 }
 
-void tracer_stat_print(tracer_t *tracer) {
+void tracer_stat_print(tracer_t *tracer, int verbose) {
   printf("---------- tracer_t ----------\n");
   uint64_t total_load = 0, total_store = 0, total_inst = 0, total_memop = 0;
   uint64_t total_record = 0, total_read = 0, total_fread = 0, total_fwrite = 0;
@@ -899,13 +905,15 @@ void tracer_stat_print(tracer_t *tracer) {
   for(int i = 0;i < tracer->core_count;i++) {
     tracer_core_t *core = tracer->cores[i];
     tracer_core_flush(core);
-    printf("Core %d: load %lu store %lu memop %lu inst %lu Evict L1 %lu L2 %lu L3 %lu\n",
-      core->id, core->load_count, core->store_count, core->memop_count, core->inst_count,
-      core->l1_evict_count, core->l2_evict_count, core->l3_evict_count);
-    printf("       %srecord %lu reads %lu status %s\n", core->id >= 10 ? "  " : " ",
-      core->record_count, core->read_count, tracer_core_status_names[core->status]);
-    printf("       %sfread %lu fwrite %lu sz %lu\n", core->id >= 10 ? "  " : " ",
-      core->fread_count, core->fwrite_count, core->filesize);
+    if(verbose) {
+      printf("Core %d: load %lu store %lu memop %lu inst %lu Evict L1 %lu L2 %lu L3 %lu\n",
+        core->id, core->load_count, core->store_count, core->memop_count, core->inst_count,
+        core->l1_evict_count, core->l2_evict_count, core->l3_evict_count);
+      printf("       %srecord %lu reads %lu status %s\n", core->id >= 10 ? "  " : " ",
+        core->record_count, core->read_count, tracer_core_status_names[core->status]);
+      printf("       %sfread %lu fwrite %lu sz %lu\n", core->id >= 10 ? "  " : " ",
+        core->fread_count, core->fwrite_count, core->filesize);
+    }
     total_load += core->load_count;
     total_store += core->store_count;
     total_inst += core->inst_count;

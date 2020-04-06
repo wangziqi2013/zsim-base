@@ -30,8 +30,7 @@ struct ver_struct_t;
 //* fifo_t
 
 typedef struct fifo_node_struct_t {
-  uint64_t cycle;  // Cycle when the sample is taken
-  uint64_t value;  // Value of the variable we sample
+  uint64_t value;  // Value of the variable
   struct fifo_node_struct_t *next;
 } fifo_node_t;
 
@@ -47,15 +46,14 @@ typedef struct {
 fifo_t *fifo_init();
 void fifo_free(fifo_t *fifo);
 
-void fifo_insert(fifo_t *fifo, uint64_t value, uint64_t cycle);
+void fifo_insert(fifo_t *fifo, uint64_t value);
 
 // Iterator type
 typedef fifo_node_t *fifo_it_t;
 
-inline static void fifo_begin(fifo_t *fifo, fifo_it_t *it) { *it = fifo->head; }
-inline static int fifo_is_end(fifo_it_t *it) { return *it == NULL; }
-inline static void fifo_next(fifo_it_t *it) { *it = (*it)->next; }
-inline static uint64_t fifo_it_cycle(fifo_it_t *it) { return (*it)->cycle; }
+inline static void fifo_begin(fifo_t *fifo, fifo_it_t *it) { *it = fifo->head; (void)fifo; }
+inline static int fifo_is_end(fifo_t *fifo, fifo_it_t *it) { return *it == NULL; (void)fifo; }
+inline static void fifo_next(fifo_t *fifo, fifo_it_t *it) { *it = (*it)->next; (void)fifo; }
 inline static uint64_t fifo_it_value(fifo_it_t *it) { return (*it)->value; }
 
 inline static uint64_t fifo_get_item_count(fifo_t *fifo) { return fifo->item_count; }
@@ -290,6 +288,8 @@ omt_t *omt_init();
 void omt_free(omt_t *omt);
 
 inline static uint64_t omt_get_write_count(omt_t *omt) { return omt->write_count; }
+inline static uint64_t omt_get_working_set_size(omt_t *omt) { return omt->working_set_size; }
+inline static uint64_t omt_get_size(omt_t *omt) { return mtable_get_size(omt->mtable); }
 inline static struct overlay_epoch_struct_t *omt_find(omt_t *omt, uint64_t line_addr) {
   ASSERT_CACHE_ALIGNED(line_addr);
   return (struct overlay_epoch_struct_t *)mtable_find(omt->mtable, line_addr);
@@ -297,6 +297,8 @@ inline static struct overlay_epoch_struct_t *omt_find(omt_t *omt, uint64_t line_
 
 struct overlay_epoch_struct_t *omt_merge_line(
   omt_t *omt, struct overlay_epoch_struct_t *overlay_epoch, uint64_t line_addr);
+
+void omt_selfcheck(omt_t *omt);
 
 void omt_conf_print(omt_t *omt);
 void omt_stat_print(omt_t *omt);
@@ -308,6 +310,12 @@ struct ver_struct_t;
 // Since we represent sharer's list with uint64_t, there can only be 64 cores at most
 #define CORE_COUNT_MAX (BITMAP64_MAX_POS + 1)
 
+// These two are used with cap_status
+#define CORE_CAP_STATUS_ACTIVE   0
+#define CORE_CAP_STATUS_HALTED   1
+
+extern const char *core_cap_status_names[2];
+
 // This struct holds processor-local variables
 typedef struct {
   uint64_t epoch;    // Current local epoch
@@ -317,6 +325,9 @@ typedef struct {
   uint64_t total_store_count;    // Total number of stores
   uint64_t tag_walk_evict_count; // Number of cache lines evicted from cache walk
   uint64_t tag_walk_count;       // Per-core tag walk count
+  uint64_t last_inst_count;      // This is updated by a special reporting record
+  uint64_t last_cycle_count;     // This is updated by a special call back, only during online sim
+  int cap_status;                // Status on cap, see CORE_CAP_* above
 } core_t;
 
 core_t *core_init();
@@ -362,6 +373,8 @@ typedef struct {
   uint64_t coherence_advance_count;  // Number of advances caused by coherence
   uint64_t skip_epoch_count;         // Number of times a core advances its epoch by more than 1
   uint64_t total_advance_count;      // Total number of advances including all reasons
+  uint64_t total_inst_count;         // Total number of inst reported on all cores
+  uint64_t total_cycle_count;        // Total number of cycles reported on all cores
 } cpu_t;
 
 cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t cb);
@@ -441,9 +454,11 @@ inline static int cpu_get_core_count(cpu_t *cpu) { return cpu->core_count; }
 int cpu_tag_get_ways(cpu_t *cpu, int level);
 int cpu_tag_get_sets(cpu_t *cpu, int level);
 
+void cpu_selfcheck(cpu_t *cpu);
+
 // Called by nvoverlay after init
 void cpu_conf_print(cpu_t *cpu);
-void cpu_stat_print(cpu_t *cpu);
+void cpu_stat_print(cpu_t *cpu, int verbose);
 
 //* vtable_t
 
@@ -494,9 +509,19 @@ typedef struct vtable_struct_t {
   vtable_core_tag_cb_t core_tag_cb;     // Core tag change function - same as above
   struct nvoverlay_struct_t *nvoverlay; // Back pointer used for call back function
   // Statistics
-  uint64_t omc_eviction_count;
-  uint64_t llc_eviction_count;
+  uint64_t omc_evict_count;
+  uint64_t llc_evict_count;
+  // Events that caused eviction to OMC
+  uint64_t st_evict_count;      // Store write back
+  uint64_t ld_inv_evict_count;  // Load downgrade to dirty line
+  uint64_t st_inv_evict_count;  // Store invalidation to dirty line
+  uint64_t l1_cap_evict_count;  // L1 capacity miss eviction (not including those triggered by L2)
+  uint64_t l2_cap_evict_count;  // L2 capacity miss eviction (not including those triggered by L3)
+  uint64_t l3_cap_evict_count;  // L3 capacity miss eviction
 } vtable_t;
+
+inline static uint64_t vtable_get_omc_evict_count(vtable_t *vtable) { return vtable->omc_evict_count; }
+inline static uint64_t vtable_get_llc_evict_count(vtable_t *vtable) { return vtable->llc_evict_count; }
 
 vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, vtable_core_tag_cb_t core_tag_cb);
 void vtable_free(vtable_t *vtable);
@@ -510,8 +535,8 @@ inline static ver_t *vtable_find(vtable_t *vtable, uint64_t addr) {
 
 // We call this eviction wrapper for statistics
 inline static void vtable_evict_wrapper(vtable_t *vtable, uint64_t addr, int id, uint64_t version, uint64_t cycle, int type) {
-  if(type | EVICT_LLC) vtable->llc_eviction_count++;
-  if(type | EVICT_OMC) vtable->omc_eviction_count++;
+  if(type & EVICT_LLC) vtable->llc_evict_count++;
+  if(type & EVICT_OMC) vtable->omc_evict_count++;
   vtable->evict_cb(vtable->nvoverlay, addr, id, version, cycle, type);
   return;
 }
@@ -572,7 +597,11 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
 void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle);
 
 void vtable_l1_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle);
-void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle);
+// It takes an extra arg since L3 evict also calls this function
+void _vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle, int from_l3);
+inline static void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle) {
+  _vtable_l2_eviction(vtable, addr, id, epoch, cycle, 0); // From L3 is set to zero
+}
 void vtable_l3_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle);
 
 // Called by nvoverlay after init
@@ -628,6 +657,7 @@ inline static uint64_t omcbuf_addr_gen(omcbuf_t *omcbuf, uint64_t tag, int set) 
 inline static uint64_t omcbuf_get_evict_count(omcbuf_t *omcbuf) { return omcbuf->evict_count; }
 inline static uint64_t omcbuf_get_tag_walk_evict_count(omcbuf_t *omcbuf) { return omcbuf->tag_walk_evict_count; }
 inline static uint64_t omcbuf_get_item_count(omcbuf_t *omcbuf) { return omcbuf->item_count; }
+inline static uint64_t omcbuf_get_access_count(omcbuf_t *omcbuf) { return omcbuf->access_count; }
 
 // Called by nvoverlay after init
 void omcbuf_conf_print(omcbuf_t *omcbuf);
@@ -653,10 +683,14 @@ typedef struct overlay_struct_t {
   ht64_t *epochs;              // We use hash table to map epoch number to the overlay_t object
   // Statistics
   uint64_t size;               // Sum of all nodes' size variables in the linked list
+  uint64_t min_size;           // This is size of overlay with page shrinking
   uint64_t epoch_count;        // Number of epochs in the mapping table
   uint64_t epoch_init_count;   // Total number of insertions
   uint64_t epoch_gc_count;     // Total number of GC'ed epochs
   uint64_t merge_count;        // Number of merges into this OMT
+  uint64_t line_gc_count;      // Number of lines that are GC'ed
+  uint64_t page_gc_count;      // Number of pages that are GC'ed
+  uint64_t page_gc_size;       // Sum of GC'ed page sizes (we use non-shrinking page size, i.e. bitmap not ref count)
 } overlay_t;
 
 overlay_page_t *overlay_page_init();
@@ -673,10 +707,16 @@ uint64_t overlay_epoch_insert(overlay_epoch_t *overlay_epoch, uint64_t addr);
 // Addr here should be page aligned
 overlay_page_t *overlay_epoch_find(overlay_epoch_t *overlay_epoch, uint64_t addr);
 
-uint64_t overlay_epoch_line_count(overlay_epoch_t *overlay_epoch); // Count number of lines in the node
 inline static void overlay_epoch_traverse(overlay_epoch_t *overlay_epoch, matble_traverse_cb_t cb, void *arg) {
   mtable_traverse(overlay_epoch->mtable, cb, arg);
 }
+
+uint64_t overlay_epoch_line_count(overlay_epoch_t *overlay_epoch); // Count number of lines in the node
+uint64_t overlay_epoch_size(overlay_epoch_t *epoch); // Compute overlay storage using bitmap (not ref count)
+uint64_t overlay_epoch_min_size(overlay_epoch_t *epoch); // Compute minimum storage to store the epoch
+uint64_t overlay_mapping_size(overlay_t *overlay); // Compute sum of mapping table sizes on existing epochs
+uint64_t overlay_line_count(overlay_t *overlay); // Compute cache line counts in all epochs using bitmaps
+
 void overlay_epoch_print(overlay_epoch_t *overlay_epoch);
 
 inline static uint64_t overlay_epoch_get_overlay_page_count(overlay_epoch_t *overlay_epoch) {
@@ -698,7 +738,6 @@ inline static overlay_epoch_t *overlay_find(overlay_t *overlay, uint64_t epoch) 
 }
 overlay_page_t *overlay_find_page(overlay_t *overlay, uint64_t epoch, uint64_t page_addr);
 
-
 inline static uint64_t overlay_get_size(overlay_t *overlay) { return overlay->size; }
 inline static uint64_t overlay_get_epoch_count(overlay_t *overlay) { return overlay->epoch_count; }
 
@@ -713,6 +752,8 @@ typedef struct {
 void overlay_epoch_merge(overlay_t *overlay, uint64_t epoch, omt_t *omt); // Merge the given epoch to OMT
 void overlay_line_unlink(overlay_t *overlay, overlay_epoch_t *overlay_epoch, uint64_t page_addr);
 void overlay_gc_epoch(overlay_t *overlay, overlay_epoch_t *overlay_epoch);
+
+void overlay_selfcheck(overlay_t *overlay);
 
 // Called by nvoverlay after init
 void overlay_conf_print(overlay_t *overlay);
@@ -755,6 +796,8 @@ uint64_t nvm_min(nvm_t *nvm);  // Returns the minimum next available cycle acros
 
 inline static int nvm_get_bank_count(nvm_t *nvm) { return nvm->bank_count; }
 inline static uint64_t nvm_get_wlat(nvm_t *nvm) { return nvm->wlat; }
+inline static uint64_t nvm_get_read_count(nvm_t *nvm) { return nvm->read_count; }
+inline static uint64_t nvm_get_write_count(nvm_t *nvm) { return nvm->write_count; }
 
 // Generate address that can be mapped to a certain bank of the NVM
 uint64_t nvm_addr_gen(nvm_t *nvm, uint64_t tag, uint64_t bank);
@@ -765,6 +808,9 @@ void nvm_stat_print(nvm_t *nvm);
 
 //* picl_t
 
+// Picl's log entry size: 64B data + 8B addr/status bits
+#define PICL_LOG_ENTRY_SIZE (64UL + 8UL)
+
 // Used as ht64 arguments
 #define PICL_ADDR_PRESENT 0x1UL
 #define PICL_ADDR_MISSING 0x0UL
@@ -774,16 +820,22 @@ typedef void (*picl_evict_cb_t)(nvoverlay_struct_t *nvoverlay, uint64_t line_add
 
 // This implements a simple write set tracking for PiCL
 typedef struct {
-  ht64_t *ht64;                  // This tracks current write set - only used as a set
-  nvoverlay_struct_t *nvoverlay; // Calls the call back function using this as argument
-  picl_evict_cb_t evict_cb;      // Eviction call back for NVM write
-  uint64_t log_ptr;              // Log write pointer; Reset for every epoch advance
-  uint64_t epoch_size;           // Number of stores in the epoch
+  ht64_t *ht64;                   // This tracks current write set - only used as a set
+  nvoverlay_struct_t *nvoverlay;  // Calls the call back function using this as argument
+  picl_evict_cb_t evict_cb;       // Eviction call back for NVM write
+  uint64_t log_ptr;               // Log write pointer; Reset for every epoch advance
+  uint64_t epoch_size;            // Number of stores in the epoch
   // Statistics
-  uint64_t line_count;           // Number of lines currently in the current epoch's write set
-  uint64_t epoch_count;          // Number of epochs it has seen (not including the current one)
-  uint64_t epoch_store_count;    // Number of stores in the current epoch (cleared when advancing epoch)
-  uint64_t total_store_count;    // Number of stores in all epochs (not cleared when advancing epoch)
+  uint64_t line_count;            // Number of lines currently in the current epoch's write set
+  uint64_t max_line_count;        // Maximum number of lines in all epochs
+  uint64_t epoch_count;           // Number of epochs it has seen (not including the current one)
+  uint64_t epoch_store_count;     // Number of stores in the current epoch (cleared when advancing epoch)
+  uint64_t total_store_count;     // Number of stores in all epochs (not cleared when advancing epoch)
+  uint64_t log_write_count;       // Number of log entries (in fact log entries are larger than 64B)
+  uint64_t epoch_log_write_count; // Log write count in the current epoch; Cleared in next epoch
+  uint64_t tag_walk_evict_count;  // Number of evictions incurred by tag walk
+  uint64_t l3_evict_count;        // Number of writes to NVM caused by LLC evict
+  fifo_t *log_sizes;              // List of log sizes in each epoch
 } picl_t; 
 
 picl_t *picl_init(picl_evict_cb_t evict_cb);
@@ -803,6 +855,11 @@ inline static void picl_set_epoch_size(picl_t *picl, uint64_t epoch_size) { picl
 inline static uint64_t picl_get_epoch_size(picl_t *picl) { return picl->epoch_size; }
 inline static uint64_t picl_get_epoch_store_count(picl_t *picl) { return picl->epoch_store_count; }
 inline static uint64_t picl_get_total_store_count(picl_t *picl) { return picl->total_store_count; }
+
+// Log + tag walk + LLC evict
+inline static uint64_t picl_get_total_evict_count(picl_t *picl) {
+  return picl->log_write_count + picl->tag_walk_evict_count + picl->l3_evict_count;
+}
 
 void picl_conf_print(picl_t *picl);
 void picl_stat_print(picl_t *picl);
@@ -824,7 +881,10 @@ typedef void (*nvoverlay_intf_cb_t)(struct nvoverlay_struct_t *nvoverlay, int id
 
 // The following are used to call other call backs
 #define NVOVERLAY_OTHER_HELLO  0 // Prints hello world, used to verify that it works
-#define NVOVERLAY_OTHER_INST   1 // Report number of instructions executed on a core (spec. by ID)
+#define NVOVERLAY_OTHER_INST   1 // Report number of instructions executed on a core (spec. by ID); Inst passed by cycle
+#define NVOVERLAY_OTHER_CONF   2 // Print conf
+#define NVOVERLAY_OTHER_STAT   3 // Print stat
+#define NVOVERLAY_OTHER_CYCLE  4 // Report cycles on a core
 
 // NVOverlay inteface call back functions
 typedef struct {
@@ -849,6 +909,13 @@ typedef struct nvoverlay_struct_t {
   bitmap64_t core_mask;         // Only cores in this mask will be used to compute stable epoch
   int tag_walk_passive;         // Whether we perform passive tag walk (default set to zero)
   uint64_t sample_freq;         // Minimum number of cycles between two samples
+  uint64_t last_sample_serial;  // Last serial number that we sampled stat
+  int stat_verbose;             // Whether print all core information when stat print has the option
+  fifo_t *samples;              // Samples taken periodically after some number of serials
+  char *sample_filename;        // Prefix of dump file name for writing out samples; Optional if sampling is disabled
+  uint64_t inst_cap;            // Number of inst we simulate for each core; All cores must be no less than this
+  uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
+  int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions
@@ -862,8 +929,6 @@ typedef struct nvoverlay_struct_t {
   // Tracer
   tracer_t *tracer;
   // Statistics
-  uint64_t evict_omc_count;  // Eviction to OMC from L2
-  uint64_t evict_llc_count;  // Eviction to LLC from L2
   uint64_t tag_walk_count;   // Number of tag walks on all cores 
   uint64_t sample_count;     // Number of samples taken
 } nvoverlay_t;
@@ -892,6 +957,8 @@ void nvoverlay_free_tracer(nvoverlay_t *nvoverlay);
 void nvoverlay_init_picl(nvoverlay_t *nvoverlay);
 void nvoverlay_free_picl(nvoverlay_t *nvoverlay);
 
+void nvoverlay_noop_noop(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+
 void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
@@ -911,9 +978,12 @@ void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
 void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 
 void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count);
+void nvoverlay_full_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count);
 
 extern nvoverlay_intf_t nvoverlay_intf; // This is the one used by external applications
 
+extern nvoverlay_intf_t nvoverlay_intf_noop;
 extern nvoverlay_intf_t nvoverlay_intf_full;
 extern nvoverlay_intf_t nvoverlay_intf_picl;
 extern nvoverlay_intf_t nvoverlaay_intf_tracer; // Only log the trace into a file
@@ -924,6 +994,18 @@ inline static conf_t *nvoverlay_get_conf(nvoverlay_t *nvoverlay) { return nvover
 inline static tracer_t *nvoverlay_get_tracer(nvoverlay_t *nvoverlay) { return nvoverlay->tracer; }
 inline static vtable_t *nvoverlay_get_vtable(nvoverlay_t *nvoverlay) { return nvoverlay->vtable; }
 inline static cpu_t *nvoverlay_get_cpu(nvoverlay_t *nvoverlay) { return nvoverlay->cpu; }
+inline static int nvoverlay_get_mode(nvoverlay_t *nvoverlay) { return nvoverlay->mode; }
+inline static int nvoverlay_get_cap_core_count(nvoverlay_t *nvoverlay) { return nvoverlay->cap_core_count; }
+inline static void nvoverlay_set_cap_core_count(nvoverlay_t *nvoverlay, int value) { 
+  nvoverlay->cap_core_count = value; 
+}
+inline static int nvoverlay_get_inst_cap(nvoverlay_t *nvoverlay) { return nvoverlay->inst_cap; }
+inline static int nvoverlay_get_cycle_cap(nvoverlay_t *nvoverlay) { return nvoverlay->cycle_cap; }
+// Returns the valid cap
+inline static uint64_t nvoverlay_get_cap(nvoverlay_t *nvoverlay) {
+  if(nvoverlay->inst_cap != 0UL) return nvoverlay->inst_cap;
+  else return nvoverlay->cycle_cap;
+}
 
 void nvoverlay_core_mask_add(nvoverlay_t *nvoverlay, int pos);
 void nvoverlay_core_mask_remove(nvoverlay_t *nvoverlay, int pos);
@@ -932,14 +1014,51 @@ inline static void nvoverlay_core_mask_clear(nvoverlay_t *nvoverlay) {
 }
 void nvoverlay_core_mask_set(nvoverlay_t *nvoverlay, int pos);
 inline static bitmap64_t *nvoverlay_get_core_mask(nvoverlay_t *nvoverlay) { return &nvoverlay->core_mask; }
+inline static int nvoverlay_core_mask_is_set(nvoverlay_t *nvoverlay, int pos) {
+  return bitmap64_is_set(&nvoverlay->core_mask, pos);
+}
+inline static int nvoverlay_core_mask_popcount(nvoverlay_t *nvoverlay) {
+  return bitmap64_popcount(&nvoverlay->core_mask);
+}
 
 // These two only consider active cores marked by the core mask
 // Note this is not stable epoch - stable epochs are not always current core epoch
 uint64_t nvoverlay_get_min_epoch(nvoverlay_t *nvoverlay);
 uint64_t nvoverlay_get_max_epoch(nvoverlay_t *nvoverlay);
 
+void nvoverlay_selfcheck(nvoverlay_t *nvoverlay);
+void nvoverlay_selfcheck_full(nvoverlay_t *nvoverlay);
+void nvoverlay_selfcheck_picl(nvoverlay_t *nvoverlay);
+
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay);
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay);
+
+#define SAMPLE_OVERLAY_SIZE 0 // Byte size of Overlay, all epochs
+#define SAMPLE_OMT_SIZE     1 // Byte size of OMT
+#define SAMPLE_EPOCH_SKEW   2 // Difference between largest and smallest epochs across all marked cores
+#define SAMPLE_COUNT        3 // Number of vars per sample point
+
+extern const char *overlay_sample_names[SAMPLE_COUNT];
+
+typedef struct {
+  uint64_t serial;
+  uint64_t data[SAMPLE_COUNT];
+} nvoverlay_sample_t;
+
+// This function will populate the sample object using nvoverlay passed
+nvoverlay_sample_t *nvoverlay_sample_init(nvoverlay_t *nvoverlay);
+void nvoverlay_sample_free(nvoverlay_sample_t *sample);
+inline static uint64_t nvoverlay_sample_item_count(nvoverlay_t *nvoverlay) { 
+  return fifo_get_item_count(nvoverlay->samples); 
+}
+inline static int nvoverlay_sample_is_enabled(nvoverlay_t *nvoverlay) {
+  return nvoverlay->sample_freq != 0UL;
+}
+
+// This function is called for every operation to check whether we should sample
+void nvoverlay_stat_sample(nvoverlay_t *nvoverlay, uint64_t serial);
+char *nvoverlay_stat_dump_filename(nvoverlay_t *nvoverlay, int index);
+void nvoverlay_stat_dump(nvoverlay_t *nvoverlay);
 
 //* zsim
 

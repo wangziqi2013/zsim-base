@@ -44,6 +44,8 @@
 #define UTIL_CACHE_LINE_MSB_MASK (~(UTIL_CACHE_LINE_LSB_MASK))
 #define UTIL_PAGE_LSB_MASK   (UTIL_PAGE_SIZE - 1)
 #define UTIL_PAGE_MSB_MASK   (~(UTIL_PAGE_LSB_MASK))
+// Capacity
+#define UTIL_LINE_PER_PAGE (UTIL_PAGE_SIZE / UTIL_CACHE_LINE_SIZE)
 
 // Reports error if the addr is not cache line aligned
 #define ASSERT_CACHE_ALIGNED(addr) do { if(addr & UTIL_CACHE_LINE_LSB_MASK) {\
@@ -56,6 +58,9 @@
 
 int util_log2_int32(int num, const char *name);
 int util_log2_uint64(uint64_t num, const char *name);
+
+// Round given number up to next power of two
+uint64_t round_up_power2_uint64(uint64_t n);
 
 inline static int popcount_int32(int bitmap) { return __builtin_popcount(bitmap); }
 inline static int popcount_uint64(uint64_t bitmap) { return __builtin_popcountl(bitmap); }
@@ -195,7 +200,7 @@ char *conf_find_str_mandatory(conf_t *conf, const char *key); // The string key 
 int conf_find_bool_mandatory(conf_t *conf, const char *key);  // The boolean key must exist
 int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int options); // Returns the value
 uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options); // Returns the value
-uint64_t conf_find_uint64_abbr_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options); // Returns the value
+
 // The following two are just short hands
 inline static int conf_find_int32_mandatory(conf_t *conf, const char *key) { 
   return conf_find_int32_range(conf, key, 0, 0, CONF_NONE);
@@ -252,7 +257,9 @@ inline static const char *conf_it_value(conf_it_t *it) { return (*it)->value; }
 #define TRACER_L1_EVICT       2
 #define TRACER_L2_EVICT       3
 #define TRACER_L3_EVICT       4
-#define TRACER_TYPE_END       5
+#define TRACER_INST           5   // Report number of instructions
+#define TRACER_CYCLE          6   // Report number of cycles
+#define TRACER_TYPE_END       7
 
 #define TRACER_KEEP_FILE      0
 #define TRACER_REMOVE_FILE    1
@@ -262,7 +269,7 @@ inline static const char *conf_it_value(conf_it_t *it) { return (*it)->value; }
 
 extern const char *tracer_mode_names[2];
 extern const char *tracer_cap_mode_names[5];
-extern const char *tracer_record_type_names[5];
+extern const char *tracer_record_type_names[7];
 extern const char *tracer_cleanup_names[2];
 extern const char *tracer_core_status_names[2];
 
@@ -351,6 +358,6 @@ uint64_t tracer_get_record_count(tracer_t *tracer);
 uint64_t tracer_get_core_record_count(tracer_t *tracer, int id);
 
 void tracer_conf_print(tracer_t *tracer);
-void tracer_stat_print(tracer_t *tracer);
+void tracer_stat_print(tracer_t *tracer, int verbose);
 
 #endif

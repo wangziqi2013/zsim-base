@@ -20,18 +20,21 @@ fifo_t *fifo_init() {
 
 void fifo_free(fifo_t *fifo) {
   fifo_node_t *curr = fifo->head;
+  uint64_t count = 0UL;
   while(curr) {
     fifo_node_t *next = curr->next;
     fifo_node_free(curr);
+    count++;
     curr = next;
   }
+  assert(count == fifo->item_count);
   free(fifo);
   return;
 }
 
-void fifo_insert(fifo_t *fifo, uint64_t value, uint64_t cycle) {
+// This function creates a new node and linked it to the tail
+void fifo_insert(fifo_t *fifo, uint64_t value) {
   fifo_node_t *node = fifo_node_init();
-  node->cycle = cycle;
   node->value = value;
   if(fifo->head == NULL) {
     assert(fifo->tail == NULL);
@@ -39,6 +42,7 @@ void fifo_insert(fifo_t *fifo, uint64_t value, uint64_t cycle) {
     fifo->head = fifo->tail = node;
   } else {
     assert(fifo->tail != NULL);
+    // Insert after tail, read from head
     fifo->tail->next = node;
     fifo->tail = node;
   }
@@ -686,9 +690,31 @@ overlay_epoch_t *omt_merge_line(omt_t *omt, overlay_epoch_t *overlay_epoch, uint
   *overlay_epoch_p = overlay_epoch;
   // There is no previous data, and now we merge one line, so working set size + 64 bytes
   if(old_overlay_epoch == NULL) {
-    omt->working_set_size += 64UL;
+    omt->working_set_size += UTIL_CACHE_LINE_SIZE;
   }
   return old_overlay_epoch;
+}
+
+// Call back function used for tracersal
+void omt_selfcheck_cb(uint64_t line_addr, void *node, void *arg) {
+  (*(uint64_t *)arg)++; // Each call back instance represents a valid entry
+  (void)line_addr; (void)node;
+}
+
+void omt_selfcheck(omt_t *omt) {
+  // Check write count
+  if(omt->write_count != omt->merge_line_count + mtable_get_page_count(omt->mtable)) {
+    error_exit("Inconsistent write count and merge/page count: %lu %lu\n",
+      omt->write_count, omt->merge_line_count + mtable_get_page_count(omt->mtable));
+  }
+  // Check working set size
+  uint64_t leaf_count = 0UL;
+  mtable_traverse(omt->mtable, omt_selfcheck_cb, &leaf_count);
+  if(leaf_count * UTIL_CACHE_LINE_SIZE != omt->working_set_size) {
+    error_exit("Inconsistent working set size between mtable and recorded size: %lu %lu\n",
+      leaf_count * UTIL_CACHE_LINE_SIZE, omt->working_set_size);
+  }
+  return;
 }
 
 void omt_conf_print(omt_t *omt) {
@@ -699,7 +725,7 @@ void omt_conf_print(omt_t *omt) {
 
 void omt_stat_print(omt_t *omt) {
   printf("---------- omt_t ----------\n");
-  printf("Table pages %lu table size %lu merges %lu working set size %lu\n", 
+  printf("Table pages %lu table size %lu bytes merge lines %lu working set size %lu bytes\n", 
     mtable_get_page_count(omt->mtable), mtable_get_size(omt->mtable),
     omt->merge_line_count, omt->working_set_size);
   printf("Writes %lu (table merging)\n", omt->write_count);
@@ -708,10 +734,15 @@ void omt_stat_print(omt_t *omt) {
 
 //* cpu_t
 
+const char *core_cap_status_names[2] = {
+  "ACTIVE", "HALTED",
+};
+
 core_t *core_init() {
   core_t *core = (core_t *)malloc(sizeof(core_t));
   SYSEXPECT(core != NULL);
   memset(core, 0x00, sizeof(core_t));
+  core->cap_status = CORE_CAP_STATUS_ACTIVE;
   return core;
 }
 
@@ -1071,8 +1102,8 @@ void cpu_tag_selfcheck(cpu_t *cpu, vtable_t *vtable, int level, int core) {
     }
     ht64_next(vtable_get_vers(vtable), &it);
   }
-  printf("vtable versions %lu; bitmap versions %lu; core %d level %d tag scan versions %lu\n", 
-    total_count, count, core, level, ver_count);
+  //printf("vtable versions %lu; bitmap versions %lu; core %d level %d tag scan versions %lu\n", 
+  //  total_count, count, core, level, ver_count);
   if(ver_count != count) {
     error_exit("Version counts are inconsistent (tag scan count %lu vtable count %lu)\n",
       count, ver_count);
@@ -1141,6 +1172,26 @@ int cpu_tag_get_sets(cpu_t *cpu, int level) {
   return tag_array->sets;
 }
 
+void cpu_selfcheck(cpu_t *cpu) {
+  uint64_t total_inst_count = 0UL, total_cycle_count = 0UL;
+  for(int i = 0;i < cpu->core_count;i++) {
+    core_t *core = cpu_get_core(cpu, i);
+    total_inst_count += core->last_inst_count;
+    total_cycle_count += core->last_cycle_count;
+  }
+  if(total_inst_count != cpu->total_inst_count) {
+    error_exit("Inconsistent inst count from cores and cpu (%lu %lu)\n", total_inst_count, cpu->total_inst_count);
+  } else if(total_inst_count == 0UL) {
+    printf("Inst count == 0 - Did you instrument the workload source with NVOVERLAYY_SIM_END()?\n");
+  }
+  if(total_cycle_count != cpu->total_cycle_count) {
+    error_exit("Inconsistent cycle count from cores and cpu (%lu %lu)\n", total_cycle_count, cpu->total_cycle_count);
+  } else if(total_cycle_count == 0UL) {
+    printf("Cycle count == 0 - Did you instrument the workload source with NVOVERLAYY_SIM_END()?\n");
+  }
+  return;
+}
+
 void cpu_conf_print(cpu_t *cpu) {
   printf("---------- cpu_t ----------\n");
   printf("Cores: %d\n", cpu->core_count);
@@ -1153,17 +1204,39 @@ void cpu_conf_print(cpu_t *cpu) {
   return;
 }
 
-void cpu_stat_print(cpu_t *cpu) {
+void cpu_stat_print(cpu_t *cpu, int verbose) {
   printf("---------- cpu_t ----------\n");
   printf("total advance %lu coherence %lu skip %lu\n", 
     cpu->total_advance_count, cpu->coherence_advance_count, cpu->skip_epoch_count);
   printf("epoch min %lu max %lu\n", cpu_min_epoch(cpu), cpu_max_epoch(cpu));
+  uint64_t total_epoch_store_count = 0UL, total_store_count = 0UL;
+  uint64_t total_tag_walk_evict_count = 0UL, total_tag_walk_count = 0UL;
+  uint64_t total_inst_count = 0UL, total_cycle_count = 0UL;
+  uint64_t max_cycle_count = 0UL;
+  int active_count = 0;
   for(int i = 0;i < cpu->core_count;i++) {
     core_t *core = cpu_get_core(cpu, i);
-    printf("  Core %d: epoch st %lu total st %lu last walk %lu walk evict %lu walks %lu\n", 
-      i, core->epoch_store_count, core->total_store_count, core->last_walk_epoch, core->tag_walk_evict_count,
-      core->tag_walk_count);
+    if(verbose) {
+      printf("  Core %d: epoch st %lu total st %lu last walk %lu walk evict %lu walks %lu inst %lu cap_status %s\n", 
+        i, core->epoch_store_count, core->total_store_count, core->last_walk_epoch, core->tag_walk_evict_count,
+        core->tag_walk_count, core->last_inst_count,
+        core_cap_status_names[core->cap_status]);
+    }
+    // Aggregate to global stat
+    total_epoch_store_count += core->epoch_store_count;
+    total_store_count += core->total_store_count;
+    total_tag_walk_evict_count += core->tag_walk_evict_count;
+    total_tag_walk_count += core->tag_walk_count;
+    total_inst_count += core->last_inst_count;
+    total_cycle_count += core->last_cycle_count;
+    if(core->last_cycle_count > max_cycle_count) {
+      max_cycle_count = core->last_cycle_count;
+    }
+    if(core->cap_status == CORE_CAP_STATUS_ACTIVE) active_count++;
   }
+  printf("Total: epoch st %lu st %lu walk evict %lu walks %lu inst %lu cycle %lu max cycle %lu cap_active %d\n",
+    total_epoch_store_count, total_store_count, total_tag_walk_evict_count, total_tag_walk_count,
+    total_inst_count, total_cycle_count, max_cycle_count, active_count);
   return;
 }
 
@@ -1295,9 +1368,11 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
         assert(ver->l2_ver < ver->l1_ver);
         // Only evict to OMC, not LLC
         vtable_evict_wrapper(vtable, ver->addr, vtable_l2_sharer(ver), ver->l2_ver, cycle, EVICT_OMC);
+        vtable->ld_inv_evict_count++;
       }
       // Then the dirty version in L1 is also written back
       vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), ver->l1_ver, cycle, EVICT_BOTH);
+      vtable->ld_inv_evict_count++;
       ver->other_ver = ver->l1_ver; // Global version is L1 version
     } else {
       assert(ver->owner == OWNER_L2);
@@ -1310,6 +1385,7 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
         assert(ver->l1_state == STATE_I);
       }
       vtable_evict_wrapper(vtable, ver->addr, vtable_l2_sharer(ver), ver->l2_ver, cycle, EVICT_BOTH);
+      vtable->ld_inv_evict_count++;
       ver->other_ver = ver->l2_ver; // Global version is L2 version
     }
     // In either case, the current L1 and L2 are loaded with the global version
@@ -1348,6 +1424,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
         assert(ver->l2_ver < ver->l1_ver);
         // If L2 is dirty different version then write back L2 first
         vtable_evict_wrapper(vtable, ver->addr, id, ver->l2_ver, cycle, EVICT_OMC);
+        vtable->st_evict_count++; // Store evict to OMC
       }
       // Evict from L1 to L2
       ver->l2_state = STATE_M;
@@ -1391,6 +1468,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     if(ver->l2_state == STATE_M && ver->l2_ver != ver->l1_ver) {
       assert(ver->l2_ver < ver->l1_ver);
       vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), ver->l2_ver, cycle, EVICT_OMC);
+      vtable->st_inv_evict_count++; // Store invalidate (not including ownership xfer on L1)
     }
     uint64_t recv_version;
     recv_version = ver->l2_ver = ver->l1_ver; // Receive the transferred version
@@ -1447,6 +1525,7 @@ void vtable_l1_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
     if(ver->l2_state == STATE_M && ver->l2_ver != ver->l1_ver) {
       assert(ver->l2_ver < ver->l1_ver);
       vtable_evict_wrapper(vtable, ver->addr, id, ver->l2_ver, cycle, EVICT_OMC);
+      vtable->l1_cap_evict_count++;
     }
     ver->owner = OWNER_L2;
     ver->l1_state = STATE_I;
@@ -1479,7 +1558,7 @@ void vtable_l1_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
 //   Case 3: Owner is LLC + DRAM: No action
 // In all cases we clear the L1 and L2 sharer bit
 // Note that owner cannot be other caches, since otherwise there will not be a copy on current core
-void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle) {
+void _vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle, int from_l3) {
   (void)epoch;
   ver_t *ver = vtable_insert(vtable, addr);
   assert(ver);
@@ -1493,8 +1572,18 @@ void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
     if(ver->l2_state == STATE_M && ver->l2_ver != ver->l1_ver) {
       assert(ver->l2_ver < ver->l1_ver);
       vtable_evict_wrapper(vtable, ver->addr, id, ver->l2_ver, cycle, EVICT_OMC);
+      if(from_l3) {
+        vtable->l3_cap_evict_count++;
+      } else {
+        vtable->l2_cap_evict_count++;
+      }
     }
     vtable_evict_wrapper(vtable, ver->addr, id, ver->l1_ver, cycle, EVICT_BOTH);
+    if(from_l3) {
+      vtable->l3_cap_evict_count++;
+    } else {
+      vtable->l2_cap_evict_count++;
+    }
     ver->owner = OWNER_OTHER;
     ver->other_ver = ver->l1_ver;
     vtable_l1_rm_ver(vtable, ver, id);
@@ -1512,6 +1601,11 @@ void vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
       assert(ver->l1_state == STATE_I);
     }
     vtable_evict_wrapper(vtable, ver->addr, id, ver->l2_ver, cycle, EVICT_BOTH);
+    if(from_l3) {
+      vtable->l3_cap_evict_count++;
+    } else {
+      vtable->l2_cap_evict_count++;
+    }
     ver->owner = OWNER_OTHER;
     ver->other_ver = ver->l2_ver;
     if(l1_rm) vtable_l1_rm_ver(vtable, ver, id);
@@ -1545,7 +1639,7 @@ void vtable_l3_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
     if(vtable_l1_num_sharer(ver) == 1) {
       assert(vtable_l1_sharer(ver) == vtable_l2_sharer(ver));
     }
-    vtable_l2_eviction(vtable, addr, id, epoch, cycle); // It is equivalent to L2 eviction
+    _vtable_l2_eviction(vtable, addr, id, epoch, cycle, 1); // It is equivalent to L2 eviction
   }
   return;
 }
@@ -1560,7 +1654,12 @@ void vtable_conf_print(vtable_t *vtable) {
 void vtable_stat_print(vtable_t *vtable) {
   printf("---------- vtable_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(vtable->vers), ht64_get_bucket_count(vtable->vers));
-  printf("OMC evict %lu LLC evict %lu\n", vtable->omc_eviction_count, vtable->llc_eviction_count);
+  printf("Evict OMC %lu LLC %lu\n", vtable->omc_evict_count, vtable->llc_evict_count);
+  uint64_t sum = (vtable->st_evict_count + vtable->ld_inv_evict_count + vtable->st_inv_evict_count + \
+    vtable->l1_cap_evict_count + vtable->l2_cap_evict_count + vtable->l3_cap_evict_count);
+  printf("Evict reason: st %lu ld-inv %lu st-inv %lu l1-cap %lu l2-cap %lu l3-cap %lu (sum %lu)\n",
+    vtable->st_evict_count, vtable->ld_inv_evict_count, vtable->st_inv_evict_count,
+    vtable->l1_cap_evict_count, vtable->l2_cap_evict_count, vtable->l3_cap_evict_count, sum);
   return;
 }
 
@@ -1711,9 +1810,11 @@ void overlay_epoch_free(void *overlay_epoch) {
   free(overlay_epoch);
 }
 
+// Empty page has 0 as size class
 uint64_t overlay_page_size_class(int line_count) {
-  assert(line_count >= 0 && line_count <= (int)(UTIL_PAGE_SIZE / UTIL_CACHE_LINE_SIZE));
-  if(line_count <= 3) return 256UL;
+  assert(line_count >= 0 && line_count <= (int)(UTIL_LINE_PER_PAGE));
+  if(line_count == 0) return 0UL;
+  else if(line_count <= 3) return 256UL;
   else if(line_count <= 7) return 512UL;
   else if(line_count <= 15) return 1024UL;
   else if(line_count <= 31) return 2048UL;
@@ -1750,11 +1851,13 @@ uint64_t overlay_epoch_insert(overlay_epoch_t *overlay_epoch, uint64_t addr) {
   int before_num = bitmap64_popcount(&overlay_page->bitmap);
   // OR the bit and inc the ref counter
   bitmap64_add(&overlay_page->bitmap, offset);
-  overlay_page->ref_count++;
   int after_num = bitmap64_popcount(&overlay_page->bitmap);
   //printf("before %d after %d offset %d addr 0x%lX\n", before_num, after_num, offset, addr);
   if(before_num == after_num) return 0UL; // If we overwrite the same line, overlay size does not change
   assert(after_num == before_num + 1);
+  // Only increment ref count if we inserted a new line, not overwriting an existing line
+  overlay_page->ref_count++;
+  assert(overlay_page->ref_count > 0 && overlay_page->ref_count <= (int)UTIL_LINE_PER_PAGE);
   uint64_t ret = 0UL;
   switch(before_num) {
     case 0: ret = 256UL; break; // 256 base
@@ -1783,15 +1886,77 @@ overlay_page_t *overlay_epoch_find(overlay_epoch_t *overlay_epoch, uint64_t addr
 static void overlay_epoch_line_count_cb(uint64_t key, void *node, void *counter) {
   assert(node != NULL);
   (*(uint64_t *)counter) += bitmap64_popcount(&(((overlay_page_t *)node)->bitmap));
-  //printf("[overlay_epoch_line_count_cb] Key = 0x%lX\n", key);
   (void)key;
 }
 
 // Returns the number of cache lines in the current overlay, all addresses
 uint64_t overlay_epoch_line_count(overlay_epoch_t *overlay_epoch) {
-  uint64_t count = 0;
+  uint64_t count = 0UL;
   overlay_epoch_traverse(overlay_epoch, overlay_epoch_line_count_cb, &count);
   return count;
+}
+
+static void overlay_epoch_size_cb(uint64_t key, void *node, void *size) {
+  assert(node != NULL);
+  // If this is zero then we add zero
+  overlay_page_t *page = (overlay_page_t *)node;
+  // If ref count == 0 the page has been GC'ed (although we do not remove the page)
+  if(page->ref_count != 0) {
+    int line_count = bitmap64_popcount(&page->bitmap);
+    (*(uint64_t *)size) += overlay_page_size_class(line_count);
+  }
+  (void)key;
+}
+
+// This computes size without page shrinking, i.e. when a line is removed from the 
+// page, the page size is not adjusted
+uint64_t overlay_epoch_size(overlay_epoch_t *epoch) {
+  uint64_t ret = 0UL;
+  overlay_epoch_traverse(epoch, overlay_epoch_size_cb, &ret);
+  return ret;
+}
+
+static void overlay_epoch_min_size_cb(uint64_t key, void *node, void *size) {
+  assert(node != NULL);
+  // If this is zero then we add zero
+  int line_count = ((overlay_page_t *)node)->ref_count;
+  (*(uint64_t *)size) += overlay_page_size_class(line_count);
+  (void)key;
+}
+
+// Compute the minimum size required to store the epoch, i.e. always use the small page size class
+// for each page recorded in the epoch. 
+// Note: Use ref_count to determine line count in each page
+uint64_t overlay_epoch_min_size(overlay_epoch_t *epoch) {
+  uint64_t ret = 0UL;
+  overlay_epoch_traverse(epoch, overlay_epoch_min_size_cb, &ret);
+  return ret;
+}
+
+uint64_t overlay_mapping_size(overlay_t *overlay) {
+  uint64_t ret = 0UL;
+  ht64_t *epochs = overlay->epochs;
+  ht64_it_t it;
+  ht64_begin(epochs, &it);
+  while(ht64_is_end(epochs, &it) == 0) {
+    overlay_epoch_t *epoch = (overlay_epoch_t *)ht64_it_value(&it);
+    ret += mtable_get_size(epoch->mtable);
+    ht64_next(epochs, &it);
+  }
+  return ret;
+}
+
+uint64_t overlay_line_count(overlay_t *overlay) {
+  uint64_t ret = 0UL;
+  ht64_t *epochs = overlay->epochs;
+  ht64_it_t it;
+  ht64_begin(epochs, &it);
+  while(ht64_is_end(epochs, &it) == 0) {
+    overlay_epoch_t *epoch = (overlay_epoch_t *)ht64_it_value(&it);
+    ret += overlay_epoch_line_count(epoch);
+    ht64_next(epochs, &it);
+  }
+  return ret;
 }
 
 void overlay_epoch_print(overlay_epoch_t *overlay_epoch) {
@@ -1827,7 +1992,9 @@ void overlay_insert(overlay_t *overlay, uint64_t addr, uint64_t epoch) {
   if(overlay_epoch->merged != 0) {
     error_exit("Overlay epoch %lu addr 0x%lX has been merged; Insert is disabled\n", epoch, addr);
   }
-  overlay->size += overlay_epoch_insert(overlay_epoch, addr);
+  uint64_t delta = overlay_epoch_insert(overlay_epoch, addr);
+  overlay->size += delta;
+  overlay->min_size += delta;
   return;
 }
 
@@ -1842,6 +2009,9 @@ void overlay_remove(overlay_t *overlay, uint64_t epoch) {
   overlay->epoch_count--;
   assert(overlay->size >= overlay_epoch->size);
   overlay->size -= overlay_epoch->size; // In practice this should always be zero, but let's make it general purpose
+  uint64_t min_size = overlay_epoch_min_size(overlay_epoch);
+  assert(overlay->min_size >= min_size);
+  overlay->min_size -= min_size; // Only deduce min_size, since shirnked
   // Finally free the epoch object itself
   overlay_epoch_free(overlay_epoch);
   return;
@@ -1901,23 +2071,37 @@ void overlay_epoch_merge(overlay_t *overlay, uint64_t epoch, omt_t *omt) {
   return;
 }
 
+// Unlink addr from the given epoch node
 void overlay_line_unlink(overlay_t *overlay, overlay_epoch_t *overlay_epoch, uint64_t addr) {
   // Find the overlay page object using key (the page aligned address)
   ASSERT_PAGE_ALIGNED(addr);
+  overlay->line_gc_count++;
   overlay_page_t *old_overlay_page = overlay_epoch_find(overlay_epoch, addr);
   assert(old_overlay_page != NULL);
   assert(old_overlay_page->ref_count > 0);
   old_overlay_page->ref_count--;
+  // If unlinking the line causes page size to change, we deduce it from overlay total size
+  uint64_t before_size = overlay_page_size_class(old_overlay_page->ref_count + 1);
+  uint64_t after_size = overlay_page_size_class(old_overlay_page->ref_count);
+  assert(after_size <= before_size);
+  // This is valid even if ref count drops to zero
+  overlay->min_size -= (before_size - after_size);
   // Overlay page GC - adjust page count and size for BOTH overlay epoch and overlay
+  // NOTE: EVEN IF THE PAGE IS EMPTY AND GC'ED, WE DO NOT REMOVE THE PAGE POINTER FROM THE MAPPING
+  // So traversal function should check whether the page's ref count is zero to determine whether the
+  // page is still active
   if(old_overlay_page->ref_count == 0) {
     assert(overlay_epoch->overlay_page_count != 0);
     overlay_epoch->overlay_page_count--;
-    // Size of the old page
+    // Size of the old page - we keep the bitmap unchanged to compute the old size
     uint64_t page_size = overlay_page_size_class(bitmap64_popcount(&old_overlay_page->bitmap));
+    assert(page_size != 0UL);
     assert(overlay_epoch->size >= page_size);
     assert(overlay->size >= page_size);
     overlay_epoch->size -= page_size;
     overlay->size -= page_size;
+    overlay->page_gc_count++;
+    overlay->page_gc_size += page_size;
     if(overlay_epoch->overlay_page_count == 0) {
       overlay_gc_epoch(overlay, overlay_epoch);
     }
@@ -1935,6 +2119,27 @@ void overlay_gc_epoch(overlay_t *overlay, overlay_epoch_t *overlay_epoch) {
    return;
 }
 
+// Checks consistency of the data structure
+void overlay_selfcheck(overlay_t *overlay) {
+  ht64_it_t it;
+  ht64_t *epochs = overlay->epochs;
+  ht64_begin(epochs, &it);
+  uint64_t total_size = 0UL, total_min_size = 0UL;
+  while(ht64_is_end(epochs, &it) == 0) {
+    overlay_epoch_t *epoch = (overlay_epoch_t *)ht64_it_value(&it);
+    assert(epoch != NULL);
+    total_size += overlay_epoch_size(epoch);
+    total_min_size += overlay_epoch_min_size(epoch);
+    ht64_next(epochs, &it);
+  }
+  if(total_size != overlay->size) {
+    error_exit("Size inconsistency: walk size %lu size %lu\n", total_size, overlay->size);
+  } else if(total_min_size != overlay->min_size) {
+    error_exit("Min-size inconsistency: walk min-size %lu min-size %lu\n", total_min_size, overlay->min_size);
+  }
+  return;
+}
+
 void overlay_conf_print(overlay_t *overlay) {
   printf("---------- overlay_t ----------\n");
   printf("HT init buckets %d\n", HT64_DEFAULT_INIT_BUCKETS);
@@ -1945,9 +2150,11 @@ void overlay_conf_print(overlay_t *overlay) {
 void overlay_stat_print(overlay_t *overlay) {
   printf("---------- overlay_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(overlay->epochs), ht64_get_bucket_count(overlay->epochs));
-  printf("Active %lu init %lu gc'ed %lu size %lu (bytes) merges %lu\n",
-    overlay->epoch_count, overlay->epoch_init_count, overlay->epoch_gc_count, overlay->size,
-    overlay->merge_count);
+  printf("Epochs mtable size %lu bytes (sum of all epochs)\n", overlay_mapping_size(overlay));
+  printf("Epochs active %lu init %lu size %lu bytes min-size %lu bytes merge-calls %lu\n",
+    overlay->epoch_count, overlay->epoch_init_count, overlay->size, overlay->min_size, overlay->merge_count);
+  printf("GC lines %lu pages %lu epochs %lu page size %lu\n",
+    overlay->line_gc_count, overlay->page_gc_count, overlay->epoch_gc_count, overlay->page_gc_size);
   return;
 }
 
@@ -2034,10 +2241,12 @@ picl_t *picl_init(picl_evict_cb_t evict_cb) {
   memset(picl, 0x00, sizeof(picl_t));
   picl->ht64 = ht64_init();
   picl->evict_cb = evict_cb;
+  picl->log_sizes = fifo_init();
   return picl;
 }
 
 void picl_free(picl_t *picl) {
+  fifo_free(picl->log_sizes);
   ht64_free(picl->ht64);
   free(picl);
   return;
@@ -2045,13 +2254,19 @@ void picl_free(picl_t *picl) {
 
 void picl_store(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
   ASSERT_CACHE_ALIGNED(line_addr);
-  // Return 1 if the insert succeeds - evict
+  // Return 1 if the insert succeeds (addr does not exist) - evict
   int ret = ht64_insert(picl->ht64, line_addr, PICL_ADDR_PRESENT);
   if(ret == 1) {
-    // This is log write, use lod address
+    // This is log write, use log address
     picl->evict_cb(picl->nvoverlay, picl->log_ptr, cycle);
     picl->line_count++;
+    // Update maximum line count
+    if(picl->line_count > picl->max_line_count) {
+      picl->max_line_count = picl->line_count;
+    }
     picl->log_ptr += UTIL_CACHE_LINE_SIZE;
+    picl->log_write_count++;
+    picl->epoch_log_write_count++;
   }
   picl->epoch_store_count++;
   picl->total_store_count++;
@@ -2068,6 +2283,7 @@ void picl_l3_eviction(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
   if(ret == PICL_ADDR_PRESENT) {
     picl->evict_cb(picl->nvoverlay, line_addr, cycle);
     picl->line_count--;
+    picl->l3_evict_count++;
   }
   return;
 }
@@ -2076,8 +2292,11 @@ void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   ht64_rm_it_t it;
   ht64_rm_begin(picl->ht64, &it);
   uint64_t count = 0;
+  // Performs tag walk to downgrade dirty lines
   while(ht64_is_rm_end(picl->ht64, &it) == 0) {
     picl->evict_cb(picl->nvoverlay, ht64_it_key(&it), cycle); // Write back the cache line into NVM
+    picl->tag_walk_evict_count++;
+    // Removes the current item and moves to next
     ht64_rm_next(picl->ht64, &it);
     count++;
   }
@@ -2087,6 +2306,9 @@ void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   // We align the log pointer after advancing new epoch
   picl->log_ptr = 0UL;
   picl->epoch_store_count = 0UL;
+  // Clear per-epoch log write count after saving it to the fifo
+  fifo_insert(picl->log_sizes, picl->epoch_log_write_count);
+  picl->epoch_log_write_count = 0UL;
   return;
 }
 
@@ -2099,8 +2321,29 @@ void picl_conf_print(picl_t *picl) {
 void picl_stat_print(picl_t *picl) {
   printf("---------- picl_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(picl->ht64), ht64_get_bucket_count(picl->ht64));
-  printf("Lines %lu epochs %lu log ptr %lu epoch stores %lu total stores %lu\n", 
-    picl->line_count, picl->epoch_count, picl->log_ptr, picl->epoch_store_count, picl->total_store_count);
+  printf("Lines curr %lu (max %lu) epochs %lu log ptr %lu epoch stores %lu total stores %lu\n", 
+    picl->line_count, picl->max_line_count, picl->epoch_count, picl->log_ptr, 
+    picl->epoch_store_count, picl->total_store_count);
+  // Print evict counters (should equal total writes to NVM)
+  uint64_t log_size = (picl->log_write_count * PICL_LOG_ENTRY_SIZE + 
+    (picl->tag_walk_evict_count + picl->l3_evict_count) * UTIL_CACHE_LINE_SIZE);
+  printf("Writes log %lu walk %lu LLC evict %lu (sum %lu) total size %lu bytes\n", 
+    picl->log_write_count, picl->tag_walk_evict_count, picl->l3_evict_count, 
+    picl_get_total_evict_count(picl), log_size);
+  printf("  Alternate writes %lu (assuming one log entry needs two writes)\n",
+    picl->log_write_count * 2 + picl->tag_walk_evict_count + picl->l3_evict_count);
+  // Log sizes (average of all epochs)
+  fifo_it_t it;
+  fifo_begin(picl->log_sizes, &it);
+  uint64_t total_log_writes = 0UL;
+  while(fifo_is_end(picl->log_sizes, &it) == 0) {
+    total_log_writes += fifo_it_value(&it);
+    fifo_next(picl->log_sizes, &it);
+  }
+  double avg_writes = (double)total_log_writes / (double)fifo_get_item_count(picl->log_sizes);
+  printf("Avg epoch log writes %f (%f bytes, %lu data pts) epoch size %lu\n", 
+    avg_writes, avg_writes * PICL_LOG_ENTRY_SIZE, fifo_get_item_count(picl->log_sizes),
+    picl->epoch_size);
   return;
 }
 
@@ -2108,6 +2351,14 @@ void picl_stat_print(picl_t *picl) {
 
 const char *nvoverlay_mode_names[] = {
   "MODE_FULL", "MODE_PICL", "MODE_TRACER",
+};
+
+// This interface is used to disable nvoverlay, e.g. when the simulation ends but there
+// are still clean up instructions in the workload before program exits
+nvoverlay_intf_t nvoverlay_intf_noop = {
+  nvoverlay_noop_noop, nvoverlay_noop_noop,
+  nvoverlay_noop_noop, nvoverlay_noop_noop, nvoverlay_noop_noop,
+  nvoverlay_noop_noop, 0UL,
 };
 
 nvoverlay_intf_t nvoverlay_intf_full = {
@@ -2201,7 +2452,7 @@ void nvoverlay_trace_driven_check_core_mask(nvoverlay_t *nvoverlay) {
   }
   int core_count = tracer_core_count < cpu_core_count ? tracer_core_count : cpu_core_count;
   for(int i = 0;i < core_count;i++) {
-    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0 && 
+    if(nvoverlay_core_mask_is_set(nvoverlay, i) == 0 && 
        tracer_get_core_record_count(nvoverlay->tracer, i) != 0) {
       printf("WARNING: Core %d has record but is not set in the mask\n", i);
       printf("Core mask: ");
@@ -2219,7 +2470,6 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
   }
   tracer_t *tracer = nvoverlay->tracer;
   assert(tracer);
-  uint64_t last_cycle = 0UL;
   printf("*** Starting trace-driven simulation\n");
   printf("0%%"); // Starting of the progress bar
   tracer_record_t *rec;
@@ -2234,7 +2484,8 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
   const uint64_t quantum = tracer_get_record_count(nvoverlay->tracer) / 50;
   while((rec = tracer_next(tracer)) != NULL) {
     if(cb) cb(nvoverlay, rec); 
-    last_cycle = rec->cycle;
+    // Take sample if serial is large enough
+    nvoverlay_stat_sample(nvoverlay, rec->serial);
     switch(rec->type) {
       case TRACER_LOAD: {
         nvoverlay_intf.load_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
@@ -2250,6 +2501,12 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
       } break;
       case TRACER_L3_EVICT: {
         nvoverlay_intf.l3_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
+      } break;
+      case TRACER_INST: { // Non-functional, only reports instruction count
+        nvoverlay_full_inst(nvoverlay, rec->id, rec->cycle);
+      } break;
+      case TRACER_CYCLE: {
+        nvoverlay_full_cycle(nvoverlay, rec->id, rec->cycle);
       } break;
       default: {
         error_exit("Unknown record type: %d\n", rec->type);
@@ -2267,9 +2524,10 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
     }
   }
   putchar('\n');
-  printf("*** Finished trace-driven simulation @ cycle %lu\n", last_cycle);
-  printf("*** Total records: %lu\n", tracer_get_record_count(nvoverlay->tracer));
+  printf("*** Finished trace-driven simulation. Total records: %lu\n", tracer_get_record_count(nvoverlay->tracer));
+  // Self-check on data structures
   nvoverlay_stat_print(nvoverlay);
+  nvoverlay_selfcheck(nvoverlay);
   // Destroy the object
   nvoverlay_free(nvoverlay);
   exit(0);
@@ -2357,15 +2615,60 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   // Sample frequency - if not then by default set to zero
   if(conf_exists(conf, "nvoverlay.sample_freq") == 1) {
     nvoverlay->sample_freq = conf_find_uint64_range(conf, "nvoverlay.sample_freq", 0, 0, CONF_ABBR);
+    nvoverlay->samples = fifo_init();
+    // Report error if not found, since in this branch we must take samples
+    const char *filename = conf_find_str_mandatory(conf, "nvoverlay.sample_filename");
+    // NVOverlay owns the file name string, should free it later
+    nvoverlay->sample_filename = (char *)malloc(strlen(filename) + 1);
+    SYSEXPECT(nvoverlay->sample_filename != NULL);
+    strcpy(nvoverlay->sample_filename, filename);
+    assert(nvoverlay_sample_is_enabled(nvoverlay) == 1);
   } else {
-    nvoverlay->sample_freq = 0UL;
+    nvoverlay->sample_freq = 0UL; // 0 means no sample
+    nvoverlay->samples = NULL;
+    nvoverlay->sample_filename = NULL;
+    assert(nvoverlay_sample_is_enabled(nvoverlay) == 0);
   }
+  // Verbose print flag
+  if(conf_exists(conf, "nvoverlay.stat_verbose") == 1) {
+    nvoverlay->stat_verbose = conf_find_bool_mandatory(conf, "nvoverlay.stat_verbose");
+  } else {
+    nvoverlay->stat_verbose = 0;
+  }
+  // Caps
+  if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
+    nvoverlay->inst_cap = conf_find_uint64_range(conf, "nvoverlay.inst_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->inst_cap = 0UL; // 0 means no cap
+  }
+  if(conf_exists(conf, "nvoverlay.cycle_cap") == 1) {
+    nvoverlay->cycle_cap = conf_find_uint64_range(conf, "nvoverlay.cycle_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->cycle_cap = 0UL; // 0 means no cap
+  }
+  if(nvoverlay->cycle_cap != 0UL && nvoverlay->inst_cap != 0UL) {
+    error_exit("At most one of cycle_cap and inst_cap can be set for NVOverlay\n");
+  }
+  // Set to core count, and drop to zero
+  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
   // Trace-driven - This must be at the very end of the function
   nvoverlay_trace_driven_init(nvoverlay);
   return;
 }
 
 void nvoverlay_free_full(nvoverlay_t *nvoverlay) {
+  if(nvoverlay_sample_is_enabled(nvoverlay)) {
+    // Dump stat first if sampling is enabled
+    printf("Dumping statistics to %d files...\n", SAMPLE_COUNT);
+    nvoverlay_stat_dump(nvoverlay);
+    printf("Done\n");
+    assert(nvoverlay->samples != NULL);
+    assert(nvoverlay->sample_filename != NULL);
+    free(nvoverlay->sample_filename);
+    fifo_free(nvoverlay->samples);
+  }
   free(nvoverlay->stable_epochs);
   cpu_free(nvoverlay->cpu);
   vtable_free(nvoverlay->vtable);
@@ -2489,7 +2792,7 @@ uint64_t nvoverlay_get_min_epoch(nvoverlay_t *nvoverlay) {
   cpu_t *cpu = nvoverlay->cpu;
   uint64_t min_epoch = -1UL;
   for(int i = 0;i < nvoverlay->cpu->core_count;i++) {
-    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0) {
+    if(nvoverlay_core_mask_is_set(nvoverlay, i) == 0) {
       continue; // If the core is not in active core list just skip
     } else if(cpu->cores[i].epoch < min_epoch) {
       min_epoch = cpu->cores[i].epoch;
@@ -2502,13 +2805,67 @@ uint64_t nvoverlay_get_max_epoch(nvoverlay_t *nvoverlay) {
   cpu_t *cpu = nvoverlay->cpu;
   uint64_t max_epoch = 0UL;
   for(int i = 0;i < nvoverlay->cpu->core_count;i++) {
-    if(bitmap64_is_set(&nvoverlay->core_mask, i) == 0) {
+    if(nvoverlay_core_mask_is_set(nvoverlay, i) == 0) {
       continue; // If the core is not in active core list just skip
     } else if(cpu->cores[i].epoch > max_epoch) {
       max_epoch = cpu->cores[i].epoch;
     }
   }
   return max_epoch;
+}
+
+void nvoverlay_selfcheck(nvoverlay_t *nvoverlay) {
+  printf("Performing self check.. (mode = %s)\n", nvoverlay_mode_names[nvoverlay->mode]);
+  switch(nvoverlay->mode) {
+    case NVOVERLAY_MODE_FULL: nvoverlay_selfcheck_full(nvoverlay); break;
+    case NVOVERLAY_MODE_PICL: nvoverlay_selfcheck_picl(nvoverlay); break;
+    default: break;
+  }
+  printf("Pass!\n");
+  return;
+}
+
+// NVOverlay consistency check
+void nvoverlay_selfcheck_full(nvoverlay_t *nvoverlay) {
+  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL);
+  omt_selfcheck(nvoverlay->omt);
+  overlay_selfcheck(nvoverlay->overlay);
+  // This checks tag array and vtable consistency
+  cpu_tag_selfcheck_all(nvoverlay->cpu, nvoverlay->vtable);
+  // This only checks CPU itself
+  cpu_selfcheck(nvoverlay->cpu);
+  // Cross check
+  // Core evict + vtable evict = omcbuf access
+  uint64_t core_tw_evict_count = 0UL;
+  for(int i = 0;i < cpu_get_core_count(nvoverlay->cpu);i++) {
+    core_t *core = cpu_get_core(nvoverlay->cpu, i);
+    core_tw_evict_count += core->tag_walk_evict_count;
+  }
+  if(core_tw_evict_count + vtable_get_omc_evict_count(nvoverlay->vtable) != 
+     omcbuf_get_access_count(nvoverlay->omcbuf)) {
+    error_exit("Inconsistent evict count and omcbuf access count: core %lu + vtable %lu != omcbuf %lu\n",
+      core_tw_evict_count, vtable_get_omc_evict_count(nvoverlay->vtable), 
+      omcbuf_get_access_count(nvoverlay->omcbuf));
+  }
+  // omcbuf evict = nvm write
+  if(omcbuf_get_evict_count(nvoverlay->omcbuf) != nvm_get_write_count(nvoverlay->nvm)) {
+    error_exit("Inconsistent omcbuf evict and NVM write: %lu != %lu\n",
+      omcbuf_get_evict_count(nvoverlay->omcbuf), nvm_get_write_count(nvoverlay->nvm));
+  }
+  return;
+}
+
+// Performs picl consistency check
+void nvoverlay_selfcheck_picl(nvoverlay_t *nvoverlay) {
+  assert(nvoverlay->mode == NVOVERLAY_MODE_PICL);
+  picl_t *picl = nvoverlay->picl;
+  nvm_t *nvm = nvoverlay->nvm;
+  // Cross-check: Eviction count must equal NVM write count
+  if(picl_get_total_evict_count(picl) != nvm_get_write_count(nvm)) {
+    error_exit("Inconsistent evict and NVM write: %lu and %lu\n",
+      picl_get_total_evict_count(picl), nvm_get_write_count(nvm));
+  }
+  return;
 }
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
@@ -2528,6 +2885,8 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
       printf("Core mask ");
       bitmap64_print_bitstr(&nvoverlay->core_mask);
       putchar('\n');
+      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
     } break;
     case NVOVERLAY_MODE_PICL: {
       nvm_conf_print(nvoverlay->nvm);
@@ -2549,10 +2908,10 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
     case NVOVERLAY_MODE_FULL: {
       // Print tracer stat at the beginning if trace driven is enabled
       if(nvoverlay->trace_driven_enabled == 1) {
-        tracer_stat_print(nvoverlay->tracer);
+        tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
       }
       omt_stat_print(nvoverlay->omt);
-      cpu_stat_print(nvoverlay->cpu);
+      cpu_stat_print(nvoverlay->cpu, nvoverlay->stat_verbose);
       vtable_stat_print(nvoverlay->vtable);
       omcbuf_stat_print(nvoverlay->omcbuf);
       overlay_stat_print(nvoverlay->overlay);
@@ -2560,21 +2919,29 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
       printf("---------- nvoverlay_t ----------\n");
       printf("Last stable epoch %lu; Total walks %lu\n", 
         nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
-      printf("Masked cores: epoch min %lu max %lu\n", 
+      printf("Masked cores: curr epoch min %lu max %lu\n", 
         nvoverlay_get_min_epoch(nvoverlay), nvoverlay_get_max_epoch(nvoverlay));
-      printf("Samples %lu\n", nvoverlay->sample_count);
+      printf("Samples %lu (freq %lu %s) last sampled %lu file name %s\n", 
+        nvoverlay->sample_count, nvoverlay->sample_freq, nvoverlay->sample_freq == 0UL ? "OFF" : "ON",
+        nvoverlay->last_sample_serial, 
+        nvoverlay->sample_filename ? nvoverlay->sample_filename : "None");
       // Although it is not stat, print here to help interpret data
-      printf("Tag walk mode: %s\n", nvoverlay->tag_walk_passive ? "Passive" : "Normal");
+      printf("Tag walk mode %s epoch size %lu\n", 
+        nvoverlay->tag_walk_passive ? "Passive" : "Normal", nvoverlay->epoch_size);
+      printf("Total NVM writes %lu size %lu bytes\n",
+        nvm_get_write_count(nvoverlay->nvm) + omt_get_write_count(nvoverlay->omt),
+        nvm_get_write_count(nvoverlay->nvm) * UTIL_CACHE_LINE_SIZE + omt_get_write_count(nvoverlay->omt) * 8UL);
+      printf("Cap core count %d\n", nvoverlay->cap_core_count);
     } break;
     case NVOVERLAY_MODE_PICL: {
       if(nvoverlay->trace_driven_enabled == 1) {
-        tracer_stat_print(nvoverlay->tracer);
+        tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
       }
       nvm_stat_print(nvoverlay->nvm);
       picl_stat_print(nvoverlay->picl);
     } break;
     case NVOVERLAY_MODE_TRACER: {
-      tracer_stat_print(nvoverlay->tracer);
+      tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
     } break;
     default: {
       error_exit("Unknown NVOverlay mode: %d\n", nvoverlay->mode);
@@ -2583,16 +2950,119 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
   return;
 }
 
+// Following are sampling functions
+
+// These are used for both print and file name construction
+const char *overlay_sample_names[SAMPLE_COUNT] = {
+  "overlay_size", "omt_size", "epoch_skew",
+};
+
+// Note: All fields except serial are initialized. Caller should set serial
+nvoverlay_sample_t *nvoverlay_sample_init(nvoverlay_t *nvoverlay) {
+  nvoverlay_sample_t *sample = (nvoverlay_sample_t *)malloc(sizeof(nvoverlay_sample_t));
+  SYSEXPECT(sample != NULL);
+  memset(sample, 0x00, sizeof(nvoverlay_sample_t));
+  // Initialize fields
+  sample->data[SAMPLE_OMT_SIZE] = omt_get_size(nvoverlay->omt);
+  sample->data[SAMPLE_OVERLAY_SIZE] = overlay_get_size(nvoverlay->overlay);
+  uint64_t max_epoch = 0UL, min_epoch = -1UL;
+  if(nvoverlay_core_mask_popcount(nvoverlay) == 0) {
+    error_exit("There should be at least one active core\n");
+  }
+  for(int i = 0;i < cpu_get_core_count(nvoverlay->cpu);i++) {
+    if(nvoverlay_core_mask_is_set(nvoverlay, i) == 0) continue; 
+    core_t *core = cpu_get_core(nvoverlay->cpu, i);
+    if(core->epoch > max_epoch) max_epoch = core->epoch;
+    if(core->epoch < min_epoch) min_epoch = core->epoch;
+  }
+  assert(max_epoch >= min_epoch);
+  sample->data[SAMPLE_EPOCH_SKEW] = max_epoch - min_epoch;
+  return sample;
+}
+
+void nvoverlay_sample_free(nvoverlay_sample_t *sample) { 
+  free(sample); 
+}
+
+// Sample is a global thing. We use serial number as sample
+// This function can be called for any serial; We determine whether to take
+// the sample inside the function
+void nvoverlay_stat_sample(nvoverlay_t *nvoverlay, uint64_t serial) {
+  // If sampling is turned off, do not do anything
+  if(nvoverlay_sample_is_enabled(nvoverlay) == 0) {
+    return;
+  }
+  assert(serial > nvoverlay->last_sample_serial);
+  //printf("%lu\n", serial - nvoverlay->last_sample_serial);
+  if(serial - nvoverlay->last_sample_serial >= nvoverlay->sample_freq) {
+    nvoverlay->last_sample_serial = serial;
+    nvoverlay->sample_count++;
+    nvoverlay_sample_t *sample = nvoverlay_sample_init(nvoverlay);
+    sample->serial = serial;
+    fifo_insert(nvoverlay->samples, (uint64_t)sample);
+  }
+  return;
+}
+
+// Caller should free the returned file name buffer
+char *nvoverlay_stat_dump_filename(nvoverlay_t *nvoverlay, int index) {
+  if(index < 0 || index >= SAMPLE_COUNT) {
+    error_exit("Illegal index for stat dump: %d (should be [0, %d))\n",
+      index, SAMPLE_COUNT);
+  }
+  const char *prefix = nvoverlay->sample_filename;
+  // prefix + "_" + name + ".txt" + '\0'
+  int len = strlen(prefix) + 1 + strlen(overlay_sample_names[index]) + 4 + 1;
+  char *ret = (char *)malloc(len);
+  SYSEXPECT(ret != NULL);
+  strcpy(ret, prefix);
+  strcat(ret, "_");
+  strcat(ret, overlay_sample_names[index]);
+  strcat(ret, ".txt");
+  return ret;
+}
+
+// Dumps all stats into seperate files, using sample_filename as prefix
+// Printing format: [serial number] [data point]
+void nvoverlay_stat_dump(nvoverlay_t *nvoverlay) {
+  if(nvoverlay_sample_is_enabled(nvoverlay) == 0) {
+    return;
+  }
+  fifo_t *samples = nvoverlay->samples;
+  for(int i = 0;i < SAMPLE_COUNT;i++) {
+    // First, compute the file name, and open the file
+    char *filename = nvoverlay_stat_dump_filename(nvoverlay, i);
+    FILE *fp = fopen(filename, "w");
+    fifo_it_t it;
+    fifo_begin(samples, &it);
+    uint64_t count = 0UL;
+    while(fifo_is_end(samples, &it) == 0) {
+      // Get the i-th sample point
+      uint64_t data = ((nvoverlay_sample_t *)fifo_it_value(&it))->data[i];
+      uint64_t serial = ((nvoverlay_sample_t *)fifo_it_value(&it))->serial;
+      // Text output, with a new line for each data point
+      fprintf(fp, "%lu %lu\n", serial, data);
+      count++;
+      fifo_next(samples, &it);
+    }
+    assert(count == fifo_get_item_count(samples));
+    (void)count;
+    fclose(fp);
+    free(filename);
+  }
+  return;
+}
+
+// Following are component call backs
+
 static void nvoverlay_vtable_evict_cb(nvoverlay_t *nvoverlay, 
   uint64_t addr, int id, uint64_t version, uint64_t cycle, int evict_type) {
   assert(nvoverlay); // NULL means we forgot to call vtable_set_parent
+  assert(evict_type == EVICT_BOTH || evict_type == EVICT_OMC);
   if(evict_type == EVICT_BOTH) {
-    nvoverlay->evict_omc_count++;
-    nvoverlay->evict_llc_count++;
-    omcbuf_insert(nvoverlay->omcbuf, addr, version, cycle); // Evicted version go into omcbuf
+    omcbuf_insert(nvoverlay->omcbuf, addr, version, cycle); // Evict to both (we do not model LLC here)
   } else {
-    assert(evict_type == EVICT_OMC);
-    nvoverlay->evict_llc_count++;
+    omcbuf_insert(nvoverlay->omcbuf, addr, version, cycle); // Evict to OMC only
   }
   (void)id;
   return;
@@ -2632,6 +3102,11 @@ static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, 
   assert(nvoverlay != NULL);
   nvm_write(nvoverlay->nvm, line_addr, cycle);
   return;
+}
+
+// No-op call back functions; Does nothing
+void nvoverlay_noop_noop(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  (void)nvoverlay; (void)id; (void)line_addr; (void)cycle; (void)serial;
 }
 
 void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
@@ -2677,7 +3152,7 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
     for(int i = 0;i < cpu_get_core_count(nvoverlay->cpu);i++) {
       if(nvoverlay->stable_epochs[i] < min_epoch) {
         // Only use the core to compute min stable epoch if the bit is set
-        if(bitmap64_is_set(&nvoverlay->core_mask, i)) {
+        if(nvoverlay_core_mask_is_set(nvoverlay, i)) {
           min_epoch = nvoverlay->stable_epochs[i];
         }
       }
@@ -2777,6 +3252,25 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
       nvoverlay_printf("Interface successfully attached. mode = %s\n", nvoverlay_mode_names[nvoverlay->mode]);
       break;
     } case NVOVERLAY_OTHER_INST: {
+      // Under trace mode insert a special record, which will be executed later in other modes
+      if(nvoverlay->mode == NVOVERLAY_MODE_TRACER) {
+        tracer_insert(nvoverlay->tracer, TRACER_INST, id, 0UL, cycle, serial);
+      } else if(nvoverlay->mode == NVOVERLAY_MODE_FULL) {
+        nvoverlay_full_inst(nvoverlay, id, cycle);
+      }
+      break;
+    } case NVOVERLAY_OTHER_CONF: {
+      nvoverlay_conf_print(nvoverlay);
+      break;
+    } case NVOVERLAY_OTHER_STAT: {
+      nvoverlay_stat_print(nvoverlay);
+      break;
+    } case NVOVERLAY_OTHER_CYCLE: {
+      if(nvoverlay->mode == NVOVERLAY_MODE_TRACER) {
+        tracer_insert(nvoverlay->tracer, TRACER_CYCLE, id, 0UL, cycle, serial);
+      } else if(nvoverlay->mode == NVOVERLAY_MODE_FULL) {
+        nvoverlay_full_cycle(nvoverlay, id, cycle);
+      }
       break;
     } default: {
       nvoverlay_error("Unknown arg: %lu\n", arg);
@@ -2784,6 +3278,44 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
     }
   }
   (void)nvoverlay; (void)id; (void)line_addr; (void)cycle; (void)serial;
+  return;
+}
+
+// Report inst count on a core
+void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
+  assert(id >= 0 && id < nvoverlay->cpu->core_count);
+  core_t *core = cpu_get_core(nvoverlay->cpu, id);
+  // Inst must be monotonically increasing
+  assert(inst_count >= core->last_inst_count);
+  nvoverlay->cpu->total_inst_count += (inst_count - core->last_inst_count);
+  core->last_inst_count = inst_count;
+  if(nvoverlay->inst_cap != 0UL && inst_count >= nvoverlay->inst_cap) {
+    if(core->cap_status == CORE_CAP_STATUS_ACTIVE) {
+      core->cap_status = CORE_CAP_STATUS_HALTED;
+      nvoverlay->cap_core_count--;
+      assert(nvoverlay->cap_core_count >= 0);
+    }
+  }
+  return;
+}
+
+// Report cycle count on a core
+void nvoverlay_full_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count) {
+  assert(id >= 0 && id < nvoverlay->cpu->core_count);
+  core_t *core = cpu_get_core(nvoverlay->cpu, id);
+  // Cycle count may decrease in OOO exec
+  if(cycle_count > core->last_cycle_count) {
+    nvoverlay->cpu->total_cycle_count += (cycle_count - core->last_cycle_count);
+    core->last_cycle_count = cycle_count;
+    // Check whether we need to exit
+    if(nvoverlay->cycle_cap != 0UL && cycle_count >= nvoverlay->cycle_cap) {
+      if(core->cap_status == CORE_CAP_STATUS_ACTIVE) {
+        core->cap_status = CORE_CAP_STATUS_HALTED;
+        nvoverlay->cap_core_count--;
+        assert(nvoverlay->cap_core_count >= 0);
+      }
+    }
+  }
   return;
 }
 
