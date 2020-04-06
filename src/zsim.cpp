@@ -1151,18 +1151,26 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_REGISTER_THREAD   (1027)
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
 
+// 1. Make sure you only call this under single threaded mode, or have core lock held
+//    i.e. please only insert NVOVERLAY_SIM_END() macro after all worker threads have finished
+//    and in the main thread
+// 2. After this function, zinfo->nvoverlay will be destroyed, and call backs no longer work
+// 3. This function may be called several times, so we should check whether zinfo->nvoverlay is still present
 VOID OverlaySimEndCb(THREADID tid) {
+    if(zinfo->nvoverlay == NULL) {
+        return;
+    }
     nvoverlay_printf("Execution completes. Inserting core inst count for %u cores\n", zinfo->numCores);
     for(int i = 0;i < (int)zinfo->numCores;i++) {
         Core *core = zinfo->cores[i];
-        uint64_t inst_count = core->getInstrs();
+    
         // Insert a record for inst count into tracer which is the last record
         nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
-        // This should only be run under single thread mode, but we acquire the lock just in case
-        spinlock_acquire(&core_lock);
         // Pass inst count as argument "cycle"
-        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, inst_count, core_serial++);
-        spinlock_release(&core_lock);
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getInstrs(), core_serial++);
+        // Insert a record for inst count into tracer which is the last record
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CYCLE;
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getCycles(), core_serial++);
     }
     if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
         nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
@@ -1173,11 +1181,10 @@ VOID OverlaySimEndCb(THREADID tid) {
         // Print stat
         nvoverlay_intf.other_arg = NVOVERLAY_OTHER_STAT;
         nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
-        // todo: also report cycle here
     } else if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_TRACER) {
         nvoverlay_printf("Finished tracer generation simulation.\n");
     }
-    nvoverlay_printf("Decallocating NVOverlay object\n");
+    nvoverlay_printf("Decallocating NVOverlay object and nullifying call backs\n");
     nvoverlay_free(zinfo->nvoverlay);
     zinfo->nvoverlay = NULL;
     nvoverlay_intf = nvoverlay_intf_noop;
