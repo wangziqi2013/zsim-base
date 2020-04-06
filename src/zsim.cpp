@@ -142,6 +142,9 @@ VOID SimThreadStart(THREADID tid);
 VOID SimThreadFini(THREADID tid);
 VOID SimEnd();
 
+// Ziqi: Declaration of call back functions
+VOID OverlaySimEndCb(THREADID tid);
+
 VOID HandleMagicOp(THREADID tid, ADDRINT op);
 
 VOID FakeCPUIDPre(THREADID tid, REG eax, REG ecx);
@@ -579,14 +582,12 @@ VOID Instruction(INS ins) {
         //info("Instrumenting magic op");
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
     } else if(INS_IsXchg(ins) && INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
-        
-        
         // Ziqi: Handle magic code here
         switch(INS_OperandReg(ins, 0)) {
             case REG_R8: { // Sim begin
                 break;
             } case REG_R9: { // Sim end
-                // Call OverlaySimBeginCb() before the magic op
+                // Call OverlaySimEndCb() before the magic op
                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)OverlaySimEndCb, IARG_THREAD_ID, IARG_END);
                 break;
             } case REG_R10: { // Mt sim begin
@@ -1150,7 +1151,7 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_REGISTER_THREAD   (1027)
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
 
-VOID OverlaySimBeginCb(THREADID tid) {
+VOID OverlaySimEndCb(THREADID tid) {
     nvoverlay_printf("Execution completes. Inserting core inst count for %u cores\n", zinfo->numCores);
     for(int i = 0;i < (int)zinfo->numCores;i++) {
         Core *core = zinfo->cores[i];
