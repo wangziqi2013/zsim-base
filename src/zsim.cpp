@@ -579,40 +579,15 @@ VOID Instruction(INS ins) {
         //info("Instrumenting magic op");
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
     } else if(INS_IsXchg(ins) && INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
+        
+        
         // Ziqi: Handle magic code here
         switch(INS_OperandReg(ins, 0)) {
             case REG_R8: { // Sim begin
                 break;
             } case REG_R9: { // Sim end
-                if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
-                   nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
-                    nvoverlay_printf("Finished online simulation.\n");
-                    // Print conf
-                    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
-                    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
-                    // Print stat
-                    nvoverlay_intf.other_arg = NVOVERLAY_OTHER_STAT;
-                    nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
-                } else if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_TRACER) {
-                    nvoverlay_printf("Finished tracer generation simulation.\n");
-                    nvoverlay_printf("Inserting core inst count for %u cores\n", zinfo->numCores);
-                    for(int i = 0;i < (int)zinfo->numCores;i++) {
-                        Core *core = zinfo->cores[i];
-                        uint64_t inst_count = core->getInstrs();
-                        // Insert a record for inst count into tracer which is the last record
-                        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
-                        // This should only be run under single thread mode, but we acquire the lock just in case
-                        spinlock_acquire(&core_lock);
-                        // Pass inst count as argument "cycle"
-                        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, inst_count, core_serial++);
-                        spinlock_release(&core_lock);
-                    }
-                }
-                nvoverlay_printf("Decallocating NVOverlay object\n");
-                nvoverlay_free(zinfo->nvoverlay);
-                zinfo->nvoverlay = NULL;
-                nvoverlay_intf = nvoverlay_intf_noop;
-                nvoverlay_printf("Done\n");
+                // Call OverlaySimBeginCb() before the magic op
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)OverlaySimEndCb, IARG_THREAD_ID, IARG_END);
                 break;
             } case REG_R10: { // Mt sim begin
                 break;
@@ -1174,6 +1149,40 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_ROI_END           (1026)
 #define ZSIM_MAGIC_OP_REGISTER_THREAD   (1027)
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
+
+VOID OverlaySimBeginCb(THREADID tid) {
+    nvoverlay_printf("Execution completes. Inserting core inst count for %u cores\n", zinfo->numCores);
+    for(int i = 0;i < (int)zinfo->numCores;i++) {
+        Core *core = zinfo->cores[i];
+        uint64_t inst_count = core->getInstrs();
+        // Insert a record for inst count into tracer which is the last record
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
+        // This should only be run under single thread mode, but we acquire the lock just in case
+        spinlock_acquire(&core_lock);
+        // Pass inst count as argument "cycle"
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, inst_count, core_serial++);
+        spinlock_release(&core_lock);
+    }
+    if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
+        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
+        nvoverlay_printf("Finished online simulation.\n");
+        // Print conf
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
+        // Print stat
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_STAT;
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, 0, 0, 0, 0);
+        // todo: also report cycle here
+    } else if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_TRACER) {
+        nvoverlay_printf("Finished tracer generation simulation.\n");
+    }
+    nvoverlay_printf("Decallocating NVOverlay object\n");
+    nvoverlay_free(zinfo->nvoverlay);
+    zinfo->nvoverlay = NULL;
+    nvoverlay_intf = nvoverlay_intf_noop;
+    nvoverlay_printf("Done\n");
+    return;
+}
 
 VOID HandleMagicOp(THREADID tid, ADDRINT op) {
     switch (op) {
