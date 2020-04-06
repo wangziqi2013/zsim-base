@@ -47,6 +47,9 @@ uint64_t core_serial = 0UL;
 // Core parameters
 // TODO(dsm): Make OOOCore templated, subsuming these
 
+// Ziqi: Declaration of call back functions
+VOID OverlaySimEndCb(THREADID tid);
+
 // Stages --- more or less matched to Westmere, but have not seen detailed pipe diagrams anywhare
 #define FETCH_STAGE 1
 #define DECODE_STAGE 4  // NOTE: Decoder adds predecode delays to decode
@@ -524,6 +527,25 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
     core->bbl(bblAddr, bblInfo);
 
+    // Ziqi: Report inst and cycle at the beginning of every basic block (we could use a
+    // smaller granularity, but overhead might be high)
+    // Check nvoverlay first since it may have been deallocated
+    if(zinfo->nvoverlay && nvoverlay_get_mode(zinfo->nvoverlay) != NVOVERLAY_MODE_TRACER) {
+        spinlock_acquire(&core_lock);
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, core->id, 0UL, core->getInstrs(), core_serial++);
+        nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CYCLE;
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, core->id, 0UL, core->getCycles(), core_serial++);
+        if(nvoverlay_get_cap_core_count(zinfo->nvoverlay) == 0) {
+            // Set the var to -1 to avoid other threads printing out message repeatedly
+            nvoverlay_set_cap_core_count(zinfo->nvoverlay, -1);
+            nvoverlay_printf("Simulation finished by hitting cap @ %lu\n", nvoverlay_get_cap(zinfo->nvoverlay));
+            OverlaySimEndCb(tid);
+            spinlock_release(&core_lock);
+        } else {
+            spinlock_release(&core_lock);
+        }
+    }
     while (core->curCycle > core->phaseEndCycle) {
         core->phaseEndCycle += zinfo->phaseLength;
 
