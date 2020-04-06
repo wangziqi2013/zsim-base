@@ -915,7 +915,7 @@ typedef struct nvoverlay_struct_t {
   char *sample_filename;        // Prefix of dump file name for writing out samples; Optional if sampling is disabled
   uint64_t inst_cap;            // Number of inst we simulate for each core; All cores must be no less than this
   uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
-  int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores
+  int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions

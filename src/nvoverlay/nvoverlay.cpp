@@ -2744,10 +2744,38 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
   nvoverlay->nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat);
   picl_t *picl = nvoverlay->picl = picl_init(nvoverlay_picl_evict_cb); // Pass the evict cb
   picl_set_parent(picl, nvoverlay);
+  // CPU
+  int cpu_core_count = conf_find_int32_range(conf, "cpu.cores", 1, CORE_COUNT_MAX, CONF_RANGE);
+  nvoverlay->cpu = cpu_init(cpu_core_count, NULL);
+  cpu_set_parent(nvoverlay->cpu, NULL); // We do not use any call back, just set to NULL
   // Allows using K or M suffix, range [1, +inf)
   uint64_t epoch_size = conf_find_uint64_range(conf, "picl.epoch_size", 
     1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   picl_set_epoch_size(picl, epoch_size);
+  // Verbose print flag
+  if(conf_exists(conf, "nvoverlay.stat_verbose") == 1) {
+    nvoverlay->stat_verbose = conf_find_bool_mandatory(conf, "nvoverlay.stat_verbose");
+  } else {
+    nvoverlay->stat_verbose = 0;
+  }
+  // Caps
+  if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
+    nvoverlay->inst_cap = conf_find_uint64_range(conf, "nvoverlay.inst_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->inst_cap = 0UL; // 0 means no cap
+  }
+  if(conf_exists(conf, "nvoverlay.cycle_cap") == 1) {
+    nvoverlay->cycle_cap = conf_find_uint64_range(conf, "nvoverlay.cycle_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->cycle_cap = 0UL; // 0 means no cap
+  }
+  if(nvoverlay->cycle_cap != 0UL && nvoverlay->inst_cap != 0UL) {
+    error_exit("At most one of cycle_cap and inst_cap can be set for NVOverlay\n");
+  }
+  // Set to core count, and drop to zero
+  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
   // Trace-driven
   nvoverlay_trace_driven_init(nvoverlay);
   return;
@@ -2937,6 +2965,7 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
       if(nvoverlay->trace_driven_enabled == 1) {
         tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
       }
+      cpu_stat_print(nvoverlay->cpu, nvoverlay->stat_verbose);
       nvm_stat_print(nvoverlay->nvm);
       picl_stat_print(nvoverlay->picl);
     } break;
@@ -3255,7 +3284,8 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
       // Under trace mode insert a special record, which will be executed later in other modes
       if(nvoverlay->mode == NVOVERLAY_MODE_TRACER) {
         tracer_insert(nvoverlay->tracer, TRACER_INST, id, 0UL, cycle, serial);
-      } else if(nvoverlay->mode == NVOVERLAY_MODE_FULL) {
+      } else {
+        // Called for all other modes
         nvoverlay_full_inst(nvoverlay, id, cycle);
       }
       break;
@@ -3268,7 +3298,8 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
     } case NVOVERLAY_OTHER_CYCLE: {
       if(nvoverlay->mode == NVOVERLAY_MODE_TRACER) {
         tracer_insert(nvoverlay->tracer, TRACER_CYCLE, id, 0UL, cycle, serial);
-      } else if(nvoverlay->mode == NVOVERLAY_MODE_FULL) {
+      } else {
+        // Called for all other modes
         nvoverlay_full_cycle(nvoverlay, id, cycle);
       }
       break;
