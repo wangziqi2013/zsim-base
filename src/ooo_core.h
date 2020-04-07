@@ -418,6 +418,8 @@ class OOOCore : public Core {
         CycleQueue<28> uopQueue;  // models issue queue
 
         uint64_t instrs, uops, bbls, approxInstrs, mispredBranches;
+        double last_progress; // Ziqi: Progress of NVOverlay simulation
+        uint64_t last_bbls;   // Ziqi: Use this to record number of bbls since last reporting
 
 #ifdef OOO_STALL_STATS
         Counter profFetchStalls, profDecodeStalls, profIssueStalls;
