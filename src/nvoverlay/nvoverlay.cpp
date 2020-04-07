@@ -1242,13 +1242,15 @@ void cpu_stat_print(cpu_t *cpu, int verbose) {
 
 //* vtable_t
 
-vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, vtable_core_tag_cb_t core_tag_cb) {
+vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, vtable_core_tag_cb_t core_tag_cb, 
+                      vtable_core_stable_epoch_cb_t core_stable_epoch_cb) {
   vtable_t *vtable = (vtable_t *)malloc(sizeof(vtable_t));
   SYSEXPECT(vtable != NULL);
   memset(vtable, 0x00, sizeof(vtable_t));
   vtable->evict_cb = evict_cb;
   vtable->core_recv_cb = core_recv_cb;
   vtable->core_tag_cb = core_tag_cb;
+  vtable->core_stable_epoch_cb = core_stable_epoch_cb;
   vtable->vers = ht64_init_size(VTABLE_HT_INIT_BUCKET_COUNT);
   return vtable;
 }
@@ -1451,12 +1453,14 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     // Case 3
     ver->owner = OWNER_L1;
     ver->l1_state = STATE_M;
-    ver->l1_ver = epoch;
+    // NOTE: IF OTHER VER IS LARGER THAN CURRENT EPOCH WE MUST USE OTHER VER
+    ver->l1_ver = ver->other_ver > epoch ? ver->other_ver : epoch;
     ver->l2_state = STATE_S;
     ver->l2_ver = ver->other_ver; // L2 version is the LLC version before ownership xfer
     // Here we use "set" to invalidate others
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
+    // May potentially advance current epoch - see above code
     vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver);
   } else if(ver->owner == OWNER_L1) {
     // Case 4
@@ -1470,11 +1474,23 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
       vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), ver->l2_ver, cycle, EVICT_OMC);
       vtable->st_inv_evict_count++; // Store invalidate (not including ownership xfer on L1)
     }
-    uint64_t recv_version;
-    recv_version = ver->l2_ver = ver->l1_ver; // Receive the transferred version
+    // Ownership transfer from other L1 to current L1, and also fill L2
+    uint64_t recv_version = ver->l1_ver;
+    // Check whether the received version is lower than current stable epoch
+    if(recv_version < vtable->core_stable_epoch_cb(vtable->nvoverlay, id)) {
+      assert(recv_version < epoch); // Must be receiving from the past
+      // We have performed tag walk past the received version, we must evict this version back
+      // Otherwise the omcbuf will report error saying a version before tag walk is evicted
+      vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), recv_version, cycle, EVICT_BOTH);
+      vtable->st_inv_evict_count++; // Store invalidate (caused by ownership xfer)
+      ver->l2_ver = ver->l1_ver = epoch; // This is equivelent to a local write
+    } else {
+      if(recv_version > epoch) epoch = recv_version; // If receiving from the future, adjust the epoch
+      ver->l2_ver = ver->l1_ver; // Receive the transferred version in L2
+      ver->l1_ver = epoch; // Same trick above: We load L2 state as M, so any possible store-evict will be discarded
+    }
     ver->owner = OWNER_L1;
     ver->l1_state = STATE_M;
-    ver->l1_ver = epoch;       // Same trick above: We load L2 state as M, so any possible store-evict will be discarded
     ver->l2_state = STATE_M;   // L2 is dirty since we did not write back the version transferred from the other cache
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
@@ -1495,9 +1511,17 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     //ver->l2_ver = ....;         <- The L2 receives from remote L2 and keeps its version and dirtiness
     //ver->l2_state = STATE_M;    <- Already is
     uint64_t recv_version = ver->l2_ver; // Received version is remote L2's version
+    if(recv_version < vtable->core_stable_epoch_cb(vtable->nvoverlay, id)) {
+      vtable_evict_wrapper(vtable, ver->addr, vtable_l2_sharer(ver), recv_version, cycle, EVICT_BOTH);
+      vtable->st_inv_evict_count++; // Store invalidate (caused by ownership xfer)
+      ver->l2_ver = ver->l1_ver = epoch; // This is equivelent to a local write
+    } else {
+      // If receiving from the future then must adjust current epoch before writing
+      if(recv_version > epoch) epoch = recv_version;
+      ver->l1_ver = epoch;
+    }
     ver->owner = OWNER_L1;
     ver->l1_state = STATE_M;
-    ver->l1_ver = epoch;     
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
     vtable->core_recv_cb(vtable->nvoverlay, id, recv_version);
@@ -1694,6 +1718,10 @@ void omcbuf_set_parent(omcbuf_t *omcbuf, struct nvoverlay_struct_t *nvoverlay) {
 void omcbuf_insert(omcbuf_t *omcbuf, uint64_t addr, uint64_t epoch, uint64_t cycle) {
   assert(epoch != -1UL); // -1UL means invalid slot
   ASSERT_CACHE_ALIGNED(addr);
+  if(epoch < omcbuf->last_walk_epoch) {
+    error_exit("Insert addr 0x%lX epoch %lu to omcbuf after tag walk @ %lu\n", 
+      addr, epoch, omcbuf->last_walk_epoch);
+  }
   omcbuf->access_count++;
   int set_index = (int)((addr >> UTIL_CACHE_LINE_BITS) & omcbuf->set_mask);
   uint64_t tag = addr >> (UTIL_CACHE_LINE_BITS + omcbuf->set_idx_bits);
@@ -1757,6 +1785,8 @@ void omcbuf_tag_walk(omcbuf_t *omcbuf, uint64_t target_epoch, uint64_t cycle) {
       entry->epoch = -1UL;
     }
   }
+  // Make sure no smaller input is possible
+  omcbuf->last_walk_epoch = target_epoch;
   return;
 }
 
@@ -1769,9 +1799,9 @@ void omcbuf_conf_print(omcbuf_t *omcbuf) {
 
 void omcbuf_stat_print(omcbuf_t *omcbuf) {
   printf("---------- omcbuf_t ----------\n");
-  printf("Access %lu hit %lu miss %lu evict %lu tag walk evict %lu\n", 
+  printf("Access %lu hit %lu miss %lu evict %lu tag walk evict %lu last walk epoch %lu\n", 
     omcbuf->access_count, omcbuf->hit_count, omcbuf->miss_count, omcbuf->evict_count,
-    omcbuf->tag_walk_evict_count);
+    omcbuf->tag_walk_evict_count, omcbuf->last_walk_epoch);
   return;
 }
 
@@ -2386,6 +2416,7 @@ nvoverlay_intf_t nvoverlay_intf;
 static void nvoverlay_vtable_evict_cb(nvoverlay_t *nvoverlay, uint64_t addr, int id, uint64_t version, uint64_t cycle, int evict_type);
 static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version);
 static void nvoverlay_vtable_core_tag_cb(nvoverlay_t *nvoverlay, int op, int level, int id, ver_t *ver);
+static uint64_t nvoverlay_vtable_core_stable_epoch_cb(nvoverlay_t *nvoverlay, int id);
 static void nvoverlay_omcbuf_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t version, uint64_t cycle);
 static void nvoverlay_cpu_tag_walk_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, int id, uint64_t version, uint64_t cycle);
 static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t cycle);
@@ -2396,7 +2427,8 @@ nvoverlay_t *nvoverlay_init(const char *conf_file) {
   memset(nvoverlay, 0x00, sizeof(nvoverlay_t));
   // Configuration file
   conf_t *conf = nvoverlay->conf = conf_init(conf_file);
-
+  // Time
+  nvoverlay->begin_time = time(NULL);
   // Read mode - depending on the mode, we assign different interfaces to the main intf object
   char *mode_str = conf_find_str_mandatory(conf, "nvoverlay.mode");
   if(streq(mode_str, "debug")) {
@@ -2572,7 +2604,8 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   nvoverlay->omt = omt_init();
   // Version table (vtable)
   nvoverlay->vtable = \
-    vtable_init(nvoverlay_vtable_evict_cb, nvoverlay_vtable_core_recv_cb, nvoverlay_vtable_core_tag_cb);
+    vtable_init(nvoverlay_vtable_evict_cb, nvoverlay_vtable_core_recv_cb, nvoverlay_vtable_core_tag_cb,
+                nvoverlay_vtable_core_stable_epoch_cb);
   vtable_set_parent(nvoverlay->vtable, nvoverlay);
   // CPU
   int cpu_core_count = conf_find_int32_range(conf, "cpu.cores", 1, CORE_COUNT_MAX, CONF_RANGE);
@@ -2976,6 +3009,8 @@ void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
       error_exit("Unknown NVOverlay mode: %d\n", nvoverlay->mode);
     } break;
   }
+  // Print time
+  printf("Simulation time: %f\n", difftime(time(NULL), nvoverlay->begin_time));
   return;
 }
 
@@ -3021,7 +3056,7 @@ void nvoverlay_stat_sample(nvoverlay_t *nvoverlay, uint64_t serial) {
   if(nvoverlay_sample_is_enabled(nvoverlay) == 0) {
     return;
   }
-  assert(serial > nvoverlay->last_sample_serial);
+  assert(serial >= nvoverlay->last_sample_serial);
   //printf("%lu\n", serial - nvoverlay->last_sample_serial);
   if(serial - nvoverlay->last_sample_serial >= nvoverlay->sample_freq) {
     nvoverlay->last_sample_serial = serial;
@@ -3108,6 +3143,11 @@ static void nvoverlay_vtable_core_tag_cb(nvoverlay_t *nvoverlay, int op, int lev
   // Comment out the following to disable tag simulation
   cpu_tag_op(nvoverlay->cpu, op, level, id, ver);
   return;
+}
+
+static uint64_t nvoverlay_vtable_core_stable_epoch_cb(nvoverlay_t *nvoverlay, int id) {
+  assert(nvoverlay != NULL);
+  return cpu_get_last_walk_epoch(nvoverlay->cpu, id);
 }
 
 static void nvoverlay_omcbuf_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t version, uint64_t cycle) {
@@ -3198,7 +3238,6 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
       nvoverlay->last_stable_epoch = min_epoch;
     }
   }
-  // TODO: TRACK OVERLAY SIZE IN TIME SERIES GRAPH
   (void)serial;
   return;
 } 

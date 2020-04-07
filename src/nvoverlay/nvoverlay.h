@@ -9,6 +9,7 @@
 #include <string.h>
 #include <error.h>
 #include <unistd.h>
+#include <time.h>
 // If zsim macro is defined, we use zsim's own impl of assert()
 #ifndef ZSIM_PATH
 #include <assert.h>
@@ -451,6 +452,11 @@ inline static core_t *cpu_get_core(cpu_t *cpu, int index) {
 }
 
 inline static int cpu_get_core_count(cpu_t *cpu) { return cpu->core_count; }
+inline static uint64_t cpu_get_last_walk_epoch(cpu_t *cpu, int id) {
+  assert(id >= 0 && id < cpu->core_count);
+  return cpu->cores[id].last_walk_epoch; 
+}
+
 int cpu_tag_get_ways(cpu_t *cpu, int level);
 int cpu_tag_get_sets(cpu_t *cpu, int level);
 
@@ -501,12 +507,16 @@ typedef void (*vtable_core_recv_cb_t)(struct nvoverlay_struct_t *, int, uint64_t
 // For INSERT and REMOVE the ID indicates the mask; For SET the ver_t must be the before value, and the core ID indicates
 // the core that we set
 typedef void (*vtable_core_tag_cb_t)(struct nvoverlay_struct_t *, int, int, int, ver_t *);
+// Takes ID as second argument
+// This is used to get the last tag walk epoch on a core
+typedef uint64_t (*vtable_core_stable_epoch_cb_t)(struct nvoverlay_struct_t *, int);
 
 typedef struct vtable_struct_t {
   ht64_t *vers;                         // Index for ver_t
-  vtable_evict_cb_t evict_cb;           // Eviction call back function - we have test version and release version
-  vtable_core_recv_cb_t core_recv_cb;   // Core data receival function - same as above
-  vtable_core_tag_cb_t core_tag_cb;     // Core tag change function - same as above
+  vtable_evict_cb_t evict_cb;           // Eviction call back function
+  vtable_core_recv_cb_t core_recv_cb;   // Core data receival function
+  vtable_core_tag_cb_t core_tag_cb;     // Core tag change function
+  vtable_core_stable_epoch_cb_t core_stable_epoch_cb; // Core get stable epoch function
   struct nvoverlay_struct_t *nvoverlay; // Back pointer used for call back function
   // Statistics
   uint64_t omc_evict_count;
@@ -523,7 +533,8 @@ typedef struct vtable_struct_t {
 inline static uint64_t vtable_get_omc_evict_count(vtable_t *vtable) { return vtable->omc_evict_count; }
 inline static uint64_t vtable_get_llc_evict_count(vtable_t *vtable) { return vtable->llc_evict_count; }
 
-vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, vtable_core_tag_cb_t core_tag_cb);
+vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, 
+  vtable_core_tag_cb_t core_tag_cb, vtable_core_stable_epoch_cb_t core_stable_epoch_cb);
 void vtable_free(vtable_t *vtable);
 // If this is not called, the nvoverlay in the call back arg will be NULL
 void vtable_set_parent(vtable_t *vtable, struct nvoverlay_struct_t *overlay);
@@ -635,6 +646,7 @@ typedef struct {
   uint64_t miss_count;      // Misses
   uint64_t evict_count;     // All Evictions
   uint64_t tag_walk_evict_count; // Only evictions for tag walk
+  uint64_t last_walk_epoch; // Epoch of last tag walk - after this epoch there should be no insert with lower epoch
 } omcbuf_t;
 
 omcbuf_t *omcbuf_init(int sets, int ways, omcbuf_evict_cb_t evict_cb);
@@ -916,6 +928,7 @@ typedef struct nvoverlay_struct_t {
   uint64_t inst_cap;            // Number of inst we simulate for each core; All cores must be no less than this
   uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
   int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
+  time_t begin_time;            // Start time of simulation, set in c'tor
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions
@@ -1006,6 +1019,16 @@ inline static uint64_t nvoverlay_get_cap(nvoverlay_t *nvoverlay) {
   if(nvoverlay->inst_cap != 0UL) return nvoverlay->inst_cap;
   else return nvoverlay->cycle_cap;
 }
+// Returns either inst or cycle progress, return value might > 1.0
+inline static double nvoverlay_get_progress(nvoverlay_t *nvoverlay, int id) {
+  if(nvoverlay->inst_cap != 0UL) {
+    return (double)(cpu_get_core(nvoverlay->cpu, id)->last_inst_count) / (double)nvoverlay->inst_cap;
+  } else if(nvoverlay->cycle_cap != 0UL) {
+    return (double)(cpu_get_core(nvoverlay->cpu, id)->last_cycle_count) / (double)nvoverlay->cycle_cap;
+  }
+  // It is possible that both are zero, and we return 0
+  return 0.0f;
+}
 
 void nvoverlay_core_mask_add(nvoverlay_t *nvoverlay, int pos);
 void nvoverlay_core_mask_remove(nvoverlay_t *nvoverlay, int pos);
@@ -1045,7 +1068,7 @@ typedef struct {
   uint64_t data[SAMPLE_COUNT];
 } nvoverlay_sample_t;
 
-// This function will populate the sample object using nvoverlay passed
+// This function will populate the sample_t object
 nvoverlay_sample_t *nvoverlay_sample_init(nvoverlay_t *nvoverlay);
 void nvoverlay_sample_free(nvoverlay_sample_t *sample);
 inline static uint64_t nvoverlay_sample_item_count(nvoverlay_t *nvoverlay) { 
