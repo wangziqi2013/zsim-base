@@ -7,3 +7,9 @@ build
 heartbeat
 out.cfg
 nvoverlay_test_*
+
+btree_mt_*
+btree
+hash_table
+*.seq
+nvoverlay_sample_*
