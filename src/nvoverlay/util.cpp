@@ -460,6 +460,7 @@ int conf_selfcheck(conf_t *conf) {
 
 // Prints out unaccessed nodes
 void conf_print_unused(conf_t *conf) {
+  if(conf->warn_unused == 0) return; // Do not print if this is turned off (default off)
   conf_node_t *curr = conf->head;
   while(curr) {
     if(curr->accessed == 0) printf("WARNING: Unused option \"%s\" = \"%s\"\n", curr->key, curr->value);

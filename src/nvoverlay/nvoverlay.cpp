@@ -1237,6 +1237,8 @@ void cpu_stat_print(cpu_t *cpu, int verbose) {
   printf("Total: epoch st %lu st %lu walk evict %lu walks %lu inst %lu cycle %lu max cycle %lu cap_active %d\n",
     total_epoch_store_count, total_store_count, total_tag_walk_evict_count, total_tag_walk_count,
     total_inst_count, total_cycle_count, max_cycle_count, active_count);
+  assert(total_inst_count == cpu->total_inst_count);
+  assert(total_cycle_count == cpu->total_cycle_count);
   return;
 }
 
@@ -2357,6 +2359,7 @@ void picl_stat_print(picl_t *picl) {
   // Print evict counters (should equal total writes to NVM)
   uint64_t log_size = (picl->log_write_count * PICL_LOG_ENTRY_SIZE + 
     (picl->tag_walk_evict_count + picl->l3_evict_count) * UTIL_CACHE_LINE_SIZE);
+  // TODO: ADD A MODE TO PRINT L2
   printf("Writes log %lu walk %lu LLC evict %lu (sum %lu) total size %lu bytes\n", 
     picl->log_write_count, picl->tag_walk_evict_count, picl->l3_evict_count, 
     picl_get_total_evict_count(picl), log_size);
@@ -2427,6 +2430,11 @@ nvoverlay_t *nvoverlay_init(const char *conf_file) {
   memset(nvoverlay, 0x00, sizeof(nvoverlay_t));
   // Configuration file
   conf_t *conf = nvoverlay->conf = conf_init(conf_file);
+  if(conf_exists(conf, "conf.warn_unused") == 1) {
+    if(conf_find_bool_mandatory(conf, "conf.warn_unused") == 1) {
+      conf_enable_warn_unused(conf);
+    }
+  }
   // Time
   nvoverlay->begin_time = time(NULL);
   // Read mode - depending on the mode, we assign different interfaces to the main intf object
@@ -2584,6 +2592,34 @@ void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay) {
   return;
 }
 
+// This function initialized caps
+static void nvoverlay_cap_init(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
+    nvoverlay->inst_cap = conf_find_uint64_range(conf, "nvoverlay.inst_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->inst_cap = 0UL; // 0 means no cap
+  }
+  if(conf_exists(conf, "nvoverlay.cycle_cap") == 1) {
+    nvoverlay->cycle_cap = conf_find_uint64_range(conf, "nvoverlay.cycle_cap", 
+      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
+  } else {
+    nvoverlay->cycle_cap = 0UL; // 0 means no cap
+  }
+  if(nvoverlay->cycle_cap != 0UL && nvoverlay->inst_cap != 0UL) {
+    error_exit("At most one of cycle_cap and inst_cap can be set for NVOverlay\n");
+  } 
+  if(nvoverlay->cycle_cap != 0UL || nvoverlay->inst_cap != 0UL) {
+    nvoverlay->has_cap = 1;
+  } else {
+    nvoverlay->has_cap = 0;
+  }
+  // Set to core count, and drop to zero
+  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
+  return;
+}
+
 // Mode and conf are set
 void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
@@ -2643,6 +2679,7 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   conf_print_unused(conf);
   // Initialize the stable epoch mask to all-one, i.e. we use all cores
   bitmap64_set_all_one(&nvoverlay->core_mask);
+  // Passive tag walk
   int passive_ret = conf_find_bool(conf, "nvoverlay.tag_walk_passive", &nvoverlay->tag_walk_passive);
   if(passive_ret == 0) nvoverlay->tag_walk_passive = 0; // Proactive tag walk by default
   // Sample frequency - if not then by default set to zero
@@ -2669,23 +2706,7 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
     nvoverlay->stat_verbose = 0;
   }
   // Caps
-  if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
-    nvoverlay->inst_cap = conf_find_uint64_range(conf, "nvoverlay.inst_cap", 
-      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
-  } else {
-    nvoverlay->inst_cap = 0UL; // 0 means no cap
-  }
-  if(conf_exists(conf, "nvoverlay.cycle_cap") == 1) {
-    nvoverlay->cycle_cap = conf_find_uint64_range(conf, "nvoverlay.cycle_cap", 
-      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
-  } else {
-    nvoverlay->cycle_cap = 0UL; // 0 means no cap
-  }
-  if(nvoverlay->cycle_cap != 0UL && nvoverlay->inst_cap != 0UL) {
-    error_exit("At most one of cycle_cap and inst_cap can be set for NVOverlay\n");
-  }
-  // Set to core count, and drop to zero
-  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
+  nvoverlay_cap_init(nvoverlay);
   // Trace-driven - This must be at the very end of the function
   nvoverlay_trace_driven_init(nvoverlay);
   return;
@@ -2792,23 +2813,7 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
     nvoverlay->stat_verbose = 0;
   }
   // Caps
-  if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
-    nvoverlay->inst_cap = conf_find_uint64_range(conf, "nvoverlay.inst_cap", 
-      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
-  } else {
-    nvoverlay->inst_cap = 0UL; // 0 means no cap
-  }
-  if(conf_exists(conf, "nvoverlay.cycle_cap") == 1) {
-    nvoverlay->cycle_cap = conf_find_uint64_range(conf, "nvoverlay.cycle_cap", 
-      0UL, CONF_UINT64_MAX, CONF_ABBR | CONF_RANGE);
-  } else {
-    nvoverlay->cycle_cap = 0UL; // 0 means no cap
-  }
-  if(nvoverlay->cycle_cap != 0UL && nvoverlay->inst_cap != 0UL) {
-    error_exit("At most one of cycle_cap and inst_cap can be set for NVOverlay\n");
-  }
-  // Set to core count, and drop to zero
-  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
+  nvoverlay_cap_init(nvoverlay);
   // Trace-driven
   nvoverlay_trace_driven_init(nvoverlay);
   return;
@@ -2926,6 +2931,7 @@ void nvoverlay_selfcheck_picl(nvoverlay_t *nvoverlay) {
     error_exit("Inconsistent evict and NVM write: %lu and %lu\n",
       picl_get_total_evict_count(picl), nvm_get_write_count(nvm));
   }
+  cpu_selfcheck(nvoverlay->cpu);
   return;
 }
 
@@ -2941,6 +2947,7 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
       overlay_conf_print(nvoverlay->overlay);
       nvm_conf_print(nvoverlay->nvm);
       printf("---------- nvoverlay_t ----------\n");
+      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
       printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
         nvoverlay->epoch_size, nvoverlay->tag_walk_freq, nvoverlay->tag_walk_passive, nvoverlay->sample_freq);
       printf("Core mask ");
@@ -2952,9 +2959,21 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
     case NVOVERLAY_MODE_PICL: {
       nvm_conf_print(nvoverlay->nvm);
       picl_conf_print(nvoverlay->picl);
+      // Only print PiCL related nvoverlay information
+      printf("---------- nvoverlay_t ----------\n");
+      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+      printf("Core mask ");
+      bitmap64_print_bitstr(&nvoverlay->core_mask);
+      putchar('\n');
+      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
     } break;
     case NVOVERLAY_MODE_TRACER: {
       tracer_conf_print(nvoverlay->tracer);
+      printf("---------- nvoverlay_t ----------\n");
+      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
     } break;
     default: {
       error_exit("Unknown NVOverlay mode: %d\n", nvoverlay->mode);
@@ -3289,9 +3308,23 @@ void nvoverlay_picl_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uin
 void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   (void)id; (void)serial;
   picl_t *picl = nvoverlay->picl;
+  cpu_t *cpu = nvoverlay->cpu;
+  core_t *core = cpu_get_core(cpu, id);
+  core->total_store_count++;
+  core->epoch_store_count++;
   picl_store(picl, line_addr, cycle);
   if(picl_get_epoch_store_count(picl) == picl_get_epoch_size(picl)) {
+    uint64_t before_walk = picl->tag_walk_evict_count;
     picl_advance_epoch(picl, cycle);
+    uint64_t after_walk = picl->tag_walk_evict_count;
+    // Set these manually to be consistent with NVOverlay
+    core->epoch_store_count = 0UL;
+    core->tag_walk_evict_count += (after_walk - before_walk);
+    core->tag_walk_count++;
+    // Only one global epoch, so just set this for all cores
+    for(int i = 0;i < cpu_get_core_count(cpu);i++) {
+      cpu_get_core(cpu, i)->last_walk_epoch = picl->epoch_count;
+    }
   }
   return;
 }
@@ -3301,8 +3334,8 @@ void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
   return;
 }
 void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
-  // Nothing to do
-  (void)nvoverlay; (void)line_addr; (void)id; (void)cycle; (void)serial;
+  nvoverlay->picl->l2_evict_count++;
+  (void)line_addr; (void)id; (void)cycle; (void)serial;
   return;
 }
 void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
@@ -3352,6 +3385,7 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
 }
 
 // Report inst count on a core
+// This function updates both per-core stat and CPU overall stat
 void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);

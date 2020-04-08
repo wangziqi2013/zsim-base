@@ -456,6 +456,8 @@ inline static uint64_t cpu_get_last_walk_epoch(cpu_t *cpu, int id) {
   assert(id >= 0 && id < cpu->core_count);
   return cpu->cores[id].last_walk_epoch; 
 }
+inline static uint64_t cpu_get_total_inst_count(cpu_t *cpu) { return cpu->total_inst_count; }
+inline static uint64_t cpu_get_total_cycle_count(cpu_t *cpu) { return cpu->total_cycle_count; }
 
 int cpu_tag_get_ways(cpu_t *cpu, int level);
 int cpu_tag_get_sets(cpu_t *cpu, int level);
@@ -846,7 +848,8 @@ typedef struct {
   uint64_t log_write_count;       // Number of log entries (in fact log entries are larger than 64B)
   uint64_t epoch_log_write_count; // Log write count in the current epoch; Cleared in next epoch
   uint64_t tag_walk_evict_count;  // Number of evictions incurred by tag walk
-  uint64_t l3_evict_count;        // Number of writes to NVM caused by LLC evict
+  uint64_t l3_evict_count;        // Number of writes to NVM caused by LLC evict (only used in LLC mode)
+  uint64_t l2_evict_count;        // Number of writes to NVM caused by L2 evict (only used in L2 mode)
   fifo_t *log_sizes;              // List of log sizes in each epoch
 } picl_t; 
 
@@ -927,6 +930,7 @@ typedef struct nvoverlay_struct_t {
   char *sample_filename;        // Prefix of dump file name for writing out samples; Optional if sampling is disabled
   uint64_t inst_cap;            // Number of inst we simulate for each core; All cores must be no less than this
   uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
+  int has_cap;                  // Set to 1 if there is a cap; 0 if not. If zero should not call cap related function
   int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
   time_t begin_time;            // Start time of simulation, set in c'tor
   // Components
@@ -1008,19 +1012,22 @@ inline static tracer_t *nvoverlay_get_tracer(nvoverlay_t *nvoverlay) { return nv
 inline static vtable_t *nvoverlay_get_vtable(nvoverlay_t *nvoverlay) { return nvoverlay->vtable; }
 inline static cpu_t *nvoverlay_get_cpu(nvoverlay_t *nvoverlay) { return nvoverlay->cpu; }
 inline static int nvoverlay_get_mode(nvoverlay_t *nvoverlay) { return nvoverlay->mode; }
+
+inline static int nvoverlay_has_cap(nvoverlay_t *nvoverlay) { return nvoverlay->has_cap; }
 inline static int nvoverlay_get_cap_core_count(nvoverlay_t *nvoverlay) { return nvoverlay->cap_core_count; }
 inline static void nvoverlay_set_cap_core_count(nvoverlay_t *nvoverlay, int value) { 
   nvoverlay->cap_core_count = value; 
 }
 inline static int nvoverlay_get_inst_cap(nvoverlay_t *nvoverlay) { return nvoverlay->inst_cap; }
 inline static int nvoverlay_get_cycle_cap(nvoverlay_t *nvoverlay) { return nvoverlay->cycle_cap; }
-// Returns the valid cap
+// Returns the valid cap or 0UL if no cap
 inline static uint64_t nvoverlay_get_cap(nvoverlay_t *nvoverlay) {
   if(nvoverlay->inst_cap != 0UL) return nvoverlay->inst_cap;
-  else return nvoverlay->cycle_cap;
+  else if(nvoverlay->inst_cap != 0UL) return nvoverlay->cycle_cap;
+  return 0UL;
 }
 // Returns either inst or cycle progress, return value might > 1.0
-inline static double nvoverlay_get_progress(nvoverlay_t *nvoverlay, int id) {
+inline static double nvoverlay_get_core_progress(nvoverlay_t *nvoverlay, int id) {
   if(nvoverlay->inst_cap != 0UL) {
     return (double)(cpu_get_core(nvoverlay->cpu, id)->last_inst_count) / (double)nvoverlay->inst_cap;
   } else if(nvoverlay->cycle_cap != 0UL) {
@@ -1028,6 +1035,24 @@ inline static double nvoverlay_get_progress(nvoverlay_t *nvoverlay, int id) {
   }
   // It is possible that both are zero, and we return 0
   return 0.0f;
+}
+
+// Same as above, except that we compute overall progress
+inline static double nvoverlay_get_total_progress(nvoverlay_t *nvoverlay) {
+  int core_count = cpu_get_core_count(nvoverlay->cpu);
+  if(nvoverlay->inst_cap != 0UL) {
+    return (double)cpu_get_total_inst_count(nvoverlay->cpu) / ((double)nvoverlay->inst_cap * core_count);
+  } else if(nvoverlay->cycle_cap != 0UL) {
+    return (double)cpu_get_total_cycle_count(nvoverlay->cpu) / ((double)nvoverlay->cycle_cap * core_count);
+  }
+  return 0.0f;
+}
+
+inline static uint64_t nvoverlay_get_total_inst_count(nvoverlay_t *nvoverlay) {
+  return cpu_get_total_inst_count(nvoverlay->cpu);
+}
+inline static uint64_t nvoverlay_get_total_cycle_count(nvoverlay_t *nvoverlay) {
+  return cpu_get_total_cycle_count(nvoverlay->cpu);
 }
 
 void nvoverlay_core_mask_add(nvoverlay_t *nvoverlay, int pos);

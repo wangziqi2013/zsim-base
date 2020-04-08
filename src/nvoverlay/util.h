@@ -175,6 +175,7 @@ typedef struct conf_struct_t {
   int item_count;          // Number of key-value pairs
   conf_node_t *head;       // Linked list of configurations
   char *filename;          // File name of the conf file
+  int warn_unused;         // conf.warn_unused, set by upper level class
 } conf_t;
 
 void conf_node_free(conf_node_t *node);
@@ -185,6 +186,8 @@ conf_t *conf_init(const char *filename);                    // Open a file and l
 void conf_free(conf_t *conf);
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists
 int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns if the entry exists
+inline static void conf_enable_warn_unused(conf_t *conf) { conf->warn_unused = 1; }
+
 conf_node_t *conf_find(conf_t *conf, const char *key);        // Returns node pointer
 inline static int conf_exists(conf_t *conf, const char *key) { return conf_find(conf, key) != NULL; }
 int conf_find_str(conf_t *conf, const char *key, char **ret); // Returns 1 if found; 0 if not
