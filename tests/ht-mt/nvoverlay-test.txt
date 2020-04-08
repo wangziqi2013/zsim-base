@@ -1,0 +1,71 @@
+
+# This file is for nvoverlay overall test
+
+nvm.rlat = 200
+nvm.wlat = 400
+nvm.banks = 16
+
+# Direct mapped for better testing
+omcbuf.sets = 1
+omcbuf.ways = 1024
+
+cpu.cores = 16
+
+cpu.l1.ways = 8
+cpu.l1.size = 32KB
+
+cpu.l2.ways = 8
+cpu.l2.size = 256KB
+
+# NVOverlay Conf
+
+# This configures which component interacts with the simulator (tracer, picl or nvoverlay)
+# If set to debug we halt and report error immediately; The debugging program should edit
+# this option before running the test
+nvoverlay.mode = picl
+
+# This configures whether we ignore simulator, and runs trace-driven simulation
+# In this case the tracer is also initialized. We ignore everything except tracer.cores and tracer.filename
+nvoverlay.trace_driven = false
+
+# Measured in number of stores
+nvoverlay.epoch_size = 200K
+
+# Measured in number of epoch advances; This is only guaranteed as a lower bound
+nvoverlay.tag_walk_freq = 5
+
+# If this is true then we only perform passive tag walk - do not evict, but only scan
+nvoverlay.tag_walk_passive = false
+
+# Number of operations (memop or evict) between each sampling
+# Zero means we do not take any sample; By default this is zero
+# Could use abbr
+nvoverlay.sample_freq = 10K
+# This is a template, and we will add suffix to this
+nvoverlay.sample_filename = nvoverlay_sample
+
+# Default to false
+nvoverlay.stat_verbose = true
+
+# Upper limit of number of instructions per-core we simulate
+# 0 means no cap; Supports abbr.
+nvoverlay.inst_cap = 100M
+
+# Upper limit of number of cycles per-core we simulate
+nvoverlay.cycle_cap = 0
+
+
+# Tracer Conf
+
+tracer.filename = btree_mt
+
+tracer.cores = 16
+tracer.mode = write
+
+# Whether to remove the files on exit
+tracer.cleanup = false
+
+# PiCL Conf
+
+# One more than bank size - we can trigger epoch advance by performing a store to dirty data
+picl.epoch_size = 200K # 10M M stands for million; K stands for kilo
