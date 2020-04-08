@@ -186,8 +186,10 @@ struct GlobSimInfo {
     // Trace-driven simulation (no cores)
     bool traceDriven;
     TraceDriver* traceDriver;
+
     // Ziqi: NVOverlay main object
     nvoverlay_t *nvoverlay;
+    bool exit_on_cap; // sim.exit_on_cap
 };
 
 

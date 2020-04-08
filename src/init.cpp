@@ -1064,7 +1064,9 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
             nvoverlay_error("Please specify conf file path using \"sim.nvoverlay_conf\"\n");
         }
         zinfo->nvoverlay = nvoverlay_init(nvoverlay_conf);
+        zinfo->exit_on_cap = config.get<bool>("sim.exit_on_cap", false);
         nvoverlay_conf_print(zinfo->nvoverlay);
+        printf("Exit hitting caps: %d\n", (int)zinfo->exit_on_cap);
     } else {
         zinfo->sched = nullptr;
     }

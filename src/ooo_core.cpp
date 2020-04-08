@@ -548,6 +548,10 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                     nvoverlay_set_cap_core_count(zinfo->nvoverlay, -1);
                     nvoverlay_printf("Simulation finished by hitting cap @ %lu\n", nvoverlay_get_cap(zinfo->nvoverlay));
                     OverlaySimEndCb(tid);
+                    // Directly exit when the condition is met
+                    if(zinfo->exit_on_cap == true) {
+                        exit(0);
+                    }
                 } else if(nvoverlay_has_cap(zinfo->nvoverlay) == 1) {
                     // Only compute progress if there is a cap
                     double progress = nvoverlay_get_total_progress(zinfo->nvoverlay);
