@@ -54,6 +54,8 @@ nvoverlay.inst_cap = 100M
 # Upper limit of number of cycles per-core we simulate
 nvoverlay.cycle_cap = 0
 
+# Controls whether to print warning message on unused option after init
+conf.warn_unused = 0
 
 # Tracer Conf
 
