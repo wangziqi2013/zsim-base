@@ -29,7 +29,7 @@ nvoverlay.mode = full
 nvoverlay.trace_driven = false
 
 # Measured in number of stores
-nvoverlay.epoch_size = 50K
+nvoverlay.epoch_size = 1M
 
 # Measured in number of epoch advances; This is only guaranteed as a lower bound
 nvoverlay.tag_walk_freq = 10
@@ -49,7 +49,7 @@ nvoverlay.stat_verbose = true
 
 # Upper limit of number of instructions per-core we simulate
 # 0 means no cap; Supports abbr.
-nvoverlay.inst_cap = 15M
+nvoverlay.inst_cap = 100M
 
 # Upper limit of number of cycles per-core we simulate
 nvoverlay.cycle_cap = 0
@@ -70,4 +70,4 @@ tracer.cleanup = false
 # PiCL Conf
 
 # One more than bank size - we can trigger epoch advance by performing a store to dirty data
-picl.epoch_size = 50K # 10M M stands for million; K stands for kilo
+picl.epoch_size = 1M # 10M M stands for million; K stands for kilo
