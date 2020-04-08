@@ -43,6 +43,7 @@
 
 spinlock_t core_lock;
 uint64_t core_serial = 0UL;
+double core_total_progress = 0.0f;
 
 // Core parameters
 // TODO(dsm): Make OOOCore templated, subsuming these
@@ -547,13 +548,14 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                     nvoverlay_set_cap_core_count(zinfo->nvoverlay, -1);
                     nvoverlay_printf("Simulation finished by hitting cap @ %lu\n", nvoverlay_get_cap(zinfo->nvoverlay));
                     OverlaySimEndCb(tid);
-                } else {
-                    double progress = nvoverlay_get_progress(zinfo->nvoverlay, core->id);
+                } else if(nvoverlay_has_cap(zinfo->nvoverlay) == 1) {
+                    // Only compute progress if there is a cap
+                    double progress = nvoverlay_get_total_progress(zinfo->nvoverlay);
                     // Notify progress for each 5% per core
-                    if(progress - core->last_progress >= 0.05f) {
-                        nvoverlay_printf("Core %d progress: %d%%    \r", core->id, (int)(progress * 100));
+                    if(progress - core_total_progress >= 0.05f) {
+                        nvoverlay_printf("Total progress: %f\n", (int)(progress * 100));
                         // Note: Only update it here
-                        core->last_progress = progress;
+                        core_total_progress = progress;
                     }
                     //nvoverlay_printf("Core %d progress: %f\n", core->id, progress);
                 }
