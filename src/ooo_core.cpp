@@ -553,7 +553,7 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                     double progress = nvoverlay_get_total_progress(zinfo->nvoverlay);
                     // Notify progress for each 5% per core
                     if(progress - core_total_progress >= 0.05f) {
-                        nvoverlay_printf("Total progress: %f\n", (int)(progress * 100));
+                        nvoverlay_printf("Total progress: %d%%\n", (int)(progress * 100));
                         // Note: Only update it here
                         core_total_progress = progress;
                     }
