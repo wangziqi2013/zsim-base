@@ -549,11 +549,13 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                     OverlaySimEndCb(tid);
                 } else {
                     double progress = nvoverlay_get_progress(zinfo->nvoverlay, core->id);
-                    if(progress - core->last_progress >= 0.02f) {
+                    // Notify progress for each 5% per core
+                    if(progress - core->last_progress >= 0.05f) {
                         nvoverlay_printf("Core %d progress: %f\n", core->id, progress);
+                        // Note: Only update it here
+                        core->last_progress = progress;
                     }
                     //nvoverlay_printf("Core %d progress: %f\n", core->id, progress);
-                    core->last_progress = progress;
                 }
             }
         }
