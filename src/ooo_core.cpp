@@ -551,7 +551,7 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                     double progress = nvoverlay_get_progress(zinfo->nvoverlay, core->id);
                     // Notify progress for each 5% per core
                     if(progress - core->last_progress >= 0.05f) {
-                        nvoverlay_printf("Core %d progress: %f\n", core->id, progress);
+                        nvoverlay_printf("Core %d progress: %d%%    \r", core->id, (int)(progress * 100));
                         // Note: Only update it here
                         core->last_progress = progress;
                     }
