@@ -13,3 +13,5 @@ btree
 hash_table
 *.seq
 nvoverlay_sample_*
+hash_table_sc
+nvoverlay_zsim_dump.txt
