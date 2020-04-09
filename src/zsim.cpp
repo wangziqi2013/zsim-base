@@ -1173,7 +1173,8 @@ VOID OverlaySimEndCb(THREADID tid) {
         nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getCycles(), core_serial++);
     }
     if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
-        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL) {
+        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL || 
+        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_ALL) {
         nvoverlay_printf("Finished online simulation.\n");
         // Print conf
         nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
