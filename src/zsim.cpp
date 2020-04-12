@@ -1154,8 +1154,8 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
 
 // This starts actual simulation
-VOID OverlaySimEndCb(THREADID tid) {
-    nvoverlay_intf = zinfo->nvoverlay_intf;
+VOID OverlaySimBeginCb(THREADID tid) {
+    //nvoverlay_intf = zinfo->nvoverlay_intf; // Cannot do that b/c tags aren't consistent
     (void)tid;
     return;
 }

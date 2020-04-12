@@ -1065,7 +1065,7 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
         }
         zinfo->nvoverlay = nvoverlay_init(nvoverlay_conf);
         zinfo->nvoverlay_intf = nvoverlay_intf; // Copy the interfaces over
-        nvoverlay_intf = nvoverlay_intf_noop;   // Assign noop intf
+        //nvoverlay_intf = nvoverlay_intf_noop;   // Assign noop intf - can't do that unless we flush zsim cache
         zinfo->exit_on_cap = (int)config.get<uint32_t>("sim.exit_on_cap", 0);
         nvoverlay_conf_print(zinfo->nvoverlay);
         printf("Exit hitting caps: %d\n", (int)zinfo->exit_on_cap);
