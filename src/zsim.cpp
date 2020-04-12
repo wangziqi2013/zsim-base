@@ -144,6 +144,7 @@ VOID SimEnd();
 
 // Ziqi: Declaration of call back functions
 VOID OverlaySimEndCb(THREADID tid);
+VOID OverlaySimBeginCb(THREADID tid);
 
 VOID HandleMagicOp(THREADID tid, ADDRINT op);
 
@@ -585,6 +586,7 @@ VOID Instruction(INS ins) {
         // Ziqi: Handle magic code here
         switch(INS_OperandReg(ins, 0)) {
             case REG_R8: { // Sim begin
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)OverlaySimBeginCb, IARG_THREAD_ID, IARG_END);
                 break;
             } case REG_R9: { // Sim end
                 // Call OverlaySimEndCb() before the magic op
@@ -1151,6 +1153,13 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_REGISTER_THREAD   (1027)
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
 
+// This starts actual simulation
+VOID OverlaySimEndCb(THREADID tid) {
+    nvoverlay_intf = zinfo->nvoverlay_intf;
+    (void)tid;
+    return;
+}
+
 // 1. Make sure you only call this under single threaded mode, or have core lock held
 //    i.e. please only insert NVOVERLAY_SIM_END() macro after all worker threads have finished
 //    and in the main thread
@@ -1173,8 +1182,8 @@ VOID OverlaySimEndCb(THREADID tid) {
         nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getCycles(), core_serial++);
     }
     if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
-        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL || 
-        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_ALL) {
+       nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL || 
+       nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_ALL) {
         nvoverlay_printf("Finished online simulation.\n");
         // Print conf
         nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CONF;
