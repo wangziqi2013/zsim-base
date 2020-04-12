@@ -29,7 +29,7 @@ nvoverlay.mode = all
 nvoverlay.trace_driven = false
 
 # Measured in number of stores
-nvoverlay.epoch_size = 1M
+nvoverlay.epoch_size = 300K
 
 # Measured in number of epoch advances; This is only guaranteed as a lower bound
 nvoverlay.tag_walk_freq = 1
@@ -42,7 +42,7 @@ nvoverlay.tag_walk_passive = false
 # Could use abbr
 nvoverlay.sample_freq = 500K
 # This is a template, and we will add suffix to this
-nvoverlay.sample_filename = ./samples/nvoverlay_sample_art
+nvoverlay.sample_filename = ./samples/nvoverlay_sample_hashtable
 
 # Default to false
 nvoverlay.stat_verbose = true
@@ -70,4 +70,4 @@ tracer.cleanup = false
 # PiCL Conf
 
 # One more than bank size - we can trigger epoch advance by performing a store to dirty data
-picl.epoch_size = 1M # 10M M stands for million; K stands for kilo
+picl.epoch_size = 300K # 10M M stands for million; K stands for kilo

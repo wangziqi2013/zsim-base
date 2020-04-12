@@ -22,7 +22,7 @@ cpu.l2.size = 256KB
 # This configures which component interacts with the simulator (tracer, picl or nvoverlay)
 # If set to debug we halt and report error immediately; The debugging program should edit
 # this option before running the test
-nvoverlay.mode = full
+nvoverlay.mode = all
 
 # This configures whether we ignore simulator, and runs trace-driven simulation
 # In this case the tracer is also initialized. We ignore everything except tracer.cores and tracer.filename
@@ -32,7 +32,7 @@ nvoverlay.trace_driven = false
 nvoverlay.epoch_size = 1M
 
 # Measured in number of epoch advances; This is only guaranteed as a lower bound
-nvoverlay.tag_walk_freq = 10
+nvoverlay.tag_walk_freq = 1
 
 # If this is true then we only perform passive tag walk - do not evict, but only scan
 nvoverlay.tag_walk_passive = false
@@ -40,9 +40,9 @@ nvoverlay.tag_walk_passive = false
 # Number of operations (memop or evict) between each sampling
 # Zero means we do not take any sample; By default this is zero
 # Could use abbr
-nvoverlay.sample_freq = 10K
+nvoverlay.sample_freq = 500K
 # This is a template, and we will add suffix to this
-nvoverlay.sample_filename = nvoverlay_sample
+nvoverlay.sample_filename = nvoverlay_sample_btree
 
 # Default to false
 nvoverlay.stat_verbose = true
