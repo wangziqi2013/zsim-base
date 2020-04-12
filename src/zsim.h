@@ -189,6 +189,7 @@ struct GlobSimInfo {
 
     // Ziqi: NVOverlay main object
     nvoverlay_t *nvoverlay;
+    nvoverlay_intf_t nvoverlay_intf; // Use this to store the default interface
     bool exit_on_cap; // sim.exit_on_cap
 };
 
