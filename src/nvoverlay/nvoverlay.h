@@ -839,6 +839,12 @@ typedef struct {
   picl_evict_cb_t evict_cb;       // Eviction call back for NVM write
   uint64_t log_ptr;               // Log write pointer; Reset for every epoch advance
   uint64_t epoch_size;            // Number of stores in the epoch
+  // Component
+  cpu_t *cpu;                     // We use this to store stat
+  nvm_t *nvm;                     // NVM timing
+  nvm_t *thynvm;                  // Second NVM timing (ThyNVM)
+  nvm_t *l2_nvm;                  // Third NVM timing (L2 PiCL)
+  ht64_t *l2_ht64;                // L2 working set hash table
   // Statistics
   uint64_t line_count;            // Number of lines currently in the current epoch's write set
   uint64_t max_line_count;        // Maximum number of lines in all epochs
@@ -850,7 +856,11 @@ typedef struct {
   uint64_t tag_walk_evict_count;  // Number of evictions incurred by tag walk
   uint64_t l3_evict_count;        // Number of writes to NVM caused by LLC evict (only used in LLC mode)
   uint64_t l2_evict_count;        // Number of writes to NVM caused by L2 evict (only used in L2 mode)
+  uint64_t l2_tag_walk_evict_count; // Number of writes by L2 tag walk at the end of the epoch
+  uint64_t l2_log_write_count;    // Number of log writes for L2 PiCL
   fifo_t *log_sizes;              // List of log sizes in each epoch
+  // ThyNVM stats
+  uint64_t stall_cycles;          // Stall cycles at the end of each epoch (wait for prev epoch)
 } picl_t; 
 
 picl_t *picl_init(picl_evict_cb_t evict_cb);
@@ -860,6 +870,7 @@ inline static void picl_set_parent(picl_t *picl, nvoverlay_struct_t *nvoverlay) 
 }
 
 void picl_store(picl_t *picl, uint64_t line_addr, uint64_t cycle);
+void picl_l2_eviction(picl_t *picl, uint64_t line_addr, uint64_t cycle);
 void picl_l3_eviction(picl_t *picl, uint64_t line_addr, uint64_t cycle);
 void picl_advance_epoch(picl_t *picl, uint64_t cycle); // Epochs are global in PiCL
 
@@ -876,16 +887,21 @@ inline static uint64_t picl_get_total_evict_count(picl_t *picl) {
   return picl->log_write_count + picl->tag_walk_evict_count + picl->l3_evict_count;
 }
 
+void picl_selfcheck(picl_t *picl);
+
 void picl_conf_print(picl_t *picl);
-void picl_stat_print(picl_t *picl);
+void picl_stat_print(picl_t *picl, int verbose);
 
 //* nvoverlay_t
 
-#define NVOVERLAY_MODE_FULL   0
-#define NVOVERLAY_MODE_PICL   1
-#define NVOVERLAY_MODE_TRACER 2
+#define NVOVERLAY_MODE_NONE   0
+#define NVOVERLAY_MODE_FULL   1
+#define NVOVERLAY_MODE_PICL   2
+#define NVOVERLAY_MODE_TRACER 3
+#define NVOVERLAY_MODE_ALL    4 // All models we have - we can run them at the same time
 
-extern const char *nvoverlay_mode_names[];
+
+extern const char *nvoverlay_mode_names[5];
 
 // Call back type for instrumenting trace driven engine
 typedef void (*nvoverlay_trace_driven_cb_t)(struct nvoverlay_struct_t *, tracer_record_t *);
@@ -994,23 +1010,42 @@ void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
 void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
 
+void nvoverlay_all_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+void nvoverlay_all_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+void nvoverlay_all_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+void nvoverlay_all_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+void nvoverlay_all_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
+
 void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial);
-void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count);
-void nvoverlay_full_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count);
+void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count);
+void nvoverlay_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count);
 
 extern nvoverlay_intf_t nvoverlay_intf; // This is the one used by external applications
 
 extern nvoverlay_intf_t nvoverlay_intf_noop;
 extern nvoverlay_intf_t nvoverlay_intf_full;
 extern nvoverlay_intf_t nvoverlay_intf_picl;
+extern nvoverlay_intf_t nvoverlay_intf_all;
 extern nvoverlay_intf_t nvoverlaay_intf_tracer; // Only log the trace into a file
 
-inline static nvm_t *nvoverlay_get_nvm(nvoverlay_t *nvoverlay) { return nvoverlay->nvm; }
+inline static nvm_t *nvoverlay_get_nvm(nvoverlay_t *nvoverlay) { 
+  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL || nvoverlay->mode == NVOVERLAY_MODE_ALL); 
+  return nvoverlay->nvm; 
+}
+inline static nvm_t *nvoverlay_get_picl_nvm(nvoverlay_t *nvoverlay) { 
+  assert(nvoverlay->mode == NVOVERLAY_MODE_PICL || nvoverlay->mode == NVOVERLAY_MODE_ALL); 
+  return nvoverlay->picl->nvm; 
+}
 inline static picl_t *nvoverlay_get_picl(nvoverlay_t *nvoverlay) { return nvoverlay->picl; }
 inline static conf_t *nvoverlay_get_conf(nvoverlay_t *nvoverlay) { return nvoverlay->conf; }
 inline static tracer_t *nvoverlay_get_tracer(nvoverlay_t *nvoverlay) { return nvoverlay->tracer; }
 inline static vtable_t *nvoverlay_get_vtable(nvoverlay_t *nvoverlay) { return nvoverlay->vtable; }
-inline static cpu_t *nvoverlay_get_cpu(nvoverlay_t *nvoverlay) { return nvoverlay->cpu; }
+inline static cpu_t *nvoverlay_get_cpu(nvoverlay_t *nvoverlay) { 
+  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL); return nvoverlay->cpu; 
+}
+inline static cpu_t *nvoverlay_get_picl_cpu(nvoverlay_t *nvoverlay) { 
+  assert(nvoverlay->mode == NVOVERLAY_MODE_PICL); return nvoverlay->picl->cpu; 
+}
 inline static int nvoverlay_get_mode(nvoverlay_t *nvoverlay) { return nvoverlay->mode; }
 
 inline static int nvoverlay_has_cap(nvoverlay_t *nvoverlay) { return nvoverlay->has_cap; }
@@ -1076,7 +1111,14 @@ uint64_t nvoverlay_get_max_epoch(nvoverlay_t *nvoverlay);
 
 void nvoverlay_selfcheck(nvoverlay_t *nvoverlay);
 void nvoverlay_selfcheck_full(nvoverlay_t *nvoverlay);
-void nvoverlay_selfcheck_picl(nvoverlay_t *nvoverlay);
+
+void nvoverlay_conf_print_full(nvoverlay_t *nvoverlay);
+void nvoverlay_conf_print_picl(nvoverlay_t *nvoverlay);
+void nvoverlay_conf_print_tracer(nvoverlay_t *nvoverlay);
+
+void nvoverlay_stat_print_full(nvoverlay_t *nvoverlay);
+void nvoverlay_stat_print_picl(nvoverlay_t *nvoverlay);
+void nvoverlay_stat_print_tracer(nvoverlay_t *nvoverlay);
 
 void nvoverlay_conf_print(nvoverlay_t *nvoverlay);
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay);
@@ -1107,6 +1149,42 @@ inline static int nvoverlay_sample_is_enabled(nvoverlay_t *nvoverlay) {
 void nvoverlay_stat_sample(nvoverlay_t *nvoverlay, uint64_t serial);
 char *nvoverlay_stat_dump_filename(nvoverlay_t *nvoverlay, int index);
 void nvoverlay_stat_dump(nvoverlay_t *nvoverlay);
+
+//* sim_t
+
+// sim->mode values
+#define SIM_MODE_BEGIN          0
+#define SIM_MODE_NONE           0
+#define SIM_MODE_TRACER         1
+#define SIM_MODE_NVOVERLAY      2
+#define SIM_MODE_PICL           3
+#define SIM_MODE_ALL            4
+#define SIM_MODE_END            5
+
+// Printed names
+extern const char *sim_mode_names[SIM_MODE_END];
+
+typedef struct {
+  // Global simulation variables
+  int mode;
+  int trace_driven_enabled;     // Whether TD is enabled
+  nvoverlay_trace_driven_cb_t trace_driven_cb; // Trace driven call back  - called for every record. ignored if NULL
+  bitmap64_t core_mask;         // Only cores in this mask will be used to compute stable epoch
+  int stat_verbose;             // Whether print all core information when stat print has the option
+  uint64_t inst_cap;            // Number of inst we simulate for each core; All cores must be no less than this
+  uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
+  int has_cap;                  // Set to 1 if there is a cap; 0 if not. If zero should not call cap related function
+  int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
+  time_t begin_time;            // Start time of simulation, set in c'tor
+  // Components
+  char *conf_filename;          // File name of configuration
+  conf_t *conf;
+} sim_t;
+
+sim_t *sim_init(const char *filename);
+void sim_free(sim_t *sim);
+
+const char *sim_get_mode_name(sim_t *sim);
 
 //* zsim
 

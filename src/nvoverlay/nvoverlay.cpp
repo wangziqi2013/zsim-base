@@ -2272,6 +2272,7 @@ picl_t *picl_init(picl_evict_cb_t evict_cb) {
   SYSEXPECT(picl != NULL);
   memset(picl, 0x00, sizeof(picl_t));
   picl->ht64 = ht64_init();
+  picl->l2_ht64 = ht64_init();
   picl->evict_cb = evict_cb;
   picl->log_sizes = fifo_init();
   return picl;
@@ -2284,6 +2285,7 @@ void picl_free(picl_t *picl) {
   return;
 }
 
+// This function updates all stats; It also performs epoch advance
 void picl_store(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
   ASSERT_CACHE_ALIGNED(line_addr);
   // Return 1 if the insert succeeds (addr does not exist) - evict
@@ -2300,8 +2302,27 @@ void picl_store(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
     picl->log_write_count++;
     picl->epoch_log_write_count++;
   }
-  picl->epoch_store_count++;
-  picl->total_store_count++;
+  // Simulate L2 PiCL
+  if(picl->l2_nvm != NULL) {
+    int ret = ht64_insert(picl->l2_ht64, line_addr, PICL_ADDR_PRESENT);
+    if(ret == 1) {
+      // This is log write, use log address
+      nvm_write(picl->l2_nvm, picl->log_ptr, cycle);
+      picl->l2_log_write_count++;
+    }
+  }
+  return;
+}
+
+void picl_l2_eviction(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
+  ASSERT_CACHE_ALIGNED(line_addr);
+  // Returns PICL_ADDR_PRESENT if address exists
+  int ret = ht64_remove(picl->l2_ht64, line_addr, PICL_ADDR_MISSING);
+  // Write the evicted line into NVM
+  if(ret == PICL_ADDR_PRESENT) {
+    nvm_write(picl->l2_nvm, line_addr, cycle);    // Write to L2 NVM
+    picl->l2_evict_count++;
+  }
   return;
 }
 
@@ -2324,9 +2345,22 @@ void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   ht64_rm_it_t it;
   ht64_rm_begin(picl->ht64, &it);
   uint64_t count = 0;
+  // Compute stall cycle for ThyNVM before we evict
+  uint64_t curr_cycle = 0UL;
+  if(picl->thynvm != NULL) {
+    uint64_t sync_cycle = nvm_sync(picl->thynvm);
+    curr_cycle = cycle + picl->stall_cycles;
+    if(sync_cycle > curr_cycle) {
+      picl->stall_cycles += (sync_cycle - curr_cycle);
+      curr_cycle = sync_cycle;
+    }
+  }
   // Performs tag walk to downgrade dirty lines
   while(ht64_is_rm_end(picl->ht64, &it) == 0) {
     picl->evict_cb(picl->nvoverlay, ht64_it_key(&it), cycle); // Write back the cache line into NVM
+    if(picl->thynvm != NULL) {
+      nvm_write(picl->thynvm, ht64_it_key(&it), curr_cycle);    // Write to ThyNVM at current cycle
+    }
     picl->tag_walk_evict_count++;
     // Removes the current item and moves to next
     ht64_rm_next(picl->ht64, &it);
@@ -2341,16 +2375,62 @@ void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   // Clear per-epoch log write count after saving it to the fifo
   fifo_insert(picl->log_sizes, picl->epoch_log_write_count);
   picl->epoch_log_write_count = 0UL;
+  // Simulate L2-PiCL here if it is initialized
+  if(picl->l2_nvm != NULL) {
+    ht64_rm_begin(picl->l2_ht64, &it);
+    while(ht64_is_rm_end(picl->l2_ht64, &it) == 0) {
+      nvm_write(picl->l2_nvm, ht64_it_key(&it), cycle);    // Write to L2 NVM
+      picl->l2_tag_walk_evict_count++;
+      // Removes the current item and moves to next
+      ht64_rm_next(picl->l2_ht64, &it);
+    }
+  }
+  return;
+}
+
+void picl_selfcheck(picl_t *picl) {
+  nvm_t *nvm = picl->nvm;
+  // Cross-check: Eviction count must equal NVM write count
+  if(picl_get_total_evict_count(picl) != nvm_get_write_count(nvm)) {
+    error_exit("Inconsistent evict and NVM write: %lu and %lu\n",
+      picl_get_total_evict_count(picl), nvm_get_write_count(nvm));
+  }
+  cpu_selfcheck(picl->cpu);
   return;
 }
 
 void picl_conf_print(picl_t *picl) {
+  if(picl->cpu != NULL) {
+    cpu_conf_print(picl->cpu);
+  } else {
+    printf("CPU not connected to PiCL; skipping\n");
+  }
+  if(picl->nvm != NULL) {
+    nvm_conf_print(picl->nvm);
+  } else {
+    printf("NVM not connected to PiCL; skipping\n");
+  }
   printf("---------- picl_t ----------\n");
   printf("HT init buckets %d epoch size %lu\n", HT64_DEFAULT_INIT_BUCKETS, picl->epoch_size);
   return;
 }
 
-void picl_stat_print(picl_t *picl) {
+void picl_stat_print(picl_t *picl, int verbose) {
+  if(picl->cpu != NULL) {
+    cpu_stat_print(picl->cpu, verbose);
+  } else {
+    printf("CPU not connected to PiCL; skipping\n");
+  }
+  if(picl->nvm != NULL) {
+    printf("PiCL NVM stat\n");
+    nvm_stat_print(picl->nvm);
+    printf("ThyNVM NVM stat\n");
+    nvm_stat_print(picl->thynvm);
+    printf("L2-PiCL NVM stat\n");
+    nvm_stat_print(picl->l2_nvm);
+  } else {
+    printf("NVM not connected to PiCL; skipping\n");
+  }
   printf("---------- picl_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(picl->ht64), ht64_get_bucket_count(picl->ht64));
   printf("Lines curr %lu (max %lu) epochs %lu log ptr %lu epoch stores %lu total stores %lu\n", 
@@ -2359,12 +2439,19 @@ void picl_stat_print(picl_t *picl) {
   // Print evict counters (should equal total writes to NVM)
   uint64_t log_size = (picl->log_write_count * PICL_LOG_ENTRY_SIZE + 
     (picl->tag_walk_evict_count + picl->l3_evict_count) * UTIL_CACHE_LINE_SIZE);
-  // TODO: ADD A MODE TO PRINT L2
   printf("Writes log %lu walk %lu LLC evict %lu (sum %lu) total size %lu bytes\n", 
     picl->log_write_count, picl->tag_walk_evict_count, picl->l3_evict_count, 
     picl_get_total_evict_count(picl), log_size);
-  printf("  Alternate writes %lu (assuming one log entry needs two writes)\n",
+  printf("  Write requests %lu (assuming one log entry needs two writes)\n",
     picl->log_write_count * 2 + picl->tag_walk_evict_count + picl->l3_evict_count);
+  uint64_t evict_sum = picl->l2_log_write_count + picl->l2_tag_walk_evict_count + picl->l2_evict_count;
+  log_size = (picl->l2_log_write_count * PICL_LOG_ENTRY_SIZE + 
+    (picl->l2_tag_walk_evict_count + picl->l2_evict_count) * UTIL_CACHE_LINE_SIZE);
+  printf("L2 PiCL log %lu walk %lu L2 evict %lu (sum %lu) total size %lu bytes\n",
+    picl->l2_log_write_count, picl->l2_tag_walk_evict_count, picl->l2_evict_count,
+    evict_sum, log_size);
+  printf("  L2 PiCL write requests %lu\n", 
+    picl->l2_log_write_count * 2 + picl->l2_tag_walk_evict_count + picl->l2_evict_count);
   // Log sizes (average of all epochs)
   fifo_it_t it;
   fifo_begin(picl->log_sizes, &it);
@@ -2382,8 +2469,8 @@ void picl_stat_print(picl_t *picl) {
 
 //* nvoverlay
 
-const char *nvoverlay_mode_names[] = {
-  "MODE_FULL", "MODE_PICL", "MODE_TRACER",
+const char *nvoverlay_mode_names[5] = {
+  "MODE_NONE", "MODE_FULL", "MODE_PICL", "MODE_TRACER", "MODE_ALL",
 };
 
 // This interface is used to disable nvoverlay, e.g. when the simulation ends but there
@@ -2409,6 +2496,12 @@ nvoverlay_intf_t nvoverlay_intf_tracer = {
 nvoverlay_intf_t nvoverlay_intf_picl = {
   nvoverlay_picl_load, nvoverlay_picl_store,
   nvoverlay_picl_l1_evict, nvoverlay_picl_l2_evict, nvoverlay_picl_l3_evict,
+  nvoverlay_other, 0UL,
+};
+
+nvoverlay_intf_t nvoverlay_intf_all = {
+  nvoverlay_all_load, nvoverlay_all_store,
+  nvoverlay_all_l1_evict, nvoverlay_all_l2_evict, nvoverlay_all_l3_evict,
   nvoverlay_other, 0UL,
 };
 
@@ -2453,6 +2546,12 @@ nvoverlay_t *nvoverlay_init(const char *conf_file) {
     nvoverlay->mode = NVOVERLAY_MODE_PICL;
     nvoverlay_intf = nvoverlay_intf_picl;
     nvoverlay_init_picl(nvoverlay);
+  } else if(streq(mode_str, "all")) {
+    nvoverlay->mode = NVOVERLAY_MODE_ALL;
+    nvoverlay_intf = nvoverlay_intf_all;
+    // Initialize both
+    nvoverlay_init_full(nvoverlay);
+    nvoverlay_init_picl(nvoverlay);
   } else {
     error_exit("Unknown mode in configuration: \"%s\"\n", mode_str);
   }
@@ -2471,6 +2570,10 @@ void nvoverlay_free(nvoverlay_t *nvoverlay) {
     } break;
     case NVOVERLAY_MODE_PICL: {
       nvoverlay_free_picl(nvoverlay);
+    } break;
+    case NVOVERLAY_MODE_ALL: {
+      nvoverlay_free_picl(nvoverlay);
+      nvoverlay_free_full(nvoverlay);
     } break;
     default: {
       error_exit("Unknown operating mode: %d\n", nvoverlay->mode);
@@ -2525,7 +2628,7 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
   while((rec = tracer_next(tracer)) != NULL) {
     if(cb) cb(nvoverlay, rec); 
     // Take sample if serial is large enough
-    nvoverlay_stat_sample(nvoverlay, rec->serial);
+    //nvoverlay_stat_sample(nvoverlay, rec->serial);
     switch(rec->type) {
       case TRACER_LOAD: {
         nvoverlay_intf.load_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
@@ -2543,10 +2646,10 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
         nvoverlay_intf.l3_evict_cb(nvoverlay, rec->id, rec->line_addr, rec->cycle, rec->serial);
       } break;
       case TRACER_INST: { // Non-functional, only reports instruction count
-        nvoverlay_full_inst(nvoverlay, rec->id, rec->cycle);
+        nvoverlay_inst(nvoverlay, rec->id, rec->cycle);
       } break;
       case TRACER_CYCLE: {
-        nvoverlay_full_cycle(nvoverlay, rec->id, rec->cycle);
+        nvoverlay_cycle(nvoverlay, rec->id, rec->cycle);
       } break;
       default: {
         error_exit("Unknown record type: %d\n", rec->type);
@@ -2577,6 +2680,13 @@ void nvoverlay_trace_driven_start(nvoverlay_t *nvoverlay) {
 void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay) {
   if(nvoverlay->mode == NVOVERLAY_MODE_TRACER) {
     error_exit("Trace driven mode is not supported for tracer mode\n");
+  } else if(nvoverlay->tracer != NULL) {
+    // This happens normally on all mode in which the tracer is init'ed twice
+    if(nvoverlay->mode != NVOVERLAY_MODE_ALL) {
+      error_exit("Tracer is already present but mode is not MODE_ALL (see %s)\n", 
+        nvoverlay_mode_names[nvoverlay->mode]);
+    }
+    return;
   }
   conf_t *conf = nvoverlay->conf;
   int td;
@@ -2588,11 +2698,11 @@ void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay) {
   nvoverlay->tracer = tracer_init(filename, tracer_core_count, TRACER_MODE_READ);
   nvoverlay->trace_driven_enabled = 1;
   printf("*** Trace driven enabled (file %s cores %d)\n", filename, tracer_core_count);
-  //nvoverlay_trace_driven_engine(nvoverlay);
   return;
 }
 
 // This function initialized caps
+// No return value
 static void nvoverlay_cap_init(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
   if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
@@ -2616,37 +2726,17 @@ static void nvoverlay_cap_init(nvoverlay_t *nvoverlay) {
     nvoverlay->has_cap = 0;
   }
   // Set to core count, and drop to zero
-  nvoverlay->cap_core_count = cpu_get_core_count(nvoverlay->cpu);
+  nvoverlay->cap_core_count = conf_find_int32_mandatory(conf, "cpu.cores");
   return;
 }
 
-// Mode and conf are set
-void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
+// This function initializes a CPU object from conf, and store it into the given location
+// NOTE: CPU object is returned
+static cpu_t *nvoverlay_cpu_init(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
-  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL);
-  // NVM device 
-  int nvm_rlat = conf_find_int32_range(conf, "nvm.rlat", 0, CONF_INT32_MAX, CONF_RANGE);
-  int nvm_wlat = conf_find_int32_range(conf, "nvm.wlat", 0, CONF_INT32_MAX, CONF_RANGE);
-  int nvm_banks = conf_find_int32_range(conf, "nvm.banks", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
-  nvoverlay->nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat);
-  // OMC buffer
-  int omcbuf_sets = conf_find_int32_range(conf, "omcbuf.sets", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
-  int omcbuf_ways = conf_find_int32_range(conf, "omcbuf.ways", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
-  nvoverlay->omcbuf = omcbuf_init(omcbuf_sets, omcbuf_ways, nvoverlay_omcbuf_evict_cb);
-  omcbuf_set_parent(nvoverlay->omcbuf, nvoverlay);
-  // Overlay
-  nvoverlay->overlay = overlay_init();
-  // Master Mapping Table
-  nvoverlay->omt = omt_init();
-  // Version table (vtable)
-  nvoverlay->vtable = \
-    vtable_init(nvoverlay_vtable_evict_cb, nvoverlay_vtable_core_recv_cb, nvoverlay_vtable_core_tag_cb,
-                nvoverlay_vtable_core_stable_epoch_cb);
-  vtable_set_parent(nvoverlay->vtable, nvoverlay);
-  // CPU
   int cpu_core_count = conf_find_int32_range(conf, "cpu.cores", 1, CORE_COUNT_MAX, CONF_RANGE);
-  nvoverlay->cpu = cpu_init(cpu_core_count, nvoverlay_cpu_tag_walk_cb);
-  cpu_set_parent(nvoverlay->cpu, nvoverlay);
+  cpu_t *cpu = cpu_init(cpu_core_count, nvoverlay_cpu_tag_walk_cb);
+  cpu_set_parent(cpu, nvoverlay);
   // Read L1 and L2 cache configuration
   int l1_ways = conf_find_int32_range(conf, "cpu.l1.ways", 1, CONF_INT32_MAX, CONF_RANGE);
   uint64_t l1_size = conf_find_uint64_range(conf, "cpu.l1.size", 0, 0, CONF_SIZE); // Size suffix
@@ -2664,8 +2754,53 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
     error_exit("L2 size is not a multiple of L2 ways (size %lu ways %d)\n", l2_size, l2_ways);
   }
   int l2_sets = (l2_size / UTIL_CACHE_LINE_SIZE) / l2_ways;
-  cpu_tag_init(nvoverlay->cpu, CPU_TAG_L1, l1_sets, l1_ways);
-  cpu_tag_init(nvoverlay->cpu, CPU_TAG_L2, l2_sets, l2_ways);
+  cpu_tag_init(cpu, CPU_TAG_L1, l1_sets, l1_ways);
+  cpu_tag_init(cpu, CPU_TAG_L2, l2_sets, l2_ways);
+  return cpu;
+}
+
+static nvm_t *nvoverlay_nvm_init(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  int nvm_rlat = conf_find_int32_range(conf, "nvm.rlat", 0, CONF_INT32_MAX, CONF_RANGE);
+  int nvm_wlat = conf_find_int32_range(conf, "nvm.wlat", 0, CONF_INT32_MAX, CONF_RANGE);
+  int nvm_banks = conf_find_int32_range(conf, "nvm.banks", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
+  nvm_t *nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat);
+  return nvm;
+}
+
+static int nvoverlay_verbose_init(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  int ret;
+  if(conf_exists(conf, "nvoverlay.stat_verbose") == 1) {
+    ret = conf_find_bool_mandatory(conf, "nvoverlay.stat_verbose");
+  } else {
+    ret = 0;
+  }
+  return ret;
+}
+
+// Mode and conf are set
+void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  assert(nvoverlay->mode == NVOVERLAY_MODE_FULL || nvoverlay->mode == NVOVERLAY_MODE_ALL);
+  // NVM device 
+  nvoverlay->nvm = nvoverlay_nvm_init(nvoverlay);
+  // OMC buffer
+  int omcbuf_sets = conf_find_int32_range(conf, "omcbuf.sets", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
+  int omcbuf_ways = conf_find_int32_range(conf, "omcbuf.ways", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
+  nvoverlay->omcbuf = omcbuf_init(omcbuf_sets, omcbuf_ways, nvoverlay_omcbuf_evict_cb);
+  omcbuf_set_parent(nvoverlay->omcbuf, nvoverlay);
+  // Overlay
+  nvoverlay->overlay = overlay_init();
+  // Master Mapping Table
+  nvoverlay->omt = omt_init();
+  // Version table (vtable)
+  nvoverlay->vtable = \
+    vtable_init(nvoverlay_vtable_evict_cb, nvoverlay_vtable_core_recv_cb, nvoverlay_vtable_core_tag_cb,
+                nvoverlay_vtable_core_stable_epoch_cb);
+  vtable_set_parent(nvoverlay->vtable, nvoverlay);
+  // CPU
+  nvoverlay->cpu = nvoverlay_cpu_init(nvoverlay);
   // Read epoch size
   nvoverlay->epoch_size = conf_find_uint64_range(conf, "nvoverlay.epoch_size", 1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   // Read tag walk freq
@@ -2700,11 +2835,7 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
     assert(nvoverlay_sample_is_enabled(nvoverlay) == 0);
   }
   // Verbose print flag
-  if(conf_exists(conf, "nvoverlay.stat_verbose") == 1) {
-    nvoverlay->stat_verbose = conf_find_bool_mandatory(conf, "nvoverlay.stat_verbose");
-  } else {
-    nvoverlay->stat_verbose = 0;
-  }
+  nvoverlay->stat_verbose = nvoverlay_verbose_init(nvoverlay);
   // Caps
   nvoverlay_cap_init(nvoverlay);
   // Trace-driven - This must be at the very end of the function
@@ -2734,6 +2865,7 @@ void nvoverlay_free_full(nvoverlay_t *nvoverlay) {
   if(nvoverlay->tracer) {
     assert(nvoverlay->trace_driven_enabled == 1);
     tracer_free(nvoverlay->tracer);
+    nvoverlay->tracer = NULL; // Avoid double-free
   }
   return;
 }
@@ -2791,27 +2923,20 @@ void nvoverlay_free_tracer(nvoverlay_t *nvoverlay) {
 
 // Picl also uses NVM to compute timing
 void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
+  assert(nvoverlay->mode == NVOVERLAY_MODE_PICL || nvoverlay->mode == NVOVERLAY_MODE_ALL);
   conf_t *conf = nvoverlay->conf;
-  int nvm_rlat = conf_find_int32_range(conf, "nvm.rlat", 0, CONF_INT32_MAX, CONF_RANGE);
-  int nvm_wlat = conf_find_int32_range(conf, "nvm.wlat", 0, CONF_INT32_MAX, CONF_RANGE);
-  int nvm_banks = conf_find_int32_range(conf, "nvm.banks", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
-  nvoverlay->nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat);
   picl_t *picl = nvoverlay->picl = picl_init(nvoverlay_picl_evict_cb); // Pass the evict cb
   picl_set_parent(picl, nvoverlay);
+  // Epoch size [1, +inf)
+  picl->epoch_size = conf_find_uint64_range(conf, "picl.epoch_size", 1UL, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   // CPU
-  int cpu_core_count = conf_find_int32_range(conf, "cpu.cores", 1, CORE_COUNT_MAX, CONF_RANGE);
-  nvoverlay->cpu = cpu_init(cpu_core_count, NULL);
-  cpu_set_parent(nvoverlay->cpu, NULL); // We do not use any call back, just set to NULL
-  // Allows using K or M suffix, range [1, +inf)
-  uint64_t epoch_size = conf_find_uint64_range(conf, "picl.epoch_size", 
-    1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
-  picl_set_epoch_size(picl, epoch_size);
+  picl->cpu = nvoverlay_cpu_init(nvoverlay);
+  // NVM
+  picl->nvm = nvoverlay_nvm_init(nvoverlay);
+  picl->thynvm = nvoverlay_nvm_init(nvoverlay);  // This is for evaluating ThyNVM
+  picl->l2_nvm = nvoverlay_nvm_init(nvoverlay);  // This is for evaluating L2 PiCL
   // Verbose print flag
-  if(conf_exists(conf, "nvoverlay.stat_verbose") == 1) {
-    nvoverlay->stat_verbose = conf_find_bool_mandatory(conf, "nvoverlay.stat_verbose");
-  } else {
-    nvoverlay->stat_verbose = 0;
-  }
+  nvoverlay->stat_verbose = nvoverlay_verbose_init(nvoverlay);
   // Caps
   nvoverlay_cap_init(nvoverlay);
   // Trace-driven
@@ -2820,11 +2945,15 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
 }
 
 void nvoverlay_free_picl(nvoverlay_t *nvoverlay) {
+  nvm_free(nvoverlay->picl->nvm);
+  nvm_free(nvoverlay->picl->thynvm);
+  nvm_free(nvoverlay->picl->l2_nvm);
+  cpu_free(nvoverlay->picl->cpu);
   picl_free(nvoverlay->picl);
-  nvm_free(nvoverlay->nvm);
   if(nvoverlay->tracer) {
     assert(nvoverlay->trace_driven_enabled == 1);
     tracer_free(nvoverlay->tracer);
+    nvoverlay->tracer = NULL; // Avoid double free
   }
   return;
 }
@@ -2884,7 +3013,7 @@ void nvoverlay_selfcheck(nvoverlay_t *nvoverlay) {
   printf("Performing self check.. (mode = %s)\n", nvoverlay_mode_names[nvoverlay->mode]);
   switch(nvoverlay->mode) {
     case NVOVERLAY_MODE_FULL: nvoverlay_selfcheck_full(nvoverlay); break;
-    case NVOVERLAY_MODE_PICL: nvoverlay_selfcheck_picl(nvoverlay); break;
+    case NVOVERLAY_MODE_PICL: picl_selfcheck(nvoverlay->picl); break;
     default: break;
   }
   printf("Pass!\n");
@@ -2921,17 +3050,45 @@ void nvoverlay_selfcheck_full(nvoverlay_t *nvoverlay) {
   return;
 }
 
-// Performs picl consistency check
-void nvoverlay_selfcheck_picl(nvoverlay_t *nvoverlay) {
-  assert(nvoverlay->mode == NVOVERLAY_MODE_PICL);
-  picl_t *picl = nvoverlay->picl;
-  nvm_t *nvm = nvoverlay->nvm;
-  // Cross-check: Eviction count must equal NVM write count
-  if(picl_get_total_evict_count(picl) != nvm_get_write_count(nvm)) {
-    error_exit("Inconsistent evict and NVM write: %lu and %lu\n",
-      picl_get_total_evict_count(picl), nvm_get_write_count(nvm));
-  }
-  cpu_selfcheck(nvoverlay->cpu);
+void nvoverlay_conf_print_full(nvoverlay_t *nvoverlay) {
+  conf_conf_print(nvoverlay->conf);
+  omt_conf_print(nvoverlay->omt);
+  cpu_conf_print(nvoverlay->cpu);
+  vtable_conf_print(nvoverlay->vtable);
+  omcbuf_conf_print(nvoverlay->omcbuf);
+  overlay_conf_print(nvoverlay->overlay);
+  nvm_conf_print(nvoverlay->nvm);
+  printf("---------- nvoverlay_t ----------\n");
+  printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+  printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
+    nvoverlay->epoch_size, nvoverlay->tag_walk_freq, nvoverlay->tag_walk_passive, nvoverlay->sample_freq);
+  printf("Core mask ");
+  bitmap64_print_bitstr(&nvoverlay->core_mask);
+  putchar('\n');
+  printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+  printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+  return;
+}
+
+void nvoverlay_conf_print_picl(nvoverlay_t *nvoverlay) {
+  picl_conf_print(nvoverlay->picl);
+  // Only print PiCL related nvoverlay information
+  printf("---------- nvoverlay_t ----------\n");
+  printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+  printf("Core mask ");
+  bitmap64_print_bitstr(&nvoverlay->core_mask);
+  putchar('\n');
+  printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+  printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+  return;
+}
+
+void nvoverlay_conf_print_tracer(nvoverlay_t *nvoverlay) {
+  tracer_conf_print(nvoverlay->tracer);
+  printf("---------- nvoverlay_t ----------\n");
+  printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
+  printf("Stat verbose %d\n", nvoverlay->stat_verbose);
+  printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
   return;
 }
 
@@ -2939,41 +3096,17 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
   printf("++++++++++ nvoverlay_t conf ++++++++++\n");
   switch(nvoverlay->mode) {
     case NVOVERLAY_MODE_FULL: {
-      conf_conf_print(nvoverlay->conf);
-      omt_conf_print(nvoverlay->omt);
-      cpu_conf_print(nvoverlay->cpu);
-      vtable_conf_print(nvoverlay->vtable);
-      omcbuf_conf_print(nvoverlay->omcbuf);
-      overlay_conf_print(nvoverlay->overlay);
-      nvm_conf_print(nvoverlay->nvm);
-      printf("---------- nvoverlay_t ----------\n");
-      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
-      printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
-        nvoverlay->epoch_size, nvoverlay->tag_walk_freq, nvoverlay->tag_walk_passive, nvoverlay->sample_freq);
-      printf("Core mask ");
-      bitmap64_print_bitstr(&nvoverlay->core_mask);
-      putchar('\n');
-      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
-      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+      nvoverlay_conf_print_full(nvoverlay);
     } break;
     case NVOVERLAY_MODE_PICL: {
-      nvm_conf_print(nvoverlay->nvm);
-      picl_conf_print(nvoverlay->picl);
-      // Only print PiCL related nvoverlay information
-      printf("---------- nvoverlay_t ----------\n");
-      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
-      printf("Core mask ");
-      bitmap64_print_bitstr(&nvoverlay->core_mask);
-      putchar('\n');
-      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
-      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+      nvoverlay_conf_print_picl(nvoverlay);
     } break;
     case NVOVERLAY_MODE_TRACER: {
-      tracer_conf_print(nvoverlay->tracer);
-      printf("---------- nvoverlay_t ----------\n");
-      printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
-      printf("Stat verbose %d\n", nvoverlay->stat_verbose);
-      printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+      nvoverlay_conf_print_tracer(nvoverlay);
+    } break;
+    case NVOVERLAY_MODE_ALL: {
+      nvoverlay_conf_print_full(nvoverlay);
+      nvoverlay_conf_print_picl(nvoverlay);
     } break;
     default: {
       error_exit("Unknown NVOverlay mode: %d\n", nvoverlay->mode);
@@ -2982,47 +3115,64 @@ void nvoverlay_conf_print(nvoverlay_t *nvoverlay) {
   return;
 }
 
+void nvoverlay_stat_print_full(nvoverlay_t *nvoverlay) {
+  // Print tracer stat at the beginning if trace driven is enabled
+  if(nvoverlay->trace_driven_enabled == 1) {
+    tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
+  }
+  omt_stat_print(nvoverlay->omt);
+  cpu_stat_print(nvoverlay->cpu, nvoverlay->stat_verbose);
+  vtable_stat_print(nvoverlay->vtable);
+  omcbuf_stat_print(nvoverlay->omcbuf);
+  overlay_stat_print(nvoverlay->overlay);
+  nvm_stat_print(nvoverlay->nvm);
+  printf("---------- nvoverlay_t ----------\n");
+  printf("Last stable epoch %lu; Total walks %lu\n", 
+    nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
+  printf("Masked cores: curr epoch min %lu max %lu\n", 
+    nvoverlay_get_min_epoch(nvoverlay), nvoverlay_get_max_epoch(nvoverlay));
+  printf("Samples %lu (freq %lu %s) last sampled %lu file name %s\n", 
+    nvoverlay->sample_count, nvoverlay->sample_freq, nvoverlay->sample_freq == 0UL ? "OFF" : "ON",
+    nvoverlay->last_sample_serial, 
+    nvoverlay->sample_filename ? nvoverlay->sample_filename : "None");
+  // Although it is not stat, print here to help interpret data
+  printf("Tag walk mode %s epoch size %lu\n", 
+    nvoverlay->tag_walk_passive ? "Passive" : "Normal", nvoverlay->epoch_size);
+  printf("Total NVM writes %lu size %lu bytes\n",
+    nvm_get_write_count(nvoverlay->nvm) + omt_get_write_count(nvoverlay->omt),
+    nvm_get_write_count(nvoverlay->nvm) * UTIL_CACHE_LINE_SIZE + omt_get_write_count(nvoverlay->omt) * 8UL);
+  printf("Cap core count %d\n", nvoverlay->cap_core_count);
+  return;
+}
+
+void nvoverlay_stat_print_picl(nvoverlay_t *nvoverlay) {
+  if(nvoverlay->trace_driven_enabled == 1) {
+    tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
+  }
+  picl_stat_print(nvoverlay->picl, nvoverlay->stat_verbose);
+  return;
+}
+
+void nvoverlay_stat_print_tracer(nvoverlay_t *nvoverlay) {
+  tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
+  return;
+}
+
 void nvoverlay_stat_print(nvoverlay_t *nvoverlay) {
   printf("++++++++++ nvoverlay_t stat ++++++++++\n");
   switch(nvoverlay->mode) {
     case NVOVERLAY_MODE_FULL: {
-      // Print tracer stat at the beginning if trace driven is enabled
-      if(nvoverlay->trace_driven_enabled == 1) {
-        tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
-      }
-      omt_stat_print(nvoverlay->omt);
-      cpu_stat_print(nvoverlay->cpu, nvoverlay->stat_verbose);
-      vtable_stat_print(nvoverlay->vtable);
-      omcbuf_stat_print(nvoverlay->omcbuf);
-      overlay_stat_print(nvoverlay->overlay);
-      nvm_stat_print(nvoverlay->nvm);
-      printf("---------- nvoverlay_t ----------\n");
-      printf("Last stable epoch %lu; Total walks %lu\n", 
-        nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
-      printf("Masked cores: curr epoch min %lu max %lu\n", 
-        nvoverlay_get_min_epoch(nvoverlay), nvoverlay_get_max_epoch(nvoverlay));
-      printf("Samples %lu (freq %lu %s) last sampled %lu file name %s\n", 
-        nvoverlay->sample_count, nvoverlay->sample_freq, nvoverlay->sample_freq == 0UL ? "OFF" : "ON",
-        nvoverlay->last_sample_serial, 
-        nvoverlay->sample_filename ? nvoverlay->sample_filename : "None");
-      // Although it is not stat, print here to help interpret data
-      printf("Tag walk mode %s epoch size %lu\n", 
-        nvoverlay->tag_walk_passive ? "Passive" : "Normal", nvoverlay->epoch_size);
-      printf("Total NVM writes %lu size %lu bytes\n",
-        nvm_get_write_count(nvoverlay->nvm) + omt_get_write_count(nvoverlay->omt),
-        nvm_get_write_count(nvoverlay->nvm) * UTIL_CACHE_LINE_SIZE + omt_get_write_count(nvoverlay->omt) * 8UL);
-      printf("Cap core count %d\n", nvoverlay->cap_core_count);
+      nvoverlay_stat_print_full(nvoverlay);
     } break;
     case NVOVERLAY_MODE_PICL: {
-      if(nvoverlay->trace_driven_enabled == 1) {
-        tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
-      }
-      cpu_stat_print(nvoverlay->cpu, nvoverlay->stat_verbose);
-      nvm_stat_print(nvoverlay->nvm);
-      picl_stat_print(nvoverlay->picl);
+      nvoverlay_stat_print_picl(nvoverlay);
+    } break;
+    case NVOVERLAY_MODE_ALL: {
+      nvoverlay_stat_print_full(nvoverlay);
+      nvoverlay_stat_print_picl(nvoverlay);
     } break;
     case NVOVERLAY_MODE_TRACER: {
-      tracer_stat_print(nvoverlay->tracer, nvoverlay->stat_verbose);
+      nvoverlay_stat_print_tracer(nvoverlay);
     } break;
     default: {
       error_exit("Unknown NVOverlay mode: %d\n", nvoverlay->mode);
@@ -3116,6 +3266,7 @@ void nvoverlay_stat_dump(nvoverlay_t *nvoverlay) {
     // First, compute the file name, and open the file
     char *filename = nvoverlay_stat_dump_filename(nvoverlay, i);
     FILE *fp = fopen(filename, "w");
+    SYSEXPECT(fp != NULL);
     fifo_it_t it;
     fifo_begin(samples, &it);
     uint64_t count = 0UL;
@@ -3188,7 +3339,7 @@ static void nvoverlay_cpu_tag_walk_cb(nvoverlay_t *nvoverlay, uint64_t line_addr
 
 static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t cycle) {
   assert(nvoverlay != NULL);
-  nvm_write(nvoverlay->nvm, line_addr, cycle);
+  nvm_write(nvoverlay->picl->nvm, line_addr, cycle);
   return;
 }
 
@@ -3201,7 +3352,7 @@ void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uin
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   // VTABLE drives tag array, OMCBUF, overlay and core epochs
   vtable_l1_load(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
-  (void)serial;
+  nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
 void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
@@ -3257,25 +3408,25 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
       nvoverlay->last_stable_epoch = min_epoch;
     }
   }
-  (void)serial;
+  nvoverlay_stat_sample(nvoverlay, serial);nvoverlay_stat_sample(nvoverlay, serial);
   return;
 } 
 void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l1_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
-  (void)serial;
+  nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
 void nvoverlay_full_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l2_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
-  (void)serial;
+  nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
 void nvoverlay_full_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l3_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
-  (void)serial;
+  nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
 
@@ -3308,13 +3459,20 @@ void nvoverlay_picl_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uin
 void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   (void)id; (void)serial;
   picl_t *picl = nvoverlay->picl;
-  cpu_t *cpu = nvoverlay->cpu;
+  picl_store(picl, line_addr, cycle);
+  // Update per-core stat
+  // Note that these stats are only updated in nvoverlay call backs, since 
+  cpu_t *cpu = picl->cpu;
   core_t *core = cpu_get_core(cpu, id);
   core->total_store_count++;
   core->epoch_store_count++;
-  picl_store(picl, line_addr, cycle);
-  if(picl_get_epoch_store_count(picl) == picl_get_epoch_size(picl)) {
+  // Global stat
+  picl->epoch_store_count++;
+  picl->total_store_count++;
+  // Epoch advance
+  if(picl->epoch_store_count == picl->epoch_size) {
     uint64_t before_walk = picl->tag_walk_evict_count;
+    // This clears epoch_store_count
     picl_advance_epoch(picl, cycle);
     uint64_t after_walk = picl->tag_walk_evict_count;
     // Set these manually to be consistent with NVOverlay
@@ -3334,13 +3492,40 @@ void nvoverlay_picl_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr,
   return;
 }
 void nvoverlay_picl_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
-  nvoverlay->picl->l2_evict_count++;
-  (void)line_addr; (void)id; (void)cycle; (void)serial;
+  picl_l2_eviction(nvoverlay->picl, line_addr, cycle);
+  (void)id; (void)serial;
   return;
 }
 void nvoverlay_picl_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   (void)id; (void)serial;
   picl_l3_eviction(nvoverlay->picl, line_addr, cycle);
+  return;
+}
+
+// When adding a new model, also add it into this
+void nvoverlay_all_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  nvoverlay_full_load(nvoverlay, id, line_addr, cycle, serial);
+  nvoverlay_picl_load(nvoverlay, id, line_addr, cycle, serial);
+  return;
+}
+void nvoverlay_all_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  nvoverlay_full_store(nvoverlay, id, line_addr, cycle, serial);
+  nvoverlay_picl_store(nvoverlay, id, line_addr, cycle, serial);
+  return;
+}
+void nvoverlay_all_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  nvoverlay_full_l1_evict(nvoverlay, id, line_addr, cycle, serial);
+  nvoverlay_picl_l1_evict(nvoverlay, id, line_addr, cycle, serial);
+  return;
+}
+void nvoverlay_all_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  nvoverlay_full_l2_evict(nvoverlay, id, line_addr, cycle, serial);
+  nvoverlay_picl_l2_evict(nvoverlay, id, line_addr, cycle, serial);
+  return;
+}
+void nvoverlay_all_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
+  nvoverlay_full_l3_evict(nvoverlay, id, line_addr, cycle, serial);
+  nvoverlay_picl_l3_evict(nvoverlay, id, line_addr, cycle, serial);
   return;
 }
 
@@ -3358,7 +3543,7 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
         tracer_insert(nvoverlay->tracer, TRACER_INST, id, 0UL, cycle, serial);
       } else {
         // Called for all other modes
-        nvoverlay_full_inst(nvoverlay, id, cycle);
+        nvoverlay_inst(nvoverlay, id, cycle);
       }
       break;
     } case NVOVERLAY_OTHER_CONF: {
@@ -3372,7 +3557,7 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
         tracer_insert(nvoverlay->tracer, TRACER_CYCLE, id, 0UL, cycle, serial);
       } else {
         // Called for all other modes
-        nvoverlay_full_cycle(nvoverlay, id, cycle);
+        nvoverlay_cycle(nvoverlay, id, cycle);
       }
       break;
     } default: {
@@ -3386,7 +3571,7 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
 
 // Report inst count on a core
 // This function updates both per-core stat and CPU overall stat
-void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
+void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   // Inst must be monotonically increasing
@@ -3404,7 +3589,7 @@ void nvoverlay_full_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
 }
 
 // Report cycle count on a core
-void nvoverlay_full_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count) {
+void nvoverlay_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   // Cycle count may decrease in OOO exec
@@ -3507,4 +3692,46 @@ void nvoverlay_check_conf(nvoverlay_t *nvoverlay) {
     nvoverlay_printf("  Sets = 0 is normal for non-nvoverlay designs\n");
   }
   return;
+}
+
+//* sim_t
+
+const char *sim_mode_names[SIM_MODE_END] = {
+  "MODE_NONE", "MODE_TRACER", "MODE_NVOVERLAY", "MODE_PICL", 
+  "MODE_ALL",
+};
+
+sim_t *sim_init(const char *filename) {
+  sim_t *sim = (sim_t *)malloc(sizeof(sim_t));
+  SYSEXPECT(sim != NULL);
+  memset(sim, 0x00, sizeof(sim_t));
+  // Initialize conf variable
+  sim->conf_filename = (char *)malloc(strlen(filename) + 1);
+  strcpy(sim->conf_filename, filename);
+  conf_t *conf = conf_init(filename);
+  // Read sim global config
+  const char *mode_str = conf_find_str_mandatory(conf, "sim.mode");
+  // TODO: INIT OBJECTS
+  if(streq(mode_str, "tracer")) {
+
+  } else if(streq(mode_str, "nvoverlay")) {
+
+  } else if(streq(mode_str, "picl")) {
+
+  } else if(streq(mode_str, "all")) {
+
+  } else {
+    error_exit("Unknown sim.mode: %s\n", mode_str);
+  }
+  return sim;
+}
+
+void sim_free(sim_t *sim) {
+  free(sim->conf_filename);
+  free(sim);
+}
+
+const char *sim_get_mode_name(sim_t *sim) {
+  assert(sim->mode >= SIM_MODE_BEGIN && sim->mode < SIM_MODE_END);
+  return sim_mode_names[sim->mode];
 }
