@@ -11,6 +11,7 @@ nvoverlay_test_*
 btree_mt_*
 btree
 art
+rbtree
 hash_table
 *.seq
 nvoverlay_sample_*
