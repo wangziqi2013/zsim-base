@@ -145,7 +145,9 @@ typedef void (*mtable_free_cb_t)(void *);
 typedef void **(*mtable_jit_lookup_t)(void **, uint64_t);
 // Call back function used by table traverse;
 // Arguments: (key, node value, arbitrary argument you passed to traverse func)
-typedef void (*matble_traverse_cb_t)(uint64_t, void *, void *); 
+typedef void (*mtable_traverse_cb_t)(uint64_t, void *, void *); 
+// ARgs: Partial key at current node level; Node pointer; whether it is leaf node; Arg pointer
+typedef void (*mtable_page_traverse_cb_t)(uint64_t key, void *page, int item_count, int is_leaf, void *arg); 
 
 typedef struct mtable_idx_struct_t {
   int level;     // Iteration number; Starts from 0
@@ -188,7 +190,11 @@ void mtable_jit_lookup(mtable_t *mtable); // Generate code into lookup_cb pointe
 void mtable_jit_lookup_print(mtable_t *mtable);
 
 void mtable_print(mtable_t *mtable);
-void mtable_traverse(mtable_t *mtable, matble_traverse_cb_t cb, void *arg);
+// Traver through all leaf node valid values (not NULL)
+void mtable_traverse(mtable_t *mtable, mtable_traverse_cb_t cb, void *arg);
+// Traverse through all pages in the tree - this requires some internal knowledge of the tree structure
+// The traverse follows a top-down manner: Inner first, then leaf
+void mtable_page_traverse(mtable_t *mtable, mtable_page_traverse_cb_t cb, void *arg);
 
 //* bitmap64_t
 
@@ -298,6 +304,16 @@ inline static struct overlay_epoch_struct_t *omt_find(omt_t *omt, uint64_t line_
 
 struct overlay_epoch_struct_t *omt_merge_line(
   omt_t *omt, struct overlay_epoch_struct_t *overlay_epoch, uint64_t line_addr);
+
+typedef struct {
+  uint64_t valid_leaf_value_count; // Number of not-NULL pointers in leaf nodes
+  uint64_t leaf_value_count;       // Number of value slots in all leaf pages
+  uint64_t leaf_count;             // Number of leaf nodes
+  uint64_t inner_count;            // Number of inner nodes
+  uint64_t size;                   // Size of the OMT (sum of all pages)
+} omt_info_t;
+
+omt_info_t omt_get_info(omt_t *omt);
 
 void omt_selfcheck(omt_t *omt);
 
@@ -491,6 +507,7 @@ typedef struct ver_struct_t {
   uint64_t addr;           // Address tag (always 64 byte aligned)
   int l1_state, l2_state;  // MESI state
   int owner;               // Owner of the version (L1, L2, LLC + DRAM)
+  int l3_dirty;            // Whether the line is dirty in LLC (set when dirty evict from L2)
   bitmap64_t l1_bitmap;      // L1 caches that have a copy
   bitmap64_t l2_bitmap;      // L2 caches that have a copy
   uint64_t l1_ver, l2_ver, other_ver; // L1 ver and L2 ver are only valid when they are owners
@@ -512,6 +529,8 @@ typedef void (*vtable_core_tag_cb_t)(struct nvoverlay_struct_t *, int, int, int,
 // Takes ID as second argument
 // This is used to get the last tag walk epoch on a core
 typedef uint64_t (*vtable_core_stable_epoch_cb_t)(struct nvoverlay_struct_t *, int);
+// Reports individual LLC-mem bus txns. Arguments: # of txns; current cycle
+typedef void (*vtable_l3_bus_txn_cb_t)(struct nvoverlay_struct_t *, int, uint64_t);
 
 typedef struct vtable_struct_t {
   ht64_t *vers;                         // Index for ver_t
@@ -519,6 +538,7 @@ typedef struct vtable_struct_t {
   vtable_core_recv_cb_t core_recv_cb;   // Core data receival function
   vtable_core_tag_cb_t core_tag_cb;     // Core tag change function
   vtable_core_stable_epoch_cb_t core_stable_epoch_cb; // Core get stable epoch function
+  vtable_l3_bus_txn_cb_t l3_bus_txn_cb; // Report LLC-mem bus txns for statistics
   struct nvoverlay_struct_t *nvoverlay; // Back pointer used for call back function
   // Statistics
   uint64_t omc_evict_count;
@@ -530,13 +550,16 @@ typedef struct vtable_struct_t {
   uint64_t l1_cap_evict_count;  // L1 capacity miss eviction (not including those triggered by L2)
   uint64_t l2_cap_evict_count;  // L2 capacity miss eviction (not including those triggered by L3)
   uint64_t l3_cap_evict_count;  // L3 capacity miss eviction
+  // Events we measure for LLC-controller bandwidth simulation
+  uint64_t l3_bus_txn_count;    // Bus txns between LLC and DRAM controller (1 for fetch, 2 for dirty wb + fetch)
 } vtable_t;
 
 inline static uint64_t vtable_get_omc_evict_count(vtable_t *vtable) { return vtable->omc_evict_count; }
 inline static uint64_t vtable_get_llc_evict_count(vtable_t *vtable) { return vtable->llc_evict_count; }
 
 vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, 
-  vtable_core_tag_cb_t core_tag_cb, vtable_core_stable_epoch_cb_t core_stable_epoch_cb);
+  vtable_core_tag_cb_t core_tag_cb, vtable_core_stable_epoch_cb_t core_stable_epoch_cb,
+  vtable_l3_bus_txn_cb_t l3_bus_txn_cb);
 void vtable_free(vtable_t *vtable);
 // If this is not called, the nvoverlay in the call back arg will be NULL
 void vtable_set_parent(vtable_t *vtable, struct nvoverlay_struct_t *overlay);
@@ -721,7 +744,7 @@ uint64_t overlay_epoch_insert(overlay_epoch_t *overlay_epoch, uint64_t addr);
 // Addr here should be page aligned
 overlay_page_t *overlay_epoch_find(overlay_epoch_t *overlay_epoch, uint64_t addr);
 
-inline static void overlay_epoch_traverse(overlay_epoch_t *overlay_epoch, matble_traverse_cb_t cb, void *arg) {
+inline static void overlay_epoch_traverse(overlay_epoch_t *overlay_epoch, mtable_traverse_cb_t cb, void *arg) {
   mtable_traverse(overlay_epoch->mtable, cb, arg);
 }
 
@@ -775,6 +798,9 @@ void overlay_stat_print(overlay_t *overlay);
 
 //* nvm_t
 
+// Call back function that will be invoked every time an operation has completed
+typedef void (*nvm_op_complete_cb_t)(struct nvoverlay_struct_t *nvoverlay, uint64_t cycle);
+
 typedef struct {
   uint64_t *banks; // Stores the next available cycle of the bank
   int bank_count;  // Number of banks
@@ -782,6 +808,8 @@ typedef struct {
   uint64_t mask;   // Address mask for exracting bank index
   uint64_t rlat;   // Read latency
   uint64_t wlat;   // Write latency
+  nvm_op_complete_cb_t op_complete_cb;  // Call back function from init argument; If NULL then not called
+  struct nvoverlay_struct_t *nvoverlay; // Used by the call back function
   // Statistics
   uint64_t write_count;             // Total writes
   uint64_t uncontended_write_count; // When write cycle > last avail cycle
@@ -789,8 +817,10 @@ typedef struct {
   uint64_t uncontended_read_count; 
 } nvm_t;
 
-nvm_t *nvm_init(int bank_count, uint64_t rlat, uint64_t wlat);
+nvm_t *nvm_init(int bank_count, uint64_t rlat, uint64_t wlat, nvm_op_complete_cb_t op_complete_cb);
 void nvm_free(nvm_t *nvm);
+// Must be called before invoking nvm_access() function
+inline static void nvm_set_parent(nvm_t *nvm, struct nvoverlay_struct_t *nvoverlay) { nvm->nvoverlay = nvoverlay; }
 
 // Unified function for reads and writes; The last arg is a pointer to the statistics variable
 uint64_t nvm_access(nvm_t *nvm, uint64_t addr, uint64_t cycle, uint64_t lat, uint64_t *uncontended_counter); 
@@ -820,6 +850,28 @@ uint64_t nvm_addr_gen(nvm_t *nvm, uint64_t tag, uint64_t bank);
 void nvm_conf_print(nvm_t *nvm);
 void nvm_stat_print(nvm_t *nvm);
 
+//* logdump_t - Collecting logs of events and dump to a file
+
+#define LOGDUMP_BUF_COUNT 4096 // Number of entries in the in-memory buffer
+
+typedef struct {
+  uint64_t time;          // Can be serial or cycle or whatever you use for time
+  uint64_t value;         // Whatever you want to be a value
+} logdump_entry_t;
+
+typedef struct {
+  char *filename;             // Name of the backing file
+  logdump_entry_t buffer[LOGDUMP_BUF_COUNT]; // Buffer before we flush to the file
+  int index;                  // Current index
+  FILE *fp;                   // File pointer
+} logdump_t;
+
+logdump_t *logdump_init(const char *filename);
+void logdump_free(logdump_t *logdump);
+void logdump_append(logdump_t *logdump, uint64_t time, uint64_t value);
+void logdump_conf_print(logdump_t *logdump);
+void logdump_stat_print(logdump_t *logdump);
+
 //* picl_t
 
 // Picl's log entry size: 64B data + 8B addr/status bits
@@ -839,6 +891,7 @@ typedef struct {
   picl_evict_cb_t evict_cb;       // Eviction call back for NVM write
   uint64_t log_ptr;               // Log write pointer; Reset for every epoch advance
   uint64_t epoch_size;            // Number of stores in the epoch
+  logdump_t *nvm_logdump;         // Log object for NVM object; NULL if disabled
   // Component
   cpu_t *cpu;                     // We use this to store stat
   nvm_t *nvm;                     // NVM timing
@@ -948,7 +1001,9 @@ typedef struct nvoverlay_struct_t {
   uint64_t cycle_cap;           // Number of cycles we simulate for each core; All cores must be no less than this
   int has_cap;                  // Set to 1 if there is a cap; 0 if not. If zero should not call cap related function
   int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
-  time_t begin_time;            // Start time of simulation, set in c'tor
+  time_t begin_time;            // Start time of simulation, set in init function
+  logdump_t *dram_logdump;      // Baseline DRAM access log, populated by vtable call back function
+  logdump_t *nvm_logdump;       // NVM access log, populated by NVM call back function
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions

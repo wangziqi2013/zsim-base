@@ -542,7 +542,7 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
                 nvoverlay_intf.other_arg = NVOVERLAY_OTHER_INST;
                 nvoverlay_intf.other_cb(zinfo->nvoverlay, core->id, 0UL, core->getInstrs(), core_serial++);
                 nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CYCLE;
-                nvoverlay_intf.other_cb(zinfo->nvoverlay, core->id, 0UL, core->getCycles(), core_serial++);
+                nvoverlay_intf.other_cb(zinfo->nvoverlay, core->id, 0UL, core->getCurCycles(), core_serial++);
                 if(nvoverlay_get_cap_core_count(zinfo->nvoverlay) == 0) {
                     // Set the var to -1 to avoid other threads printing out message repeatedly
                     nvoverlay_set_cap_core_count(zinfo->nvoverlay, -1);

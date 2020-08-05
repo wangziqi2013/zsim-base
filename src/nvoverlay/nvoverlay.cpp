@@ -621,7 +621,7 @@ void mtable_print(mtable_t *mtable) {
 
 // For each valid entry, apply the call back function. NULL entries will not be called since they
 // carry no information.
-static void _mtable_traverse(void **tree, mtable_idx_t *idx, matble_traverse_cb_t cb, uint64_t key, void *arg) {
+static void _mtable_traverse(void **tree, mtable_idx_t *idx, mtable_traverse_cb_t cb, uint64_t key, void *arg) {
   if(tree == NULL) return;
   int num_entry = 0x1 << idx->bits;
   if(idx->next) {
@@ -635,8 +635,28 @@ static void _mtable_traverse(void **tree, mtable_idx_t *idx, matble_traverse_cb_
   }
 }
 
-void mtable_traverse(mtable_t *mtable, matble_traverse_cb_t cb, void *arg) {
+void mtable_traverse(mtable_t *mtable, mtable_traverse_cb_t cb, void *arg) {
   _mtable_traverse((void **)mtable->root, mtable->idx, cb, 0UL, arg);
+}
+
+static void _mtable_page_traverse(void **tree, mtable_idx_t *idx, mtable_page_traverse_cb_t cb, uint64_t key, void *arg) {
+  if(tree == NULL) return;
+  int num_entry = 0x1 << idx->bits;
+  int is_leaf = idx->next == NULL;
+  // Traverse current page, which can be inner or leaf
+  cb(key, (void *)tree, num_entry, is_leaf, arg);
+  // If inner level, do the same for each sub-page
+  if(idx->next) {
+    for(int i = 0;i < num_entry;i++) {
+      uint64_t next_key = key | (((uint64_t)i) << idx->rshift);
+      _mtable_page_traverse((void **)tree[i], idx->next, cb, next_key, arg);
+    }
+  }
+  return;
+}
+
+void mtable_page_traverse(mtable_t *mtable, mtable_page_traverse_cb_t cb, void *arg) {
+  _mtable_page_traverse((void **)mtable->root, mtable->idx, cb, 0UL, arg);
 }
 
 //* bitmap64_t
@@ -695,6 +715,33 @@ overlay_epoch_t *omt_merge_line(omt_t *omt, overlay_epoch_t *overlay_epoch, uint
   return old_overlay_epoch;
 }
 
+void _omt_get_info(uint64_t key, void *_node, int item_count, int is_leaf, void *arg) {
+  omt_info_t *info = (omt_info_t *)arg;
+  if(is_leaf == 1) {
+    info->leaf_count++;
+    info->leaf_value_count += item_count;
+    void **node = (void **)_node;
+    // Count non-NULL entries in leaf node
+    for(int i = 0;i < item_count;i++) {
+      if(node[i] != NULL) {
+        info->valid_leaf_value_count++;
+      }
+    }
+  } else {
+    info->inner_count++;
+  }
+  info->size += (sizeof(void **) * item_count);
+  (void)key;
+  return;
+}
+
+omt_info_t omt_get_info(omt_t *omt) {
+  omt_info_t arg;
+  memset(&arg, 0x00, sizeof(omt_info_t));
+  mtable_page_traverse(omt->mtable, _omt_get_info, &arg);
+  return arg;
+}
+
 // Call back function used for tracersal
 void omt_selfcheck_cb(uint64_t line_addr, void *node, void *arg) {
   (*(uint64_t *)arg)++; // Each call back instance represents a valid entry
@@ -729,6 +776,14 @@ void omt_stat_print(omt_t *omt) {
     mtable_get_page_count(omt->mtable), mtable_get_size(omt->mtable),
     omt->merge_line_count, omt->working_set_size);
   printf("Writes %lu (table merging)\n", omt->write_count);
+  // Then perform a traverse to gather page information
+  omt_info_t info = omt_get_info(omt);
+  printf("Info leafs %lu inners %lu Vals total %lu valid %lu (ratio %f) size %lu (cross check)\n",
+    info.leaf_count, info.inner_count, info.leaf_value_count, info.valid_leaf_value_count,
+    (double)info.valid_leaf_value_count / (double)info.leaf_value_count,
+    info.size);
+  // These two sizes must equal
+  assert(info.size == mtable_get_size(omt->mtable));
   return;
 }
 
@@ -899,8 +954,8 @@ void cpu_tag_op(cpu_t *cpu, int op, int level, int core, ver_t *ver) {
     case CPU_TAG_OP_REMOVE: {
       cpu_tag_remove(cpu, level, core, ver);
     } break;
-    case CPU_TAG_OP_CLEAR:
-    case CPU_TAG_OP_SET: {
+    case CPU_TAG_OP_SET:
+    case CPU_TAG_OP_CLEAR: {
       bitmap64_t *bitmap;
       if(level == CPU_TAG_L1) {
         bitmap = &ver->l1_bitmap;
@@ -1245,7 +1300,8 @@ void cpu_stat_print(cpu_t *cpu, int verbose) {
 //* vtable_t
 
 vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_recv_cb, vtable_core_tag_cb_t core_tag_cb, 
-                      vtable_core_stable_epoch_cb_t core_stable_epoch_cb) {
+                      vtable_core_stable_epoch_cb_t core_stable_epoch_cb,
+                      vtable_l3_bus_txn_cb_t l3_bus_txn_cb) {
   vtable_t *vtable = (vtable_t *)malloc(sizeof(vtable_t));
   SYSEXPECT(vtable != NULL);
   memset(vtable, 0x00, sizeof(vtable_t));
@@ -1253,6 +1309,7 @@ vtable_t *vtable_init(vtable_evict_cb_t evict_cb, vtable_core_recv_cb_t core_rec
   vtable->core_recv_cb = core_recv_cb;
   vtable->core_tag_cb = core_tag_cb;
   vtable->core_stable_epoch_cb = core_stable_epoch_cb;
+  vtable->l3_bus_txn_cb = l3_bus_txn_cb;
   vtable->vers = ht64_init_size(VTABLE_HT_INIT_BUCKET_COUNT);
   return vtable;
 }
@@ -1478,12 +1535,14 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     }
     // Ownership transfer from other L1 to current L1, and also fill L2
     uint64_t recv_version = ver->l1_ver;
-    // Check whether the received version is lower than current stable epoch
+    // Check whether the received version is lower than current core's last walk epoch 
+    // (all ver's epoch must >= last walk epoch, so it the received one is smaller we should evict it)
     if(recv_version < vtable->core_stable_epoch_cb(vtable->nvoverlay, id)) {
       assert(recv_version < epoch); // Must be receiving from the past
       // We have performed tag walk past the received version, we must evict this version back
       // Otherwise the omcbuf will report error saying a version before tag walk is evicted
-      vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), recv_version, cycle, EVICT_BOTH);
+      // Note that we do not need to wb it to LLC, since we are writing a new version
+      vtable_evict_wrapper(vtable, ver->addr, vtable_l1_sharer(ver), recv_version, cycle, EVICT_OMC);
       vtable->st_inv_evict_count++; // Store invalidate (caused by ownership xfer)
       ver->l2_ver = ver->l1_ver = epoch; // This is equivelent to a local write
     } else {
@@ -1514,7 +1573,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     //ver->l2_state = STATE_M;    <- Already is
     uint64_t recv_version = ver->l2_ver; // Received version is remote L2's version
     if(recv_version < vtable->core_stable_epoch_cb(vtable->nvoverlay, id)) {
-      vtable_evict_wrapper(vtable, ver->addr, vtable_l2_sharer(ver), recv_version, cycle, EVICT_BOTH);
+      vtable_evict_wrapper(vtable, ver->addr, vtable_l2_sharer(ver), recv_version, cycle, EVICT_OMC);
       vtable->st_inv_evict_count++; // Store invalidate (caused by ownership xfer)
       ver->l2_ver = ver->l1_ver = epoch; // This is equivelent to a local write
     } else {
@@ -1605,6 +1664,7 @@ void _vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch
       }
     }
     vtable_evict_wrapper(vtable, ver->addr, id, ver->l1_ver, cycle, EVICT_BOTH);
+    ver->l3_dirty = 1; // L1 dirty data is written back to LLC, making it dirty
     if(from_l3) {
       vtable->l3_cap_evict_count++;
     } else {
@@ -1627,6 +1687,7 @@ void _vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch
       assert(ver->l1_state == STATE_I);
     }
     vtable_evict_wrapper(vtable, ver->addr, id, ver->l2_ver, cycle, EVICT_BOTH);
+    ver->l3_dirty = 1; // L2 dirty and up-to-date data written to LLC
     if(from_l3) {
       vtable->l3_cap_evict_count++;
     } else {
@@ -1656,7 +1717,9 @@ void _vtable_l2_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch
 void vtable_l3_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uint64_t cycle) {
   ver_t *ver = vtable_insert(vtable, addr);
   if(ver->owner == OWNER_OTHER) {
-    // Case 1. In this case there can be multiple upper level caches that have the address
+    // Case 1. In this case there can be multiple upper level caches that have the address in S state (not explicitly
+    // stored as S state, but just using the bitmap). Clear them all.
+    // ID is not used, since we always clean all shares according to the bitmap
     vtable_l1_clear_sharer(vtable, ver, id);
     vtable_l2_clear_sharer(vtable, ver, id);
   } else {
@@ -1665,7 +1728,20 @@ void vtable_l3_eviction(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch,
     if(vtable_l1_num_sharer(ver) == 1) {
       assert(vtable_l1_sharer(ver) == vtable_l2_sharer(ver));
     }
+    // Note that the ID from the arg is irrelevant since LLC eviction happens globally
+    // The true ID is the sole sharer and owner of the line to be evicted
+    id = vtable_l2_sharer(ver);
     _vtable_l2_eviction(vtable, addr, id, epoch, cycle, 1); // It is equivalent to L2 eviction
+  }
+  // If LLC line is dirty, then make a dirty WB; Otherwise just fetch new line (LLC eviction is always accompanied with 
+  // a new line fetch during normal operation)
+  if(ver->l3_dirty) {
+    vtable->l3_bus_txn_cb(vtable->nvoverlay, 2, cycle);
+    vtable->l3_bus_txn_count += 2;
+    ver->l3_dirty = 0;
+  } else {
+    vtable->l3_bus_txn_cb(vtable->nvoverlay, 1, cycle);
+    vtable->l3_bus_txn_count += 1;
   }
   return;
 }
@@ -1686,6 +1762,7 @@ void vtable_stat_print(vtable_t *vtable) {
   printf("Evict reason: st %lu ld-inv %lu st-inv %lu l1-cap %lu l2-cap %lu l3-cap %lu (sum %lu)\n",
     vtable->st_evict_count, vtable->ld_inv_evict_count, vtable->st_inv_evict_count,
     vtable->l1_cap_evict_count, vtable->l2_cap_evict_count, vtable->l3_cap_evict_count, sum);
+  printf("LLC-mem txn: %lu\n", vtable->l3_bus_txn_count);
   return;
 }
 
@@ -2192,10 +2269,11 @@ void overlay_stat_print(overlay_t *overlay) {
 
 //* nvm_t
 
-nvm_t *nvm_init(int bank_count, uint64_t rlat, uint64_t wlat) {
+nvm_t *nvm_init(int bank_count, uint64_t rlat, uint64_t wlat, nvm_op_complete_cb_t op_complete_cb) {
   nvm_t *nvm = (nvm_t *)malloc(sizeof(nvm_t));
   SYSEXPECT(nvm != NULL);
   memset(nvm, 0x00, sizeof(nvm_t));
+  nvm->op_complete_cb = op_complete_cb;
   nvm->rlat = rlat;
   nvm->wlat = wlat;
   nvm->bank_count = bank_count;
@@ -2226,6 +2304,7 @@ uint64_t nvm_access(nvm_t *nvm, uint64_t addr, uint64_t cycle, uint64_t lat, uin
     finish_cycle = nvm->banks[index] + lat; // The bank is busy now, so we need to wait until it becomes idle
   }
   nvm->banks[index] = finish_cycle;
+  if(nvm->op_complete_cb != NULL) nvm->op_complete_cb(nvm->nvoverlay, finish_cycle); // Notify parent module
   return finish_cycle;
 }
 
@@ -2262,6 +2341,69 @@ void nvm_stat_print(nvm_t *nvm) {
   printf("reads %lu (uncontended %lu) writes %lu (uncontended %lu)\n", 
     nvm->read_count, nvm->uncontended_read_count, nvm->write_count, nvm->uncontended_write_count);
   printf("Sync @ %lu min @ %lu\n", nvm_sync(nvm), nvm_min(nvm));
+  return;
+}
+
+//* logdump_t
+
+logdump_t *logdump_init(const char *filename) {
+  logdump_t *logdump = (logdump_t *)malloc(sizeof(logdump_t));
+  SYSEXPECT(logdump != NULL);
+  memset(logdump, 0x00, sizeof(logdump_t));
+  int len = strlen(filename);
+  logdump->filename = (char *)malloc(len + 1);
+  SYSEXPECT(logdump->filename != NULL);
+  strcpy(logdump->filename, filename);
+  // Check whether the file already exists
+  if(fopen(filename, "r") != NULL) error_exit("Log dump file \"%s\" already exists\n", filename);
+  // Open log file and keep it open
+  logdump->fp = fopen(filename, "wb");
+  SYSEXPECT(logdump->fp != NULL);
+  return logdump;
+}
+
+void logdump_free(logdump_t *logdump) {
+  assert(logdump->index >= 0 && logdump->index < LOGDUMP_BUF_COUNT);
+  if(logdump->index != 0) {
+    int ret = fwrite(logdump->buffer, sizeof(logdump_entry_t), logdump->index, logdump->fp);
+    if(ret != logdump->index) error_exit("Error writing log dump file: \"%s\"\n", logdump->filename);
+    logdump->index = 0;
+  }
+  fflush(logdump->fp);
+  fclose(logdump->fp);
+  free(logdump->filename);
+  free(logdump);
+  return;
+}
+
+void logdump_append(logdump_t *logdump, uint64_t time, uint64_t value) {
+  assert(logdump->index >= 0 && logdump->index < LOGDUMP_BUF_COUNT);
+  logdump->buffer[logdump->index].time = time;
+  logdump->buffer[logdump->index].value = value;
+  logdump->index++;
+  // Always keep index pointing to a valid entry outside this function
+  if(logdump->index == LOGDUMP_BUF_COUNT) {
+    int ret = fwrite(logdump->buffer, sizeof(logdump_entry_t), LOGDUMP_BUF_COUNT, logdump->fp);
+    if(ret != LOGDUMP_BUF_COUNT) error_exit("Error writing log dump file: \"%s\"\n", logdump->filename);
+    logdump->index = 0;
+  }
+  return;
+}
+
+void logdump_conf_print(logdump_t *logdump) {
+  printf("---------- logdump_t ----------\n");
+  printf("File \"%s\" buf size %d\n", logdump->filename, LOGDUMP_BUF_COUNT);
+  return;
+}
+
+void logdump_stat_print(logdump_t *logdump) {
+  printf("---------- logdump_t ----------\n");
+  int offset = ftell(logdump->fp);
+  fseek(logdump->fp, 0, SEEK_END);
+  int file_size = ftell(logdump->fp);
+  fseek(logdump->fp, offset, SEEK_SET);
+  printf("Index %d (size %d) file size %d\n", 
+    logdump->index, logdump->index * (int)sizeof(logdump_entry_t), file_size);
   return;
 }
 
@@ -2410,6 +2552,12 @@ void picl_conf_print(picl_t *picl) {
   } else {
     printf("NVM not connected to PiCL; skipping\n");
   }
+  if(picl->nvm_logdump != NULL) {
+    printf("NVM log dump conf:\n");
+    logdump_conf_print(picl->nvm_logdump);
+  } else {
+    printf("NVM log dump not connected to PiCL\n");
+  }
   printf("---------- picl_t ----------\n");
   printf("HT init buckets %d epoch size %lu\n", HT64_DEFAULT_INIT_BUCKETS, picl->epoch_size);
   return;
@@ -2431,6 +2579,8 @@ void picl_stat_print(picl_t *picl, int verbose) {
   } else {
     printf("NVM not connected to PiCL; skipping\n");
   }
+  if(picl->nvm_logdump != NULL) logdump_stat_print(picl->nvm_logdump);
+  else printf("NVM log dump not connected to PiCL\n");
   printf("---------- picl_t ----------\n");
   printf("HT size %lu buckets %lu\n", ht64_get_item_count(picl->ht64), ht64_get_bucket_count(picl->ht64));
   printf("Lines curr %lu (max %lu) epochs %lu log ptr %lu epoch stores %lu total stores %lu\n", 
@@ -2513,6 +2663,10 @@ static void nvoverlay_vtable_evict_cb(nvoverlay_t *nvoverlay, uint64_t addr, int
 static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version);
 static void nvoverlay_vtable_core_tag_cb(nvoverlay_t *nvoverlay, int op, int level, int id, ver_t *ver);
 static uint64_t nvoverlay_vtable_core_stable_epoch_cb(nvoverlay_t *nvoverlay, int id);
+// Following three are for bandwidth monitoring
+static void nvoverlay_vtable_l3_bus_txn_cb(nvoverlay_t *nvoverlay, int txn_count, uint64_t cycle);
+static void nvoverlay_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle);
+static void picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle);
 static void nvoverlay_omcbuf_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t version, uint64_t cycle);
 static void nvoverlay_cpu_tag_walk_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, int id, uint64_t version, uint64_t cycle);
 static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t cycle);
@@ -2759,12 +2913,14 @@ static cpu_t *nvoverlay_cpu_init(nvoverlay_t *nvoverlay) {
   return cpu;
 }
 
-static nvm_t *nvoverlay_nvm_init(nvoverlay_t *nvoverlay) {
+// This function is used by both NVOverlay and PiCL to initialize NVM since all NVM instances must share the
+// same argument
+static nvm_t *nvoverlay_nvm_init(nvoverlay_t *nvoverlay, nvm_op_complete_cb_t cb) {
   conf_t *conf = nvoverlay->conf;
   int nvm_rlat = conf_find_int32_range(conf, "nvm.rlat", 0, CONF_INT32_MAX, CONF_RANGE);
   int nvm_wlat = conf_find_int32_range(conf, "nvm.wlat", 0, CONF_INT32_MAX, CONF_RANGE);
   int nvm_banks = conf_find_int32_range(conf, "nvm.banks", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
-  nvm_t *nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat);
+  nvm_t *nvm = nvm_init(nvm_banks, nvm_rlat, nvm_wlat, cb);
   return nvm;
 }
 
@@ -2784,7 +2940,8 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
   assert(nvoverlay->mode == NVOVERLAY_MODE_FULL || nvoverlay->mode == NVOVERLAY_MODE_ALL);
   // NVM device 
-  nvoverlay->nvm = nvoverlay_nvm_init(nvoverlay);
+  nvoverlay->nvm = nvoverlay_nvm_init(nvoverlay, nvoverlay_nvm_op_complete_cb);
+  nvm_set_parent(nvoverlay->nvm, nvoverlay); // Used by the call back
   // OMC buffer
   int omcbuf_sets = conf_find_int32_range(conf, "omcbuf.sets", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
   int omcbuf_ways = conf_find_int32_range(conf, "omcbuf.ways", 1, CONF_INT32_MAX, CONF_RANGE | CONF_POWER2);
@@ -2797,7 +2954,7 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   // Version table (vtable)
   nvoverlay->vtable = \
     vtable_init(nvoverlay_vtable_evict_cb, nvoverlay_vtable_core_recv_cb, nvoverlay_vtable_core_tag_cb,
-                nvoverlay_vtable_core_stable_epoch_cb);
+                nvoverlay_vtable_core_stable_epoch_cb, nvoverlay_vtable_l3_bus_txn_cb);
   vtable_set_parent(nvoverlay->vtable, nvoverlay);
   // CPU
   nvoverlay->cpu = nvoverlay_cpu_init(nvoverlay);
@@ -2805,6 +2962,23 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   nvoverlay->epoch_size = conf_find_uint64_range(conf, "nvoverlay.epoch_size", 1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   // Read tag walk freq
   nvoverlay->tag_walk_freq = conf_find_uint64_range(conf, "nvoverlay.tag_walk_freq", 1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
+  // Read DRAM and NVM access log file name, optional
+  char *log_filename;
+  int log_filename_found;
+  log_filename_found = conf_find_str(conf, "nvoverlay.dram_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    nvoverlay->dram_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    nvoverlay->dram_logdump = NULL;
+  }
+  log_filename_found = conf_find_str(conf, "nvoverlay.nvm_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    nvoverlay->nvm_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    nvoverlay->nvm_logdump = NULL;
+  }
   // Epochs 
   nvoverlay->last_stable_epoch = 0UL;
   nvoverlay->stable_epochs = (uint64_t *)malloc(sizeof(uint64_t) * cpu_get_core_count(nvoverlay->cpu));
@@ -2932,9 +3106,20 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
   // CPU
   picl->cpu = nvoverlay_cpu_init(nvoverlay);
   // NVM
-  picl->nvm = nvoverlay_nvm_init(nvoverlay);
-  picl->thynvm = nvoverlay_nvm_init(nvoverlay);  // This is for evaluating ThyNVM
-  picl->l2_nvm = nvoverlay_nvm_init(nvoverlay);  // This is for evaluating L2 PiCL
+  picl->nvm = nvoverlay_nvm_init(nvoverlay, picl_nvm_op_complete_cb);
+  nvm_set_parent(picl->nvm, nvoverlay); // This is used by the call back
+  picl->thynvm = nvoverlay_nvm_init(nvoverlay, NULL);  // This is for evaluating ThyNVM
+  picl->l2_nvm = nvoverlay_nvm_init(nvoverlay, NULL);  // This is for evaluating L2 PiCL
+  // Access log dump
+  char *log_filename;
+  int log_filename_found;
+  log_filename_found = conf_find_str(conf, "picl.nvm_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    picl->nvm_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    picl->nvm_logdump = NULL;
+  }
   // Verbose print flag
   nvoverlay->stat_verbose = nvoverlay_verbose_init(nvoverlay);
   // Caps
@@ -3058,6 +3243,18 @@ void nvoverlay_conf_print_full(nvoverlay_t *nvoverlay) {
   omcbuf_conf_print(nvoverlay->omcbuf);
   overlay_conf_print(nvoverlay->overlay);
   nvm_conf_print(nvoverlay->nvm);
+  if(nvoverlay->dram_logdump != NULL) {
+    printf("DRAM log dump conf:\n");
+    logdump_conf_print(nvoverlay->dram_logdump);
+  } else {
+    printf("DRAM log dump not connected to NVOverlay\n");
+  }
+  if(nvoverlay->nvm_logdump != NULL) {
+    printf("NVM log dump conf:\n");
+    logdump_conf_print(nvoverlay->nvm_logdump);
+  } else {
+    printf("NVM log dump not connected to NVOverlay\n");
+  }
   printf("---------- nvoverlay_t ----------\n");
   printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
   printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
@@ -3126,6 +3323,18 @@ void nvoverlay_stat_print_full(nvoverlay_t *nvoverlay) {
   omcbuf_stat_print(nvoverlay->omcbuf);
   overlay_stat_print(nvoverlay->overlay);
   nvm_stat_print(nvoverlay->nvm);
+  if(nvoverlay->dram_logdump != NULL) {
+    printf("DRAM log dump stat:\n");
+    logdump_stat_print(nvoverlay->dram_logdump);
+  } else {
+    printf("DRAM log dump not connected to NVOverlay\n");
+  }
+  if(nvoverlay->nvm_logdump != NULL) {
+    printf("NVM log dump stat:\n");
+    logdump_stat_print(nvoverlay->nvm_logdump);
+  } else {
+    printf("NVM log dump not connected to NVOverlay\n");
+  }
   printf("---------- nvoverlay_t ----------\n");
   printf("Last stable epoch %lu; Total walks %lu\n", 
     nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
@@ -3320,6 +3529,28 @@ static uint64_t nvoverlay_vtable_core_stable_epoch_cb(nvoverlay_t *nvoverlay, in
   return cpu_get_last_walk_epoch(nvoverlay->cpu, id);
 }
 
+static void nvoverlay_vtable_l3_bus_txn_cb(nvoverlay_t *nvoverlay, int txn_count, uint64_t cycle) {
+  assert(nvoverlay != NULL);
+  if(nvoverlay->dram_logdump == NULL) return;
+  assert(txn_count == 1 || txn_count == 2);
+  logdump_append(nvoverlay->dram_logdump, cycle, (uint64_t)txn_count); 
+  return;
+}
+
+static void nvoverlay_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle) {
+  assert(nvoverlay != NULL);
+  if(nvoverlay->nvm_logdump == NULL) return;
+  logdump_append(nvoverlay->nvm_logdump, cycle, 1UL);  // Always write one cache line
+  return;
+}
+
+static void picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle) {
+  assert(nvoverlay != NULL && nvoverlay->picl != NULL);
+  if(nvoverlay->picl->nvm_logdump == NULL) return;
+  logdump_append(nvoverlay->picl->nvm_logdump, cycle, 1UL);  // Always write one cache line
+  return;
+}
+
 static void nvoverlay_omcbuf_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t version, uint64_t cycle) {
   assert(nvoverlay != NULL);
   // When the omcbuf writes back a line, we: (1) Insert the line into the current overlay in DRAM; (2) Write the line 
@@ -3408,7 +3639,8 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
       nvoverlay->last_stable_epoch = min_epoch;
     }
   }
-  nvoverlay_stat_sample(nvoverlay, serial);nvoverlay_stat_sample(nvoverlay, serial);
+  nvoverlay_stat_sample(nvoverlay, serial);
+  //nvoverlay_stat_sample(nvoverlay, serial);
   return;
 } 
 void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
@@ -3569,8 +3801,9 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
   return;
 }
 
-// Report inst count on a core
+// Report inst count to a core by the simulator. If the inst count exceeds per-core cap then set its state to HALTED
 // This function updates both per-core stat and CPU overall stat
+// Not directly called, but will be called using nvoverlay_other() interface 
 void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
@@ -3588,7 +3821,7 @@ void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   return;
 }
 
-// Report cycle count on a core
+// Report cycle count on a core by the simulator
 void nvoverlay_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);

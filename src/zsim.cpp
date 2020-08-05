@@ -60,6 +60,9 @@
 #include "trace_driver.h"
 #include "virt/virt.h"
 
+// To cast to ooo core
+#include "ooo_core.h"
+
 //#include <signal.h> //can't include this, conflicts with PIN's
 
 /* Command-line switches (used to pass info from harness that cannot be passed through the config file, most config is file-based) */
@@ -1179,7 +1182,8 @@ VOID OverlaySimEndCb(THREADID tid) {
         nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getInstrs(), core_serial++);
         // Insert a record for inst count into tracer which is the last record
         nvoverlay_intf.other_arg = NVOVERLAY_OTHER_CYCLE;
-        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, core->getCycles(), core_serial++);
+        nvoverlay_intf.other_cb(zinfo->nvoverlay, i, 0, ((OOOCore *)core)->getCurCycles(), core_serial++);
+        //nvoverlay_printf("curCycle = %lu; cycle = %lu\n", ((OOOCore *)core)->getCurCycles(), core->getCycles());
     }
     if(nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_FULL || 
        nvoverlay_get_mode(zinfo->nvoverlay) == NVOVERLAY_MODE_PICL || 

@@ -450,6 +450,7 @@ class OOOCore : public Core {
         uint64_t getInstrs() const;
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return cRec.getUnhaltedCycles(curCycle);}
+        uint64_t getCurCycles() const { return curCycle; }
 
         void contextSwitch(int32_t gid);
 
