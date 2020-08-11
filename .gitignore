@@ -17,3 +17,6 @@ hash_table
 nvoverlay_sample_*
 hash_table_sc
 nvoverlay_zsim_dump.txt
+*.dump
+outputs/*
+logdump/*
