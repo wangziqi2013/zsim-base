@@ -20,3 +20,4 @@ nvoverlay_zsim_dump.txt
 *.dump
 outputs/*
 logdump/*
+mixed_btree_art
