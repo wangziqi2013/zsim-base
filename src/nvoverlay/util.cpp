@@ -114,7 +114,7 @@ const char *to_size(uint64_t n) {
 
 //* conf_t
 
-// There is no guarantee that k and v are zero term string
+// There is no guarantee that k and v are zero terminating strings
 void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line) {
   conf_node_t *node = (conf_node_t *)malloc(sizeof(conf_node_t));
   SYSEXPECT(node != NULL);
@@ -145,9 +145,8 @@ void conf_insert_ext(conf_t *conf, const char *k, const char *v) {
 }
 
 conf_t *conf_init(const char *filename) {
-  conf_t *conf = (conf_t *)malloc(sizeof(conf_t));
-  SYSEXPECT(conf != NULL);
-  memset(conf, 0x00, sizeof(conf_t));
+  conf_t *conf = conf_init_empty();
+  assert(conf->filename == NULL);
   // Passing NULL as the second argument forces the lib call to allocate the buffer using malloc()
   conf->filename = realpath(filename, NULL);
   SYSEXPECT(conf->filename != NULL);
@@ -226,6 +225,13 @@ conf_t *conf_init(const char *filename) {
   return conf;
 }
 
+conf_t *conf_init_empty() {
+  conf_t *conf = (conf_t *)malloc(sizeof(conf_t));
+  SYSEXPECT(conf != NULL);
+  memset(conf, 0x00, sizeof(conf_t));
+  return conf;
+}
+
 void conf_node_free(conf_node_t *node) {
   free(node->key);
   free(node->value);
@@ -240,7 +246,7 @@ void conf_free(conf_t *conf) {
     curr = curr->next;
     conf_node_free(prev);
   }
-  free(conf->filename);
+  if(conf->filename != NULL) free(conf->filename);
   free(conf);
 }
 
@@ -436,6 +442,56 @@ uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uin
   if(options & CONF_RANGE) assert_uint64_range(num, low, high, key);
   if(options & CONF_POWER2) assert_uint64_power2(num, key);
   return num;
+}
+
+// If key not found, set list and count to NULL and return 0
+// Otherwise, store all uint64_t values in heap memory and store the pointer in list
+int conf_find_comma_list_uint64(conf_t *conf, const char *key, uint64_t **list, int *count) {
+  conf_node_t *node = conf_find(conf, key);
+  *count = 0;
+  if(node == NULL) {
+    *list = NULL;
+    return 0;
+  }
+  char *value = conf_str_skip_space(node->value);
+  // First iteration checks validity and computes count
+  int index = 0;
+  while(*value != '\0') {
+    char *end;
+    // Invariant: value must point to non-space character, and at least one char must be 
+    // read in order for the conversion to be valid. So we know the conversion is invalid
+    // if end equals value
+    strtoul(value, &end, 0);
+    if(end == value) {
+      error_exit("No valid comma-list conversion can be performed (line %d index %d)\n", node->line, index);
+    }
+    (*count)++;
+    // Skip white spaces after a parsed number and check for commas
+    value = conf_str_skip_space(end);
+    if(*value == ',') {
+      value = conf_str_skip_space(value + 1);
+    } else if(*value != '\0') {
+      error_exit("Invalid separator in comma-list: \'%c\' (value 0x%02X index %d)\n", *value, *value, index);
+    }
+    index++;
+  }
+  // Could not allocate 0 element
+  if(*count == 0) error_exit("At least one element must be present in the comma-list (line %d)\n", node->line);
+  *list = (uint64_t *)malloc(*count * sizeof(uint64_t));
+  SYSEXPECT(*list != NULL);
+  // Then use a simpler loop to actually acquire the numbers
+  value = conf_str_skip_space(node->value);
+  index = 0;
+  while(*value != '\0') {
+    char *end;
+    // Put the parsed number into the list
+    (*list)[index++] = strtoul(value, &end, 0);
+    value = conf_str_skip_space(end);
+    // We have already checked it will either be '\0' or ','
+    if(*value == ',') value = conf_str_skip_space(value + 1);
+  }
+  assert(index == *count);
+  return 1;
 }
 
 void conf_print(conf_t *conf) {

@@ -169,20 +169,24 @@ typedef struct conf_node_struct_t {
   struct conf_node_struct_t *next;
 } conf_node_t;
 
+void conf_node_free(conf_node_t *node);
+
 // Configuration files are flat structured "key = value" pairs; Lines beginning 
 // with "#" are comments
 typedef struct conf_struct_t {
   int item_count;          // Number of key-value pairs
   conf_node_t *head;       // Linked list of configurations
-  char *filename;          // File name of the conf file
+  char *filename;          // File name of the conf file; Could be NULL meaning the conf is not backed by a file
   int warn_unused;         // conf.warn_unused, set by upper level class
 } conf_t;
 
-void conf_node_free(conf_node_t *node);
+// Used for string processing; Skip over spaces from current pos until '\0' or non-space is seen
+inline static char *conf_str_skip_space(char *s) { while(isspace(*s) && *s != '\0') s++; return s; }
 
 void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line);
 void conf_insert_ext(conf_t *conf, const char *k, const char *v); // Insert external files, line is set to -1
 conf_t *conf_init(const char *filename);                    // Open a file and load contents into the conf buffer
+conf_t *conf_init_empty();                                  // Initialize an empty conf object without reading file
 void conf_free(conf_t *conf);
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists
 int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns if the entry exists
@@ -201,8 +205,9 @@ int conf_find_uint64_abbr(conf_t *conf, const char *key, uint64_t *ret);
 
 char *conf_find_str_mandatory(conf_t *conf, const char *key); // The string key must exist
 int conf_find_bool_mandatory(conf_t *conf, const char *key);  // The boolean key must exist
-int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int options); // Returns the value
-uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options); // Returns the value
+// Returns the value; key must exist
+int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int options); 
+uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options);
 
 // The following two are just short hands
 inline static int conf_find_int32_mandatory(conf_t *conf, const char *key) { 
@@ -211,6 +216,10 @@ inline static int conf_find_int32_mandatory(conf_t *conf, const char *key) {
 inline static int conf_find_uint64_mandatory(conf_t *conf, const char *key) { 
   return conf_find_uint64_range(conf, key, 0UL, 0UL, CONF_NONE);
 }
+
+// Parses a comma list of numbers into uint64_t. Return 1 if key is found. List and count are used to return the list
+// This function allocates memory from the heap and transfers ownership to the caller
+int conf_find_comma_list_uint64(conf_t *conf, const char *key, uint64_t **list, int *count);
 
 void conf_print(conf_t *conf);
 int conf_selfcheck(conf_t *conf);

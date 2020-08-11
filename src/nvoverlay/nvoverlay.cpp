@@ -805,7 +805,7 @@ void core_free(core_t *core) {
   free(core); 
 }
 
-cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t cb) {
+cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t tag_walk_cb, cpu_epoch_advance_cb_t epoch_advance_cb) {
   cpu_t *cpu = (cpu_t *)malloc(sizeof(cpu_t));
   SYSEXPECT(cpu != NULL);
   memset(cpu, 0x00, sizeof(cpu_t));
@@ -813,7 +813,9 @@ cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t cb) {
   cpu->cores = (core_t *)malloc(sizeof(core_t) * core_count);
   SYSEXPECT(cpu->cores);
   memset(cpu->cores, 0x00, sizeof(core_t) * core_count);
-  cpu->tag_walk_cb = cb;
+  // Initialize call back functions
+  cpu->tag_walk_cb = tag_walk_cb;
+  cpu->epoch_advance_cb = epoch_advance_cb;
   return cpu;
 }
 
@@ -827,15 +829,17 @@ void cpu_free(cpu_t *cpu) {
 }
 
 // Called when the core receives a version, not necessarily a dirty one
-void cpu_core_recv(cpu_t *cpu, int id, uint64_t version) {
+// This is called in the call back, which is called by vtable when a new version is received via coherence
+void cpu_core_recv(cpu_t *cpu, int id, uint64_t version, uint64_t cycle) {
   assert(id >= 0 && id < cpu->core_count);
-  core_t *core = cpu->cores + id;
+  core_t *core = cpu_get_core(cpu, id);
   if(version > core->epoch) {
     // Update statistics
     cpu->skip_epoch_count += ((version == (core->epoch + 1)) ? 0 : 1);
     cpu->coherence_advance_count++;
     cpu->total_advance_count++;
-    core->epoch = version;
+    //core->epoch = version;
+    cpu_set_core_epoch(cpu, id, version, cycle);
     core->epoch_store_count = 0UL;
   }
   // TODO: May add other behavior (register dump?)
@@ -844,10 +848,11 @@ void cpu_core_recv(cpu_t *cpu, int id, uint64_t version) {
 
 // External events other than coherence (coherence does not call this)
 // Unconditionally advance the epoch
-void cpu_advance_epoch(cpu_t *cpu, int id) {
+void cpu_advance_epoch(cpu_t *cpu, int id, uint64_t cycle) {
   assert(id >= 0 && id < cpu->core_count);
-  core_t *core = cpu->cores + id;
-  core->epoch++;
+  core_t *core = cpu_get_core(cpu, id);
+  //core->epoch++;
+  cpu_set_core_epoch(cpu, id, core_get_epoch(core) + 1, cycle);
   core->epoch_store_count = 0UL;
   cpu->total_advance_count++;
   return;
@@ -1416,7 +1421,7 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
     ver->l1_state = ver->l2_state = STATE_S;    // Load the line is S state
     vtable_l1_add_ver(vtable, ver, id);
     vtable_l2_add_ver(vtable, ver, id);
-    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver); // Received other_ver from LLC
+    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver, cycle); // Received other_ver from LLC
     return;
   } else {
     // Case 3.2: Downgrade and set all to shared; Ownership transfers to LLC + DRAM
@@ -1453,7 +1458,7 @@ void vtable_l1_load(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, uin
     ver->owner = OWNER_OTHER;
     vtable_l1_add_ver(vtable, ver, id);
     vtable_l2_add_ver(vtable, ver, id);
-    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver); // Received version from LLC after downgrade
+    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver, cycle); // Received version from LLC after downgrade
   }
   return;
 }
@@ -1520,7 +1525,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
     // May potentially advance current epoch - see above code
-    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver);
+    vtable->core_recv_cb(vtable->nvoverlay, id, ver->other_ver, cycle);
   } else if(ver->owner == OWNER_L1) {
     // Case 4
     assert(vtable_l1_sharer(ver) != id);
@@ -1555,7 +1560,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     ver->l2_state = STATE_M;   // L2 is dirty since we did not write back the version transferred from the other cache
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
-    vtable->core_recv_cb(vtable->nvoverlay, id, recv_version);
+    vtable->core_recv_cb(vtable->nvoverlay, id, recv_version, cycle);
   } else {
     // Case 5
     assert(ver->owner == OWNER_L2);
@@ -1585,7 +1590,7 @@ void vtable_l1_store(vtable_t *vtable, uint64_t addr, int id, uint64_t epoch, ui
     ver->l1_state = STATE_M;
     vtable_l1_set_ver(vtable, ver, id); 
     vtable_l2_set_ver(vtable, ver, id); 
-    vtable->core_recv_cb(vtable->nvoverlay, id, recv_version);
+    vtable->core_recv_cb(vtable->nvoverlay, id, recv_version, cycle);
   }
   return;
 }
@@ -2483,6 +2488,10 @@ void picl_l3_eviction(picl_t *picl, uint64_t line_addr, uint64_t cycle) {
   return;
 }
 
+// Calculates cache line evictions on an globally synchronized epoch advance
+// NOTE: This function must not call core's cpu_set_core_epoch() since we do not have a 
+// functioning epoch advance event call back function registered with PiCL (it is set to a stub
+// that does nothing).
 void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   ht64_rm_it_t it;
   ht64_rm_begin(picl->ht64, &it);
@@ -2510,7 +2519,7 @@ void picl_advance_epoch(picl_t *picl, uint64_t cycle) {
   }
   assert(count == picl->line_count);
   picl->line_count = 0UL;
-  picl->epoch_count++;
+  picl->epoch_count++;        // This is the current epoch since PiCL has only one global epoch
   // We align the log pointer after advancing new epoch
   picl->log_ptr = 0UL;
   picl->epoch_store_count = 0UL;
@@ -2658,18 +2667,35 @@ nvoverlay_intf_t nvoverlay_intf_all = {
 // This is the public interface object
 nvoverlay_intf_t nvoverlay_intf;
 
-// Forward declaration of static functions - they will not be included in the header file
+//* Call backs - Forward declaration of static call back functions
+// They will not be included in the header file
+
+// vtable eviction due to coherence; Version will be inserted into omcbuf
 static void nvoverlay_vtable_evict_cb(nvoverlay_t *nvoverlay, uint64_t addr, int id, uint64_t version, uint64_t cycle, int evict_type);
-static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version);
+// vtable receives a version from another core; Notify core of the receival event and core updates epoch if necessary
+static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version, uint64_t cycle);
+// vtable updates tag array due to coherence (this one is largely driven by simulator inputs)
 static void nvoverlay_vtable_core_tag_cb(nvoverlay_t *nvoverlay, int op, int level, int id, ver_t *ver);
+// Called by vtable to acquire stable epoch (last walk epoch) to determine if a received version is behind that
 static uint64_t nvoverlay_vtable_core_stable_epoch_cb(nvoverlay_t *nvoverlay, int id);
 // Following three are for bandwidth monitoring
+// Called by vtable when DRAM transactions occur due to fetch/eviction (largely driven by simulator evictions)
 static void nvoverlay_vtable_l3_bus_txn_cb(nvoverlay_t *nvoverlay, int txn_count, uint64_t cycle);
+// Called when NVOverlay NVM module completes a write operation
 static void nvoverlay_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle);
-static void picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle);
+// Called when PiCL NVM module completes a write operation (reads are not modeled)
+static void nvoverlay_picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle);
+// omcbuf evicts a line into the NVM
 static void nvoverlay_omcbuf_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t version, uint64_t cycle);
+// Called by CPU when a dirty version is evicted back to the OMC on a tag walk
 static void nvoverlay_cpu_tag_walk_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, int id, uint64_t version, uint64_t cycle);
+// Called for PiCL to write a line into the NVM (both normal eviction and log write)
 static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, uint64_t cycle);
+// Called when NVOverlay's CPU advances epoch, either because of external advance or version receival
+static void nvoverlay_epoch_advance_cb(nvoverlay_t *nvoverlay, int id, uint64_t target_epoch, uint64_t cycle);
+// Theoretically speaking PiCL should also be an epoch advance function. In the current impl. PiCL does not rely
+// on cpu_t to maintain its epoch, so this is just a dummy function that reports error
+static void nvoverlay_picl_epoch_advance_cb(nvoverlay_t *nvoverlay, int id, uint64_t target_epoch, uint64_t cycle);
 
 nvoverlay_t *nvoverlay_init(const char *conf_file) {
   nvoverlay_t *nvoverlay = (nvoverlay_t *)malloc(sizeof(nvoverlay_t));
@@ -2855,8 +2881,8 @@ void nvoverlay_trace_driven_init(nvoverlay_t *nvoverlay) {
   return;
 }
 
-// This function initialized caps
-// No return value
+// This function initialized caps; No return value
+// At most one of the caps are allowed. If a cap is not given its value is set to 0UL; Otherwise non-zero
 static void nvoverlay_cap_init(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
   if(conf_exists(conf, "nvoverlay.inst_cap") == 1) {
@@ -2879,17 +2905,17 @@ static void nvoverlay_cap_init(nvoverlay_t *nvoverlay) {
   } else {
     nvoverlay->has_cap = 0;
   }
-  // Set to core count, and drop to zero
+  // Set to core count; This var controls whether to terminate sim later during execution
   nvoverlay->cap_core_count = conf_find_int32_mandatory(conf, "cpu.cores");
   return;
 }
 
 // This function initializes a CPU object from conf, and store it into the given location
-// NOTE: CPU object is returned
-static cpu_t *nvoverlay_cpu_init(nvoverlay_t *nvoverlay) {
+// CPU object is returned
+static cpu_t *nvoverlay_cpu_init(nvoverlay_t *nvoverlay, cpu_epoch_advance_cb_t epoch_advance_cb) {
   conf_t *conf = nvoverlay->conf;
   int cpu_core_count = conf_find_int32_range(conf, "cpu.cores", 1, CORE_COUNT_MAX, CONF_RANGE);
-  cpu_t *cpu = cpu_init(cpu_core_count, nvoverlay_cpu_tag_walk_cb);
+  cpu_t *cpu = cpu_init(cpu_core_count, nvoverlay_cpu_tag_walk_cb, epoch_advance_cb);
   cpu_set_parent(cpu, nvoverlay);
   // Read L1 and L2 cache configuration
   int l1_ways = conf_find_int32_range(conf, "cpu.l1.ways", 1, CONF_INT32_MAX, CONF_RANGE);
@@ -2935,6 +2961,78 @@ static int nvoverlay_verbose_init(nvoverlay_t *nvoverlay) {
   return ret;
 }
 
+static void nvoverlay_logdump_init(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  char *log_filename;
+  int log_filename_found;
+  log_filename_found = conf_find_str(conf, "nvoverlay.dram_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    nvoverlay->dram_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    nvoverlay->dram_logdump = NULL;
+  }
+  log_filename_found = conf_find_str(conf, "nvoverlay.nvm_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    nvoverlay->nvm_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    nvoverlay->nvm_logdump = NULL;
+  }
+  // Read epoch advance event log dump
+  log_filename_found = conf_find_str(conf, "nvoverlay.epoch_logdump.filename", &log_filename);
+  if(log_filename_found == 1) {
+    nvoverlay->epoch_logdump = logdump_init(log_filename);
+    free(log_filename);
+  } else {
+    nvoverlay->epoch_logdump = NULL;
+  }
+  return;
+}
+
+// Read conf of nvoverlay epoch size change switch and lists. This feature affects both nvoverlay and PiCL, if the
+// latter is also enabled
+static void nvoverlay_epoch_size_change_init(nvoverlay_t *nvoverlay) {
+  conf_t *conf = nvoverlay->conf;
+  int enabled = conf_exists(conf, "nvoverlay.epoch_size_change");
+  if(enabled == 0) {
+    nvoverlay->epoch_size_change_count = 0;
+    nvoverlay->epoch_size_change_percent_list = NULL;
+    nvoverlay->epoch_size_change_value_list = NULL;
+    nvoverlay->epoch_size_change_index = -1;
+    return;
+  }
+  int count1, count2, found;
+  // The list parsing function guarantees that the list has at least one element
+  found = conf_find_comma_list_uint64(conf, "nvoverlay.epoch_size_change_percent", 
+    &nvoverlay->epoch_size_change_percent_list, &count1);
+  if(found == 0) error_exit("Epoch size percent change key \"epoch_size_change_percent\" missing\n");
+  found = conf_find_comma_list_uint64(conf, "nvoverlay.epoch_size_change_value", 
+    &nvoverlay->epoch_size_change_value_list, &count2);
+  if(found == 0) error_exit("Epoch size percent change key \"epoch_size_change_value\" missing\n");
+  assert(count1 > 0 && count2 > 0); // Otherwise list parsing would fail
+  if(count1 != count2) {
+    error_exit("Both percent and value lists for epoch change must be of the same size"
+    " (see %d and %d respectively)", count1, count2);
+  }
+  // Make sure percent list is ascending and lies in [1, 99]
+  for(int i = 0;i < count1;i++) {
+    if(i != 0 && nvoverlay->epoch_size_change_percent_list[i] <= nvoverlay->epoch_size_change_percent_list[i - 1]) {
+      error_exit("The epoch size change percent list must have ascending values (error at index %d and %d)\n", 
+        i, i - 1);
+    }
+    if(nvoverlay->epoch_size_change_percent_list[i] < 1 || nvoverlay->epoch_size_change_percent_list[i] > 99) {
+      error_exit("The epoch size change percent list must have all elements between 1 and 99 (error at index %d)\n", i);
+    }
+  }
+  // Make sure we actually have a cap
+  if(nvoverlay->has_cap == 0) error_exit("In order to use epoch size change feature there must be a cap\n");
+  // Assign non-zero to this var will enable epoch size change
+  nvoverlay->epoch_size_change_count = count1;
+  nvoverlay->epoch_size_change_index = 0; // Points to the first percent
+  return;
+}
+
 // Mode and conf are set
 void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   conf_t *conf = nvoverlay->conf;
@@ -2957,28 +3055,13 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
                 nvoverlay_vtable_core_stable_epoch_cb, nvoverlay_vtable_l3_bus_txn_cb);
   vtable_set_parent(nvoverlay->vtable, nvoverlay);
   // CPU
-  nvoverlay->cpu = nvoverlay_cpu_init(nvoverlay);
+  nvoverlay->cpu = nvoverlay_cpu_init(nvoverlay, nvoverlay_epoch_advance_cb);
   // Read epoch size
   nvoverlay->epoch_size = conf_find_uint64_range(conf, "nvoverlay.epoch_size", 1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   // Read tag walk freq
   nvoverlay->tag_walk_freq = conf_find_uint64_range(conf, "nvoverlay.tag_walk_freq", 1, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
-  // Read DRAM and NVM access log file name, optional
-  char *log_filename;
-  int log_filename_found;
-  log_filename_found = conf_find_str(conf, "nvoverlay.dram_logdump.filename", &log_filename);
-  if(log_filename_found == 1) {
-    nvoverlay->dram_logdump = logdump_init(log_filename);
-    free(log_filename);
-  } else {
-    nvoverlay->dram_logdump = NULL;
-  }
-  log_filename_found = conf_find_str(conf, "nvoverlay.nvm_logdump.filename", &log_filename);
-  if(log_filename_found == 1) {
-    nvoverlay->nvm_logdump = logdump_init(log_filename);
-    free(log_filename);
-  } else {
-    nvoverlay->nvm_logdump = NULL;
-  }
+  // Initialize log dumps, e.g. bandwidth monitoring, epoch advance events, etc.
+  nvoverlay_logdump_init(nvoverlay);
   // Epochs 
   nvoverlay->last_stable_epoch = 0UL;
   nvoverlay->stable_epochs = (uint64_t *)malloc(sizeof(uint64_t) * cpu_get_core_count(nvoverlay->cpu));
@@ -3012,12 +3095,24 @@ void nvoverlay_init_full(nvoverlay_t *nvoverlay) {
   nvoverlay->stat_verbose = nvoverlay_verbose_init(nvoverlay);
   // Caps
   nvoverlay_cap_init(nvoverlay);
+  // Epoch size changes - This must be after Caps initialization since it relies on caps to compute boundary
+  nvoverlay_epoch_size_change_init(nvoverlay);
   // Trace-driven - This must be at the very end of the function
   nvoverlay_trace_driven_init(nvoverlay);
   return;
 }
 
 void nvoverlay_free_full(nvoverlay_t *nvoverlay) {
+  // Free epoch size change arrays
+  if(nvoverlay->epoch_size_change_count != 0) {
+    free(nvoverlay->epoch_size_change_percent_list);
+    free(nvoverlay->epoch_size_change_value_list);
+  }
+  // Free log dumps if they are initialized
+  if(nvoverlay->epoch_logdump != NULL) logdump_free(nvoverlay->epoch_logdump);
+  if(nvoverlay->nvm_logdump != NULL) logdump_free(nvoverlay->nvm_logdump);
+  if(nvoverlay->dram_logdump != NULL) logdump_free(nvoverlay->dram_logdump);
+  // Dump and free samples
   if(nvoverlay_sample_is_enabled(nvoverlay)) {
     // Dump stat first if sampling is enabled
     printf("Dumping statistics to %d files...\n", SAMPLE_COUNT);
@@ -3104,9 +3199,9 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
   // Epoch size [1, +inf)
   picl->epoch_size = conf_find_uint64_range(conf, "picl.epoch_size", 1UL, CONF_UINT64_MAX, CONF_RANGE | CONF_ABBR);
   // CPU
-  picl->cpu = nvoverlay_cpu_init(nvoverlay);
+  picl->cpu = nvoverlay_cpu_init(nvoverlay, nvoverlay_picl_epoch_advance_cb);
   // NVM
-  picl->nvm = nvoverlay_nvm_init(nvoverlay, picl_nvm_op_complete_cb);
+  picl->nvm = nvoverlay_nvm_init(nvoverlay, nvoverlay_picl_nvm_op_complete_cb);
   nvm_set_parent(picl->nvm, nvoverlay); // This is used by the call back
   picl->thynvm = nvoverlay_nvm_init(nvoverlay, NULL);  // This is for evaluating ThyNVM
   picl->l2_nvm = nvoverlay_nvm_init(nvoverlay, NULL);  // This is for evaluating L2 PiCL
@@ -3130,6 +3225,7 @@ void nvoverlay_init_picl(nvoverlay_t *nvoverlay) {
 }
 
 void nvoverlay_free_picl(nvoverlay_t *nvoverlay) {
+  if(nvoverlay->picl->nvm_logdump != NULL) logdump_free(nvoverlay->picl->nvm_logdump);
   nvm_free(nvoverlay->picl->nvm);
   nvm_free(nvoverlay->picl->thynvm);
   nvm_free(nvoverlay->picl->l2_nvm);
@@ -3255,7 +3351,7 @@ void nvoverlay_conf_print_full(nvoverlay_t *nvoverlay) {
   } else {
     printf("NVM log dump not connected to NVOverlay\n");
   }
-  printf("---------- nvoverlay_t ----------\n");
+  printf("---------- nvoverlay_t for NVOverlay ----------\n");
   printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
   printf("Epoch size %lu tag walk freq %lu passive walk %d sample freq %lu\n", 
     nvoverlay->epoch_size, nvoverlay->tag_walk_freq, nvoverlay->tag_walk_passive, nvoverlay->sample_freq);
@@ -3264,13 +3360,28 @@ void nvoverlay_conf_print_full(nvoverlay_t *nvoverlay) {
   putchar('\n');
   printf("Stat verbose %d\n", nvoverlay->stat_verbose);
   printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
+  printf("Epoch size change count %d\n", nvoverlay->epoch_size_change_count);
+  if(nvoverlay->epoch_size_change_count > 0) {
+    printf("  Percent: ");
+    for(int i = 0;i < nvoverlay->epoch_size_change_count;i++) {
+      printf("%lu ", nvoverlay->epoch_size_change_percent_list[i]);
+    }
+    putchar('\n');
+    printf("  Value: ");
+    for(int i = 0;i < nvoverlay->epoch_size_change_count;i++) {
+      printf("%lu ", nvoverlay->epoch_size_change_value_list[i]);
+    }
+    putchar('\n');
+  } else {
+    printf("  Disabled\n");
+  }
   return;
 }
 
 void nvoverlay_conf_print_picl(nvoverlay_t *nvoverlay) {
   picl_conf_print(nvoverlay->picl);
   // Only print PiCL related nvoverlay information
-  printf("---------- nvoverlay_t ----------\n");
+  printf("---------- nvoverlay_t for PiCL ----------\n");
   printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
   printf("Core mask ");
   bitmap64_print_bitstr(&nvoverlay->core_mask);
@@ -3282,7 +3393,7 @@ void nvoverlay_conf_print_picl(nvoverlay_t *nvoverlay) {
 
 void nvoverlay_conf_print_tracer(nvoverlay_t *nvoverlay) {
   tracer_conf_print(nvoverlay->tracer);
-  printf("---------- nvoverlay_t ----------\n");
+  printf("---------- nvoverlay_t for Tracer ----------\n");
   printf("Mode: %s\n", nvoverlay_mode_names[nvoverlay->mode]);
   printf("Stat verbose %d\n", nvoverlay->stat_verbose);
   printf("Cap inst %lu cycle %lu\n", nvoverlay->inst_cap, nvoverlay->cycle_cap);
@@ -3335,6 +3446,12 @@ void nvoverlay_stat_print_full(nvoverlay_t *nvoverlay) {
   } else {
     printf("NVM log dump not connected to NVOverlay\n");
   }
+  if(nvoverlay->epoch_logdump != NULL) {
+    printf("Epoch log dump stat:\n");
+    logdump_stat_print(nvoverlay->epoch_logdump);
+  } else {
+    printf("Epoch log dump not connected to NVOverlay\n");
+  }
   printf("---------- nvoverlay_t ----------\n");
   printf("Last stable epoch %lu; Total walks %lu\n", 
     nvoverlay->last_stable_epoch, nvoverlay->tag_walk_count);
@@ -3351,6 +3468,7 @@ void nvoverlay_stat_print_full(nvoverlay_t *nvoverlay) {
     nvm_get_write_count(nvoverlay->nvm) + omt_get_write_count(nvoverlay->omt),
     nvm_get_write_count(nvoverlay->nvm) * UTIL_CACHE_LINE_SIZE + omt_get_write_count(nvoverlay->omt) * 8UL);
   printf("Cap core count %d\n", nvoverlay->cap_core_count);
+  printf("Epoch size change index %d (curr epoch size %lu)\n", nvoverlay->epoch_size_change_index, nvoverlay->epoch_size);
   return;
 }
 
@@ -3511,9 +3629,9 @@ static void nvoverlay_vtable_evict_cb(nvoverlay_t *nvoverlay,
   return;
 }
 
-static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version) {
+static void nvoverlay_vtable_core_recv_cb(nvoverlay_t *nvoverlay, int id, uint64_t version, uint64_t cycle) {
   assert(nvoverlay != NULL);
-  cpu_core_recv(nvoverlay->cpu, id, version);
+  cpu_core_recv(nvoverlay->cpu, id, version, cycle);
   return;
 }
 
@@ -3544,10 +3662,10 @@ static void nvoverlay_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle)
   return;
 }
 
-static void picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle) {
+static void nvoverlay_picl_nvm_op_complete_cb(nvoverlay_t *nvoverlay, uint64_t cycle) {
   assert(nvoverlay != NULL && nvoverlay->picl != NULL);
   if(nvoverlay->picl->nvm_logdump == NULL) return;
-  logdump_append(nvoverlay->picl->nvm_logdump, cycle, 1UL);  // Always write one cache line
+  logdump_append(nvoverlay->picl->nvm_logdump, cycle, 1UL);  // Always write one cache line + addr tag
   return;
 }
 
@@ -3574,6 +3692,27 @@ static void nvoverlay_picl_evict_cb(nvoverlay_t *nvoverlay, uint64_t line_addr, 
   return;
 }
 
+static void nvoverlay_epoch_advance_cb(nvoverlay_t *nvoverlay, int id, uint64_t target_epoch, uint64_t cycle) {
+  assert(nvoverlay != NULL);
+  (void)target_epoch;
+  // If this is disabled just return
+  if(nvoverlay->epoch_logdump == NULL) return;
+  if(cycle & 0xF000000000000000UL) {
+    error_exit("Cycle (%lu, 0x%lX) too large to trace epoch advance events\n", cycle, cycle);
+  }
+  // High 8 bits store CPU ID and low 56 bits store the cycle of the advance event
+  uint64_t data = (uint64_t)id << 56 | cycle;
+  // Append the data point into the log dump buffer
+  logdump_append(nvoverlay->epoch_logdump, cycle, data);
+  return;
+}
+
+static void nvoverlay_picl_epoch_advance_cb(nvoverlay_t *nvoverlay, int id, uint64_t target_epoch, uint64_t cycle) {
+  error_exit("PiCL should not rely on CPU object to track its epochs\n");
+  (void)nvoverlay; (void)id; (void)target_epoch; (void)cycle;
+  return;
+}
+
 // No-op call back functions; Does nothing
 void nvoverlay_noop_noop(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   (void)nvoverlay; (void)id; (void)line_addr; (void)cycle; (void)serial;
@@ -3586,6 +3725,7 @@ void nvoverlay_full_load(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uin
   nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
+
 void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   cpu_t *cpu = nvoverlay->cpu;
   core_t *core = cpu_get_core(cpu, id);
@@ -3593,8 +3733,10 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
   vtable_l1_store(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
   core->epoch_store_count++;
   core->total_store_count++;
-  if(core->epoch_store_count > nvoverlay->epoch_size) {
-    cpu_advance_epoch(cpu, id);
+  // Check whether we need to advance the epoch
+  // Note that epoch size may have been changed by epoch_size_change configuration when progress is at certain level
+  if(core->epoch_store_count >= nvoverlay->epoch_size) {
+    cpu_advance_epoch(cpu, id, cycle);
     assert(core->epoch_store_count == 0UL);
   }
   assert(core->epoch >= core->last_walk_epoch);
@@ -3643,18 +3785,21 @@ void nvoverlay_full_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
   //nvoverlay_stat_sample(nvoverlay, serial);
   return;
 } 
+
 void nvoverlay_full_l1_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l1_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
   nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
+
 void nvoverlay_full_l2_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l2_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
   nvoverlay_stat_sample(nvoverlay, serial);
   return;
 }
+
 void nvoverlay_full_l3_evict(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_t cycle, uint64_t serial) {
   core_t *core = cpu_get_core(nvoverlay->cpu, id);
   vtable_l3_eviction(nvoverlay->vtable, line_addr, id, core_get_epoch(core), cycle);
@@ -3693,7 +3838,8 @@ void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
   picl_t *picl = nvoverlay->picl;
   picl_store(picl, line_addr, cycle);
   // Update per-core stat
-  // Note that these stats are only updated in nvoverlay call backs, since 
+  // Note that PiCL does not call CPU object's function for advancing epoch or manipulating tags. PiCL only contains 
+  // a CPU object because we want to maintain statistics
   cpu_t *cpu = picl->cpu;
   core_t *core = cpu_get_core(cpu, id);
   core->total_store_count++;
@@ -3701,8 +3847,8 @@ void nvoverlay_picl_store(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, ui
   // Global stat
   picl->epoch_store_count++;
   picl->total_store_count++;
-  // Epoch advance
-  if(picl->epoch_store_count == picl->epoch_size) {
+  // Epoch advance - note that must use >= here since epoch_size may change
+  if(picl->epoch_store_count >= picl->epoch_size) {
     uint64_t before_walk = picl->tag_walk_evict_count;
     // This clears epoch_store_count
     picl_advance_epoch(picl, cycle);
@@ -3803,6 +3949,7 @@ void nvoverlay_other(nvoverlay_t *nvoverlay, int id, uint64_t line_addr, uint64_
 
 // Report inst count to a core by the simulator. If the inst count exceeds per-core cap then set its state to HALTED
 // This function updates both per-core stat and CPU overall stat
+// We also implement epoch size change here
 // Not directly called, but will be called using nvoverlay_other() interface 
 void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
@@ -3811,6 +3958,7 @@ void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
   assert(inst_count >= core->last_inst_count);
   nvoverlay->cpu->total_inst_count += (inst_count - core->last_inst_count);
   core->last_inst_count = inst_count;
+  // Check whether this should be terminated
   if(nvoverlay->inst_cap != 0UL && inst_count >= nvoverlay->inst_cap) {
     if(core->cap_status == CORE_CAP_STATUS_ACTIVE) {
       core->cap_status = CORE_CAP_STATUS_HALTED;
@@ -3818,10 +3966,32 @@ void nvoverlay_inst(nvoverlay_t *nvoverlay, int id, uint64_t inst_count) {
       assert(nvoverlay->cap_core_count >= 0);
     }
   }
+  if(nvoverlay->inst_cap != 0UL && nvoverlay->epoch_size_change_count != 0) {
+    int index = nvoverlay->epoch_size_change_index;
+    assert(index >= 0 && index <= nvoverlay->epoch_size_change_count);
+    // If index equals the count then we have no more changes to make
+    if(index != nvoverlay->epoch_size_change_count) {
+      uint64_t percent = (uint64_t)((double)inst_count / (double)nvoverlay->inst_cap * 100.0);
+      if(percent >= nvoverlay->epoch_size_change_percent_list[index]) {
+        uint64_t target = nvoverlay->epoch_size_change_value_list[index];
+        printf("[NVOverlay] Changing NVOverlay epoch size to %lu\n", target);
+        nvoverlay->epoch_size = target;
+        // Also chahge PiCL's epoch size
+        if(nvoverlay->picl != NULL) {
+          printf("[NVOverlay] Changing PiCL epoch size to %lu\n", target);
+          nvoverlay->picl->epoch_size = target;
+        }
+        nvoverlay->epoch_size_change_index++;
+      }
+    }
+  }
   return;
 }
 
-// Report cycle count on a core by the simulator
+// Report cycle count on a core by the timing simulator
+// This function updates per-core current cycle variable. If the core reaches its cycle cap,
+// then the core's status will also be changed (but the core instance keeps running to maintain
+// system integrity)
 void nvoverlay_cycle(nvoverlay_t *nvoverlay, int id, uint64_t cycle_count) {
   assert(id >= 0 && id < nvoverlay->cpu->core_count);
   core_t *core = cpu_get_core(nvoverlay->cpu, id);

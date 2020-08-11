@@ -351,6 +351,7 @@ core_t *core_init();
 void core_free(core_t *core);
 
 inline static uint64_t core_get_epoch(core_t *core) { return core->epoch; }
+inline static void core_set_epoch(core_t *core, uint64_t epoch) { core->epoch = epoch; }
 
 // Macros we use to access tag array
 #define CPU_TAG_MAX     2
@@ -379,13 +380,23 @@ typedef struct {
 typedef void (*cpu_tag_walk_cb_t)(struct nvoverlay_struct_t *nvoverlay, 
   uint64_t line_addr, int id, uint64_t version, uint64_t cycle);
 
+// This is called when epoch advances for any reason, e.g. when an external event
+// notifies epoch advance, or when vtable reports receival event and it happens to be
+// more than the local epoch of the receiving core
+// This function is for tracking epoch advance events statistics for now
+typedef void (*cpu_epoch_advance_cb_t)(struct nvoverlay_struct_t *nvoverlay, 
+  int id, uint64_t target_epoch, uint64_t cycle);
+
 typedef struct {
   core_t *cores;   // An array of core objects
   int core_count;  // Number of core objects
-  // Optional tracking for L1 and L2; They are enabled using 
+  // Optional tracking for L1 and L2; They are enabled in the conf file
   cpu_tag_t tag_arrays[CPU_TAG_MAX]; // L1 and L2
+  // Call back function's first argument
   struct nvoverlay_struct_t *nvoverlay; 
+  // Call back functions
   cpu_tag_walk_cb_t tag_walk_cb;
+  cpu_epoch_advance_cb_t epoch_advance_cb;
   // Statistics
   uint64_t coherence_advance_count;  // Number of advances caused by coherence
   uint64_t skip_epoch_count;         // Number of times a core advances its epoch by more than 1
@@ -394,11 +405,13 @@ typedef struct {
   uint64_t total_cycle_count;        // Total number of cycles reported on all cores
 } cpu_t;
 
-cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t cb);
+cpu_t *cpu_init(int core_count, cpu_tag_walk_cb_t tag_walk_cb, cpu_epoch_advance_cb_t epoch_advance_cb);
 void cpu_free(cpu_t *cpu);
+
 inline static void cpu_set_parent(cpu_t *cpu, struct nvoverlay_struct_t *nvoverlay) { cpu->nvoverlay = nvoverlay; }
-void cpu_core_recv(cpu_t *cpu, int id, uint64_t version);
-void cpu_advance_epoch(cpu_t *cpu, int id);
+
+void cpu_core_recv(cpu_t *cpu, int id, uint64_t version, uint64_t cycle);
+void cpu_advance_epoch(cpu_t *cpu, int id, uint64_t cycle);
 uint64_t cpu_min_epoch(cpu_t *cpu);
 uint64_t cpu_max_epoch(cpu_t *cpu);
 
@@ -410,7 +423,7 @@ inline static uint64_t cpu_get_epoch(cpu_t *cpu, int id) {
 void cpu_tag_init(cpu_t *cpu, int level, int sets, int ways);
 
 // These two are used for iterating a set within a core, given an address
-inline static struct ver_struct_t **cpu_addr_tag_begin(cpu_t *cpu, int level, int id, int64_t addr) {
+inline static struct ver_struct_t **cpu_addr_tag_begin(cpu_t *cpu, int level, int id, uint64_t addr) {
   assert(level >= 0 && level < CPU_TAG_MAX);
   cpu_tag_t *tag_array = &cpu->tag_arrays[level]; // Select L1 or L2 using level
   assert(tag_array->tags != NULL);
@@ -478,6 +491,15 @@ inline static uint64_t cpu_get_total_cycle_count(cpu_t *cpu) { return cpu->total
 int cpu_tag_get_ways(cpu_t *cpu, int level);
 int cpu_tag_get_sets(cpu_t *cpu, int level);
 
+// This function must be used when core->epoch is modified to report statistics
+inline static void cpu_set_core_epoch(cpu_t *cpu, int id, uint64_t target_epoch, uint64_t cycle) {
+  core_t *core = cpu_get_core(cpu, id);
+  core_set_epoch(core, target_epoch);
+  // Invoke the call back to report core epoch advance event with cycle and core ID
+  cpu->epoch_advance_cb(cpu->nvoverlay, id, target_epoch, cycle);
+  return;
+}
+
 void cpu_selfcheck(cpu_t *cpu);
 
 // Called by nvoverlay after init
@@ -520,7 +542,8 @@ void ver_free(void *ver);  // Use void * to make it match the prototype of the c
 // Args: addr, core id, version, cycle, type
 typedef void (*vtable_evict_cb_t)(struct nvoverlay_struct_t *, uint64_t, int, uint64_t, uint64_t, int);
 // Call back type for cores receiving versioned data
-typedef void (*vtable_core_recv_cb_t)(struct nvoverlay_struct_t *, int, uint64_t);
+// Args: core ID, received version, cycle of receival
+typedef void (*vtable_core_recv_cb_t)(struct nvoverlay_struct_t *, int, uint64_t, uint64_t);
 // Call back type for tag array update
 // Args: op code, cache level, core ID, version object
 // For INSERT and REMOVE the ID indicates the mask; For SET the ver_t must be the before value, and the core ID indicates
@@ -534,11 +557,13 @@ typedef void (*vtable_l3_bus_txn_cb_t)(struct nvoverlay_struct_t *, int, uint64_
 
 typedef struct vtable_struct_t {
   ht64_t *vers;                         // Index for ver_t
+  // Call back functions
   vtable_evict_cb_t evict_cb;           // Eviction call back function
-  vtable_core_recv_cb_t core_recv_cb;   // Core data receival function
-  vtable_core_tag_cb_t core_tag_cb;     // Core tag change function
-  vtable_core_stable_epoch_cb_t core_stable_epoch_cb; // Core get stable epoch function
+  vtable_core_recv_cb_t core_recv_cb;   // Core data receival call back function
+  vtable_core_tag_cb_t core_tag_cb;     // Core tag change call back function
+  vtable_core_stable_epoch_cb_t core_stable_epoch_cb; // Core get stable epoch function (used when receiving dirty ver)
   vtable_l3_bus_txn_cb_t l3_bus_txn_cb; // Report LLC-mem bus txns for statistics
+  // Call back function's first argument
   struct nvoverlay_struct_t *nvoverlay; // Back pointer used for call back function
   // Statistics
   uint64_t omc_evict_count;
@@ -1002,8 +1027,19 @@ typedef struct nvoverlay_struct_t {
   int has_cap;                  // Set to 1 if there is a cap; 0 if not. If zero should not call cap related function
   int cap_core_count;           // Number of cores that are below the cap - init'ed to cpu.cores. -1 means already finished
   time_t begin_time;            // Start time of simulation, set in init function
+  // Monitoring bandwidth statistics; They are optional, set to NULL if not enabled
   logdump_t *dram_logdump;      // Baseline DRAM access log, populated by vtable call back function
   logdump_t *nvm_logdump;       // NVM access log, populated by NVM call back function
+  // Monitoring epoch advance event statistics; Optional
+  logdump_t *epoch_logdump;     // Epoch advance log, populated by epoch advance call back function
+  // Epoch size change (used to evaluate the so-called "bursty workloads")
+  // Enabled using conf "nvoverlay.epoch_size_change = 1" and then the two lists are provided in comma-separated lists
+  // "nvoverlay.epoch_size_change_percent = 10, 20, 30"
+  // "nvoverlay.epoch_size_change_value = 10000, 20000, 30000"
+  int epoch_size_change_count;               // Number of elements in the below lists (must be of the same size); 0 if turned off
+  uint64_t *epoch_size_change_percent_list;  // Epoch size will change when capped simulation is at the given percentage
+  uint64_t *epoch_size_change_value_list;    // The target size epoch size will change to
+  int epoch_size_change_index;               // The index pointing to the next element in the list that will be the next change
   // Components
   conf_t *conf;              // Configuration file
   vtable_t *vtable;          // Tracking versions
