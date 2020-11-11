@@ -12,7 +12,7 @@ We list our changes made to the original zsim as follows:
 
 3. Added a makefile, which is easier to use than scons. We hardcoded the PIN path to `./pin-2.14`. You need to download
    this version of PIN and extract it under zsim directory (Intel no longer provides download of this version, but I have 
-   a copy [https://github.com/wangziqi2013/wangziqi2013.github.io/blob/master/static/pin-2.14.tar.gz?raw=true](here)). 
+   a copy [here](https://github.com/wangziqi2013/wangziqi2013.github.io/blob/master/static/pin-2.14.tar.gz?raw=true])). 
    The makefile will report error if this directory is not found.
 
 4. Changed injection mode from parent to child. Otherwise zsim will not start.
