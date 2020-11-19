@@ -848,6 +848,36 @@ void pmap_insert_range(pmap_t *pmap, uint64_t addr, int size, int shape) {
   return;
 }
 
+void dmap_print(dmap_t *dmap) {
+  for(int i = 0;i < DMAP_INIT_COUNT;i++) {
+    dmap_entry_t *entry = dmap->entries[i];
+    while(entry != NULL) {
+      if(entry->oid != PMAP_OID) {
+        printf("OID 0x%lX addr 0x%lX data ", entry->oid, entry->addr);
+        for(int i = 0;i < 8;i++) {
+          printf("%lX ", ((uint64_t *)entry->data)[i]);
+        }
+        putchar('\n');
+      }
+      entry = entry->next;
+    }
+  }
+  return;
+}
+
+void pmap_print(pmap_t *pmap) {
+  for(int i = 0;i < DMAP_INIT_COUNT;i++) {
+    pmap_entry_t *entry = pmap->entries[i];
+    while(entry != NULL) {
+      if(entry->oid == PMAP_OID) {
+        printf("OID 0x%lX addr 0x%lX shape %d\n", entry->oid, entry->addr, entry->shape);
+      }
+      entry = entry->next;
+    }
+  }
+  return;
+}
+
 void dmap_conf_print(dmap_t *dmap) {
   printf("---------- dmap_t conf ----------\n");
   printf("init size %d\n", DMAP_INIT_COUNT);
@@ -2981,6 +3011,17 @@ main_addr_map_entry_t *main_addr_map_find(main_addr_map_t *addr_map, uint64_t ad
   return NULL;
 }
 
+void main_addr_map_print(main_addr_map_t *addr_map) {
+  for(int i = 0;i < MAIN_ADDR_MAP_INIT_COUNT;i++) {
+    main_addr_map_entry_t *entry = addr_map->entries[i];
+    while(entry != NULL) {
+      printf("Addr %lX -> oid %lX addr %lX\n", entry->addr_1d, entry->oid_2d, entry->addr_2d);
+      entry = entry->next;
+    }
+  }
+  return;
+}
+
 void main_addr_map_conf_print(main_addr_map_t *addr_map) {
   (void)addr_map;
   printf("---------- main_addr_map_t conf ----------\n");
@@ -3303,6 +3344,16 @@ void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data) {
   uint64_t addr_2d, oid_2d;
   main_1d_to_2d(main, addr_1d, &oid_2d, &addr_2d);
   dmap_write(oc_get_dmap(main->oc), oid_2d, addr_2d, size, data);
+  return;
+}
+
+void main_zsim_debug_print_all(main_t *main) {
+  printf("dmap:\n");
+  dmap_print(oc_get_dmap(main->oc));
+  printf("pmap:\n");
+  pmap_print(oc_get_pmap(main->oc));
+  printf("addr map:\n");
+  main_addr_map_print(main->addr_map);
   return;
 }
 

@@ -245,6 +245,10 @@ inline static pmap_entry_t *pmap_find(pmap_t *pmap, uint64_t addr) {
   return dmap_find(pmap, PMAP_OID, UTIL_GET_PAGE_ADDR(addr));
 } 
 
+// Print content
+void dmap_print(dmap_t *dmap);
+void pmap_print(pmap_t *pmap);
+
 void dmap_conf_print(dmap_t *dmap);
 void dmap_stat_print(dmap_t *dmap);
 
@@ -872,6 +876,8 @@ void main_addr_map_insert_range(
 // Return the map entry pointer. NULL if not found
 main_addr_map_entry_t *main_addr_map_find(main_addr_map_t *addr_map, uint64_t addr_1d);
 
+void main_addr_map_print(main_addr_map_t *addr_map);
+
 void main_addr_map_conf_print(main_addr_map_t *addr_map);
 void main_addr_map_stat_print(main_addr_map_t *addr_map);
 
@@ -1011,6 +1017,9 @@ void main_update_2d_addr(main_t *main, uint64_t addr_1d, int size, uint64_t oid_
 // and bypass the coherence controller
 void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data);
 
+// zsim debug print
+void main_zsim_debug_print_all(main_t *main);
+
 // Not called by programmer, when sim begins and ends they will be called
 void main_conf_print(main_t *main);
 void main_stat_print(main_t *main);
@@ -1082,5 +1091,11 @@ inline static void zsim_update_data(uint64_t addr_1d, int size, void *data) {
                      : "%r13");
   // XCHG R13, R13
   asm(".byte 0x4D, 0x87, 0xED");
+  return;
+}
+
+// XCHG R12, R12
+inline static void zsim_debug_print_all() {
+  asm(".byte 0x4D, 0x87, 0xE4");
   return;
 }
