@@ -6,3 +6,4 @@ build
 *.h5
 heartbeat
 out.cfg
+bin/*
