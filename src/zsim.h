@@ -33,6 +33,8 @@
 #include "locks.h"
 #include "pad.h"
 
+#include "2DOC.h"
+
 class Core;
 class Scheduler;
 class AggregateStat;
@@ -181,6 +183,8 @@ struct GlobSimInfo {
     // Trace-driven simulation (no cores)
     bool traceDriven;
     TraceDriver* traceDriver;
+
+    main_t *2doc_main;
 };
 
 
