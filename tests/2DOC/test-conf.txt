@@ -1,0 +1,22 @@
+l1.size = 256
+l1.way_count = 4
+l1.latency = 3
+
+l2.size = 512
+l2.way_count = 8
+l2.latency = 7
+
+l3.size = 640
+l3.way_count = 10
+l3.latency = 23
+
+cpu.core_count = 1
+
+l3.compressed = 1
+
+dram.bank_count = 1
+dram.read_latency = 100
+dram.write_latency = 200
+
+main.max_inst_count = 1M
+main.logging = 0
