@@ -28,6 +28,8 @@ execution `make clean`.
 If the binary reports error and requires `-injection child` to be enabled, you need to add the following options under key "sim":
 `pinOptions = "-injection child";`.
 
+If you want to add your own files under a subdirectory of ./src, remember to add the path to ./src/SConscript, at line 32. If you want to also add extra compiler options, add them to the same file by concatenating these options to the environmental variable libEnv\["CPPFLAGS"\].
+
 The master branch contains a clean copy of baseline zsim. My own works are in other branchs. Feel free to check them out.
 
 zsim
