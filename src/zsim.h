@@ -33,7 +33,7 @@
 #include "locks.h"
 #include "pad.h"
 
-#include "2DOC.h"
+#include "2DOC/2DOC.h"
 
 class Core;
 class Scheduler;
@@ -184,7 +184,7 @@ struct GlobSimInfo {
     bool traceDriven;
     TraceDriver* traceDriver;
 
-    main_t *2doc_main;
+    main_t *main;
 };
 
 

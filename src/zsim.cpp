@@ -143,6 +143,9 @@ VOID SimThreadFini(THREADID tid);
 VOID SimEnd();
 
 VOID HandleMagicOp(THREADID tid, ADDRINT op);
+VOID HandleMagicOp_update_shape(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT shape);
+VOID HandleMagicOp_update_2d_addr(THREADID tid, ADDRINT addr_1d, ADDRINT size, ADDRINT oid_2d, ADDRINT addr_2d);
+VOID HandleMagicOp_update_data(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT data);
 
 VOID FakeCPUIDPre(THREADID tid, REG eax, REG ecx);
 VOID FakeCPUIDPost(THREADID tid, ADDRINT* eax, ADDRINT* ebx, ADDRINT* ecx, ADDRINT* edx); //REG* eax, REG* ebx, REG* ecx, REG* edx);
@@ -575,9 +578,35 @@ VOID Instruction(INS ins) {
      * is never emitted by any x86 compiler, as they use other (recommended) nop
      * instructions or sequences.
      */
-    if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == REG_RCX && INS_OperandReg(ins, 1) == REG_RCX) {
-        //info("Instrumenting magic op");
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
+    if (INS_IsXchg(ins)) {
+        if(INS_OperandReg(ins, 0) == REG_RCX && INS_OperandReg(ins, 1) == REG_RCX) {
+            //info("Instrumenting magic op");
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, 
+                           IARG_END);
+        } else if(INS_OperandReg(ins, 0) == REG_R15 && INS_OperandReg(ins, 1) == REG_R15) {
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_update_shape, 
+                IARG_THREAD_ID, 
+                IARG_REG_VALUE, REG_R15, 
+                IARG_REG_VALUE, REG_R14, 
+                IARG_REG_VALUE, REG_R13, 
+                IARG_END);
+        } else if(INS_OperandReg(ins, 0) == REG_R14 && INS_OperandReg(ins, 1) == REG_R14) {
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_update_2d_addr, 
+                IARG_THREAD_ID, 
+                IARG_REG_VALUE, REG_R15, 
+                IARG_REG_VALUE, REG_R14, 
+                IARG_REG_VALUE, REG_R13, 
+                IARG_REG_VALUE, REG_R12, 
+                IARG_END);
+        } else if(INS_OperandReg(ins, 0) == REG_R13 && INS_OperandReg(ins, 1) == REG_R13) {
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_update_data, 
+                IARG_THREAD_ID, 
+                IARG_REG_VALUE, REG_R15, 
+                IARG_REG_VALUE, REG_R14, 
+                IARG_REG_VALUE, REG_R13, 
+                IARG_END);
+        }
+
     }
 
     if (INS_Opcode(ins) == XED_ICLASS_CPUID) {
@@ -1201,6 +1230,20 @@ VOID HandleMagicOp(THREADID tid, ADDRINT op) {
         default:
             panic("Thread %d issued unknown magic op %ld!", tid, op);
     }
+}
+
+VOID HandleMagicOp_update_shape(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT shape) {
+    main_update_shape(zinfo->main, addr, (int)size, (int)shape);
+    return;
+}
+
+VOID HandleMagicOp_update_2d_addr(THREADID tid, ADDRINT addr_1d, ADDRINT size, ADDRINT oid_2d, ADDRINT addr_2d) {
+    main_update_2d_addr(zinfo->main, addr_1d, (int)size, oid_2d, addr_2d);
+    return;
+}
+
+VOID HandleMagicOp_update_data(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT data) {
+    main_update_data(zinfo->main, addr, (int)size, (void *)data);
 }
 
 //CPUIID faking

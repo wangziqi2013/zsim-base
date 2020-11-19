@@ -433,6 +433,13 @@ static void InitSystem(Config& config) {
         return cVec;
     };
 
+    // Initialize 2DOC module
+    string main_conf = config.get<const char *>("sim.main_conf", "");
+    if(main_conf.size() == 0) {
+        error_exit("Did not find main_conf in conf file\n");
+    }
+    zinfo->main = main_init(main_conf.c_str());
+
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;

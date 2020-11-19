@@ -1041,7 +1041,7 @@ inline static void zsim_update_shape(uint64_t addr, int size, int shape) {
 
 // R15 addr_1d; R14 size; R13 oid_2d; R12 addr_2d
 // XCHG R14, R14
-inline static void zsim_update_2d(uint64_t addr_1d, int size, uint64_t oid_2d, uint64_t addr_2d) {
+inline static void zsim_update_2d_addr(uint64_t addr_1d, int size, uint64_t oid_2d, uint64_t addr_2d) {
   // Write addr into R15
   __asm__ __volatile__("mov %0, %%r15\n\t"
                      : /* no output */
