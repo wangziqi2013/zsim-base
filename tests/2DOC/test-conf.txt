@@ -1,14 +1,14 @@
-l1.size = 256
-l1.way_count = 4
-l1.latency = 3
+l1.size = 32768
+l1.way_count = 8
+l1.latency = 4
 
-l2.size = 512
+l2.size = 262144
 l2.way_count = 8
-l2.latency = 7
+l2.latency = 8
 
-l3.size = 640
+l3.size = 33554432
 l3.way_count = 10
-l3.latency = 23
+l3.latency = 30
 
 cpu.core_count = 1
 
