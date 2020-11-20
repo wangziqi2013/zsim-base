@@ -40,6 +40,10 @@
 
 class FilterCache;
 
+extern uint64_t ooo_load_count;
+extern uint64_t ooo_store_count;
+extern uint64_t ooo_store_size;
+
 /* 2-level branch predictor:
  *  - L1: Branch history shift registers (bshr): 2^NB entries, HB bits of history/entry, indexed by XOR'd PC
  *  - L2: Pattern history table (pht): 2^LB entries, 2-bit sat counters, indexed by XOR'd bshr contents

@@ -55,6 +55,10 @@
 #define ISSUES_PER_CYCLE 4
 #define RF_READS_PER_CYCLE 3
 
+uint64_t ooo_load_count;
+uint64_t ooo_store_count;
+uint64_t ooo_store_size;
+
 OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_name), l1i(_l1i), l1d(_l1d), cRec(0, _name) {
     decodeCycle = DECODE_STAGE;  // allow subtracting from it
     curCycle = 0;
@@ -268,6 +272,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     Address addr = loadAddrs[loadIdx++];
                     uint64_t reqSatisfiedCycle = dispatchCycle;
                     //if (addr != ((Address)-1L)) {
+                        ooo_load_count++;
                         reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
                         //reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
@@ -306,6 +311,10 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
                     Address addr = storeAddrs[storeIdx++];
+                    ooo_store_count++;
+                    main_latency_list_entry_t *entry = main_get_mem_op(zinfo->main);
+                    assert(entry->op == MAIN_WRITE);
+                    ooo_store_size += entry->size;
                     uint64_t reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
                     //uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
                     cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
@@ -501,6 +510,7 @@ void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
     else core->predFalseMemOp();
 }
 
+static uint64_t main_inst_count = 0;
 void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
     core->bbl(bblAddr, bblInfo); // Simulate the bbl we just finished
@@ -508,6 +518,9 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     // Finished the current bb, reset the internal address log
     // Will report error if the access log has not been exhausted
     main_bb_sim_finish(zinfo->main);
+
+    main_inst_count += bblInfo->instrs;
+    main_report_progress(zinfo->main, main_inst_count, core->curCycle);
 
     while (core->curCycle > core->phaseEndCycle) {
         core->phaseEndCycle += zinfo->phaseLength;
