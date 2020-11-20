@@ -545,9 +545,15 @@ VOID main_mem_read_2(THREADID tid, ADDRINT addr) {
     return;
 }
 
-VOID main_mem_write_after(THREADID tid, ADDRINT addr, uint32_t size) {
+static ADDRINT mem_write_addr;
+VOID main_mem_write_before(THREADID tid, ADDRINT addr) {
+    mem_write_addr = addr;
+    return;
+}
+
+VOID main_mem_write_after(THREADID tid, uint32_t size) {
     // The address and the buffer address is the same
-    main_bb_write(zinfo->main, addr, size, (void *)addr);
+    main_bb_write(zinfo->main, mem_write_addr, size, (void *)mem_write_addr);
     return;
 }
 
@@ -603,11 +609,16 @@ VOID Instruction(INS ins) {
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_END);
             }
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_write_before, 
+                IARG_FAST_ANALYSIS_CALL, 
+                IARG_THREAD_ID, 
+                IARG_MEMORYWRITE_EA, 
+                IARG_END);
             IPOINT after_point = INS_HasFallThrough(ins) ? IPOINT_AFTER : IPOINT_TAKEN_BRANCH;
             INS_InsertCall(ins, after_point, (AFUNPTR)main_mem_write_after, 
                 IARG_FAST_ANALYSIS_CALL, 
                 IARG_THREAD_ID, 
-                IARG_MEMORYWRITE_EA, 
+                //IARG_MEMORYWRITE_EA, 
                 IARG_MEMORYWRITE_SIZE,
                 IARG_END);
         }
