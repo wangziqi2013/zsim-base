@@ -985,6 +985,11 @@ void main_free(main_t *main);
 void main_sim_begin(main_t *main);
 void main_sim_end(main_t *main);
 
+// Get current memory op (must be valid); Bound check is performed
+inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
+  return main_latency_list_get(main->latency_list, main->mem_op_index);
+}
+
 // Main interface functions
 
 // Return an address which:

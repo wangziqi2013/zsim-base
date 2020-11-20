@@ -2996,6 +2996,7 @@ void main_addr_map_insert_range(
   return;
 }
 
+// Assumes that addr_1d is aligned
 main_addr_map_entry_t *main_addr_map_find(main_addr_map_t *addr_map, uint64_t addr_1d) {
   assert((addr_1d & (UTIL_CACHE_LINE_SIZE - 1)) == 0);
   addr_map->find_count++;
@@ -3209,7 +3210,7 @@ void main_free(main_t *main) {
 void main_sim_begin(main_t *main) {
   // Print conf first
   main_conf_print(main);
-  printf("========== simulation begin ==========\n");
+  printf("\n\n========== simulation begin ==========\n");
   main->finished = 0;
   main->progress = 0;
   // Initialize log file
@@ -3223,7 +3224,7 @@ void main_sim_begin(main_t *main) {
 }
 
 void main_sim_end(main_t *main) {
-  printf("========== simulation end ==========\n");
+  printf("\n\n========== simulation end ==========\n");
   printf("Completed simulation with %lu instructions and %lu cycles (conf max %lu)\n", 
       main->last_inst_count, main->last_cycle_count, main->param->max_inst_count);
   main_stat_print(main);
@@ -3324,21 +3325,24 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   main->mem_op_index++;
   // This checks bound
   main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, index);
+  // This is potentially unaligned, which is directly taken from the application
   uint64_t addr_1d = entry->addr;
+  uint64_t addr_1d_aligned = addr_1d & ~(UTIL_CACHE_LINE_SIZE - 1);
+  int addr_1d_offset = addr_1d - addr_1d_aligned;
   int op = entry->op;
   assert(op == MAIN_READ || op == MAIN_WRITE);
   int size = entry->size;
   void *data = entry->data;
   uint64_t addr_2d, oid_2d;
   // First translate address
-  main_1d_to_2d(main, addr_1d, &oid_2d, &addr_2d);
+  main_1d_to_2d(main, addr_1d_aligned, &oid_2d, &addr_2d);
   // Then call coherence controller
   if(op == MAIN_READ) {
-    cycle = oc_load(main->oc, 0, cycle, oid_2d, addr_2d, size, NULL);
+    cycle = oc_load(main->oc, 0, cycle, oid_2d, addr_2d + addr_1d_offset, size, NULL);
   } else {
     // Pass data as argument to update dmap
     // This function also updates the dmap
-    cycle = oc_store(main->oc, 0, cycle, oid_2d, addr_2d, size, data);
+    cycle = oc_store(main->oc, 0, cycle, oid_2d, addr_2d + addr_1d_offset, size, data);
   }
   return cycle;
 }
