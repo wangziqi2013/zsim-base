@@ -532,6 +532,25 @@ static void PrintIp(THREADID tid, ADDRINT ip) {
 }
 #endif
 
+// Counts memory operand counts
+uint64_t mem_op_count[16];
+
+VOID main_mem_read_1(THREADID tid, ADDRINT addr, uint32_t size) {
+    main_bb_read(zinfo->main, addr, (int)size, NULL);
+    return;
+}
+
+VOID main_mem_read_2(THREADID tid, ADDRINT addr) {
+    main_bb_read(zinfo->main, addr, 8, NULL);
+    return;
+}
+
+VOID main_mem_write_after(THREADID tid, ADDRINT addr, uint32_t size) {
+    // The address and the buffer address is the same
+    main_bb_write(zinfo->main, addr, size, addr);
+    return;
+}
+
 VOID Instruction(INS ins) {
     //Uncomment to print an instruction trace
     //INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)PrintIp, IARG_THREAD_ID, IARG_REG_VALUE, REG_INST_PTR, IARG_END);
@@ -543,12 +562,25 @@ VOID Instruction(INS ins) {
         AFUNPTR PredLoadFuncPtr = (AFUNPTR) IndirectPredLoadSingle;
         AFUNPTR PredStoreFuncPtr = (AFUNPTR) IndirectPredStoreSingle;
 
+        //* 2DOC instrumentation
+
+        int count = (int)INS_MemoryOperandCount(ins);
+        printf("mem op count = %d\n", count);
+        mem_op_count[count]++;
+
         if (INS_IsMemoryRead(ins)) {
             if (!INS_IsPredicated(ins)) {
                 INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_END);
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_EXECUTING, IARG_END);
             }
+            
+            INS_InsertCall(ins, IPOINT_BEFORE, main_mem_read_1, 
+                IARG_FAST_ANALYSIS_CALL, 
+                IARG_THREAD_ID, 
+                IARG_MEMORYREAD_EA, 
+                IARG_MEMORYREAD_SIZE,
+                IARG_END);
         }
 
         if (INS_HasMemoryRead2(ins)) {
@@ -557,6 +589,12 @@ VOID Instruction(INS ins) {
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_EXECUTING, IARG_END);
             }
+
+            INS_InsertCall(ins, IPOINT_BEFORE, main_mem_read_2, 
+                IARG_FAST_ANALYSIS_CALL, 
+                IARG_THREAD_ID, 
+                IARG_MEMORYREAD2_EA, 
+                IARG_END);
         }
 
         if (INS_IsMemoryWrite(ins)) {
@@ -565,6 +603,13 @@ VOID Instruction(INS ins) {
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_END);
             }
+            IPOINT after_point = INS_HasFallThrough(ins) ? IPOINT_AFTER : IPOINT_TAKEN_BRANCH;
+            INS_InsertCall(ins, after_point, main_mem_write_after, 
+                IARG_FAST_ANALYSIS_CALL, 
+                IARG_THREAD_ID, 
+                IARG_MEMORYWRITE_EA, 
+                IARG_MEMORYWRITE_SIZE,
+                IARG_END);
         }
 
         // Instrument only conditional branches
@@ -1110,6 +1155,12 @@ VOID AfterForkInChild(THREADID tid, const CONTEXT* ctxt, VOID * arg) {
 
 VOID Fini(int code, VOID * v) {
     info("Finished, code %d", code);
+    //for(int i = 0;i < 16;i++) {
+    //    printf("%lu ", mem_op_count[i]);
+    //}
+    // Print main stat
+    main_stat_print(zinfo->main);
+    putchar('\n');
     //NOTE: In fini, it appears that info() and writes to stdout in general won't work; warn() and stderr still work fine.
     SimEnd();
 }

@@ -967,6 +967,13 @@ typedef struct {
   int finished;
   // Logging related
   FILE *logging_fp;
+  // zsim write buffer, used to recirect writes
+  // Must be aligned such that certain instructions will not incur alignment errors
+  uint8_t zsim_write_buffer[MAIN_MEM_OP_MAX_SIZE * 2] __attribute__((aligned(64)));
+  // Offset into the buffer
+  int zsim_write_offset;
+  // Previous write size
+  int zsim_write_size;
 } main_t;
 
 // Wraps around the conf init
@@ -979,6 +986,12 @@ void main_sim_begin(main_t *main);
 void main_sim_end(main_t *main);
 
 // Main interface functions
+
+// Return an address which:
+//   (1) Has the same alignment as addr
+//   (2) Is in main->zsim_write_buffer
+// This function is used to redirect application writes via zsim, which receives application data
+void *main_write_redirect(main_t *main, uint64_t addr, int size);
 
 // Append a log entry; Assumes logging is enabled
 void main_append_log(main_t *main, uint64_t cycle, int op, uint64_t addr, int size, void *data);

@@ -501,7 +501,11 @@ void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
 
 void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
-    core->bbl(bblAddr, bblInfo);
+    core->bbl(bblAddr, bblInfo); // Simulate the bbl we just finished
+
+    // Finished the current bb, reset the internal address log
+    // Will report error if the access log has not been exhausted
+    main_bb_sim_finish(zinfo->main);
 
     while (core->curCycle > core->phaseEndCycle) {
         core->phaseEndCycle += zinfo->phaseLength;

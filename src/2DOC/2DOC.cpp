@@ -3172,6 +3172,11 @@ main_t *main_init_from_conf(conf_t *conf) {
   main->oc = oc_init(main->conf);
   main->addr_map = main_addr_map_init();
   main->latency_list = main_latency_list_init();
+  // Just for safety, check alignment of this field
+  if((uint64_t)&main->zsim_write_buffer % 64 != 0) {
+    error_exit("Field main->zsim_write_buffer is not properly aligned (alignment = %lu)\n",
+      (uint64_t)&main->zsim_write_buffer % 64);
+  }
   return main;
 }
 
@@ -3229,6 +3234,19 @@ void main_sim_end(main_t *main) {
   // Just terminate here
   exit(0);
   return;
+}
+
+// Return an address to redirect zsim writes, which can then be logged
+void *main_write_redirect(main_t *main, uint64_t addr, int size) {
+  int offset = addr % UTIL_CACHE_LINE_SIZE;
+  void *data = main->zsim_write_buffer + offset;
+  if(offset + size > (int)sizeof(main->zsim_write_buffer)) {
+    error_exit("Memory write addr %lX size %d too large for buffer (offset %d size %lu)\n",
+      addr, size, offset, sizeof(main->zsim_write_buffer));
+  }
+  main->zsim_write_offset = offset;
+  main->zsim_write_size = size;
+  return data;
 }
 
 // Append log object and data to the opened log file
