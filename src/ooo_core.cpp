@@ -267,10 +267,11 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
                     Address addr = loadAddrs[loadIdx++];
                     uint64_t reqSatisfiedCycle = dispatchCycle;
-                    if (addr != ((Address)-1L)) {
-                        reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
+                    //if (addr != ((Address)-1L)) {
+                        reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
+                        //reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
-                    }
+                    //}
 
                     // Enforce st-ld forwarding
                     uint32_t fwdIdx = (addr>>2) & (FWD_ENTRIES-1);
@@ -305,7 +306,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
                     Address addr = storeAddrs[storeIdx++];
-                    uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
+                    uint64_t reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
+                    //uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
                     cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
 
                     // Fill the forwarding table

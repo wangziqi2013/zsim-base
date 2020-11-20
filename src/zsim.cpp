@@ -547,7 +547,7 @@ VOID main_mem_read_2(THREADID tid, ADDRINT addr) {
 
 VOID main_mem_write_after(THREADID tid, ADDRINT addr, uint32_t size) {
     // The address and the buffer address is the same
-    main_bb_write(zinfo->main, addr, size, addr);
+    main_bb_write(zinfo->main, addr, size, (void *)addr);
     return;
 }
 
@@ -564,9 +564,9 @@ VOID Instruction(INS ins) {
 
         //* 2DOC instrumentation
 
-        int count = (int)INS_MemoryOperandCount(ins);
-        printf("mem op count = %d\n", count);
-        mem_op_count[count]++;
+        //int count = (int)INS_MemoryOperandCount(ins);
+        //printf("mem op count = %d\n", count);
+        //mem_op_count[count]++;
 
         if (INS_IsMemoryRead(ins)) {
             if (!INS_IsPredicated(ins)) {
@@ -575,7 +575,7 @@ VOID Instruction(INS ins) {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_EXECUTING, IARG_END);
             }
             
-            INS_InsertCall(ins, IPOINT_BEFORE, main_mem_read_1, 
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_read_1, 
                 IARG_FAST_ANALYSIS_CALL, 
                 IARG_THREAD_ID, 
                 IARG_MEMORYREAD_EA, 
@@ -590,7 +590,7 @@ VOID Instruction(INS ins) {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_EXECUTING, IARG_END);
             }
 
-            INS_InsertCall(ins, IPOINT_BEFORE, main_mem_read_2, 
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_read_2, 
                 IARG_FAST_ANALYSIS_CALL, 
                 IARG_THREAD_ID, 
                 IARG_MEMORYREAD2_EA, 
@@ -604,7 +604,7 @@ VOID Instruction(INS ins) {
                 INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_END);
             }
             IPOINT after_point = INS_HasFallThrough(ins) ? IPOINT_AFTER : IPOINT_TAKEN_BRANCH;
-            INS_InsertCall(ins, after_point, main_mem_write_after, 
+            INS_InsertCall(ins, after_point, (AFUNPTR)main_mem_write_after, 
                 IARG_FAST_ANALYSIS_CALL, 
                 IARG_THREAD_ID, 
                 IARG_MEMORYWRITE_EA, 
