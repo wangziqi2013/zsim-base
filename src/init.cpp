@@ -439,6 +439,11 @@ static void InitSystem(Config& config) {
         error_exit("Did not find main_conf in conf file\n");
     }
     zinfo->main = main_init(main_conf.c_str());
+    // Report process0.command to zsim
+    string cmd = config.get<const char *>("process0.command", "");
+    main_add_info(zinfo->main, "process0.command", cmd.c_str());
+    // Report default shape
+    main_add_info(zinfo->main, "Default shape", main_get_default_shape_name(zinfo->main));
 
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
