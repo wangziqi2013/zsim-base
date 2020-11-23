@@ -216,7 +216,8 @@ dmap_entry_t *dmap_insert(dmap_t *dmap, uint64_t oid, uint64_t addr);
 // Can return NULL if the combination does not exist
 dmap_entry_t *dmap_find(dmap_t *dmap, uint64_t oid, uint64_t addr);
 
-int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t _addr, void *out_buf);
+// The optional argument all_zero (can be NULL) returns whether the line is all zero
+int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t addr, void *out_buf, int *all_zero);
 
 // Read / Write data to / from buf to the given address. 
 // Size can be larger than a single cache line. Addr can be unaligned
@@ -494,6 +495,14 @@ typedef struct ocache_struct_t {
   uint64_t sb_1_4_count;        // 1 * 4 sb count
   uint64_t sb_2_2_count;        // 2 * 2 sb count
   uint64_t no_shape_count;      // no shape line count
+  // BDI shape count, updated by get_compressed_size function of LLC
+  uint64_t BDI_8_4_count;
+  uint64_t BDI_8_2_count;
+  uint64_t BDI_8_1_count;
+  uint64_t BDI_4_2_count;
+  uint64_t BDI_4_1_count;
+  uint64_t BDI_2_1_count;
+  uint64_t all_zero_count; // Whether the line is all-zero
   // Always inline this at the end to save one pointer redirection
   ocache_entry_t data[0];
 } ocache_t;
@@ -622,7 +631,21 @@ typedef struct {
   uint64_t stat_last_cycle;  // Bandwidth since the most recent interval
   uint32_t stat_read_count;  // Number of reads since "last_cycle"
   uint32_t stat_write_count; // Number of writes since "last_cycle"
-  uint32_t stat_write_size;
+  uint32_t stat_write_size;  // Number of bytes written since "last_cycle"
+  // Total aggregations
+  uint64_t total_read_count;
+  uint64_t total_write_count;
+  uint64_t total_write_size;
+  uint64_t total_read_cycle;
+  uint64_t total_write_cycle;
+  // These two are updated by its caller
+  uint64_t total_sb_count;      // Number of super blocks written back
+  uint64_t total_sb_line_count; // Number of logical lines per write
+  // Whether the access is queued when the bank is still busy
+  uint64_t contended_access_count;
+  uint64_t read_contended_access_count;
+  uint64_t write_contended_access_count;
+  uint64_t uncontended_access_count;
   dram_stat_t *stat_head;    // Head of linked list
   dram_stat_t *stat_tail;    // Head of linked list
   int stat_count;
@@ -660,14 +683,28 @@ inline static uint64_t dram_gen_addr_with_oid(dram_t *dram, uint64_t tag, uint64
 }
 
 uint64_t dram_access(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr, int latency);
+
 inline static uint64_t dram_read(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr) {
   dram->stat_read_count++;
-  return dram_access(dram, cycle, oid, addr, dram->read_latency);
+  dram->total_read_count++;
+  uint64_t ret = dram_access(dram, cycle, oid, addr, dram->read_latency);
+  dram->total_read_cycle += (ret - cycle);
+  if(ret - cycle > (uint64_t)dram->read_latency) {
+    dram->read_contended_access_count++;
+  }
+  return ret;
 }
 inline static uint64_t dram_write(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr, uint64_t size) {
   dram->stat_write_count++;
   dram->stat_write_size += size;
-  return dram_access(dram, cycle, oid, addr, dram->write_latency);
+  dram->total_write_count++;
+  dram->total_write_size += size;
+  uint64_t ret = dram_access(dram, cycle, oid, addr, dram->write_latency);
+  dram->total_write_cycle += (ret - cycle);
+  if(ret - cycle > (uint64_t)dram->write_latency) {
+    dram->write_contended_access_count++;
+  }
+  return ret;
 }
 
 // Dump stats into a file
@@ -697,6 +734,8 @@ typedef struct {
   int sizes[CC_LEVEL_COUNT];
   int way_counts[CC_LEVEL_COUNT];
   int latencies[CC_LEVEL_COUNT];
+  // pmap's default shape if an entry could not be found
+  int default_shape;
 } cc_param_t;
 
 inline static void cc_param_set_core_count(cc_param_t *param, int core_count) { param->core_count = core_count; }
@@ -764,6 +803,9 @@ typedef struct cc_struct_t {
   uint64_t *read_miss_count[CC_LEVEL_COUNT];
   uint64_t *write_hit_count[CC_LEVEL_COUNT];
   uint64_t *write_miss_count[CC_LEVEL_COUNT];
+  // Stats on read/write cycles, recursive
+  uint64_t *read_cycle_count[CC_LEVEL_COUNT];
+  uint64_t *write_cycle_count[CC_LEVEL_COUNT];
 } cc_t;
 
 // This also transfers ownership of the param object to the CC object
@@ -773,6 +815,8 @@ void cc_free(cc_t *cc);
 void cc_set_dmap(cc_t *cc, dmap_t *dmap); // This does not set ownership
 void cc_set_dram(cc_t *cc, dram_t *dram); // This does not set ownership
 inline static void cc_set_main_mem_cb(cc_t *cc, cc_main_mem_cb_t cb) { cc->main_mem_cb = cb; }
+
+inline static int cc_get_default_shape(cc_t *cc) { return cc->param->default_shape; }
 
 inline static ocache_t *cc_get_ocache(cc_t *cc, int level, int core) {
   assert(level >= CC_LEVEL_BEGIN && level < CC_LEVEL_END);
@@ -807,7 +851,7 @@ void cc_stat_print(cc_t *cc, int verbose);
 
 // Currently only support single core
 typedef struct {
-  dmap_t *dmap;          // Unified dmap and pmap; Has ownership
+  dmap_t *dmap;          // Unified dmap and pmap; Has ownership; Default shape is configured by oc_t conf
   dram_t *dram;          // DRAM timing model; Has ownership
   cc_t *cc;              // cc and cache objects
   ocache_t *l1;
@@ -930,6 +974,7 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 
 typedef struct {
   uint64_t max_inst_count;    // Max number of instructions
+  uint64_t start_inst_count;  // Starting instructions, default zero
   int logging;                // Whether logging is enabled
   char *logging_filename;     // Only read if logging is set to 1; Ignored otherwise
 } main_param_t;
@@ -949,6 +994,16 @@ typedef struct {
   uint8_t data[0]; // Caller should allocate this part of the storage
 } main_request_t;
 
+// zsim configuration passed from simulator to main, which will be printed out for stat
+typedef struct main_zsim_conf_struct_t {
+  char *key;     // Has ownership
+  char *value;   // Has ownership
+  struct main_zsim_conf_struct_t *next;
+} main_zsim_info_t;
+
+main_zsim_info_t *main_zsim_info_init(const char *key, const char *value);
+void main_zsim_info_free(main_zsim_info_t *info);
+
 // Main class of the design; Test driver and controller
 typedef struct {
   // This string has ownership
@@ -963,8 +1018,10 @@ typedef struct {
   // Progress report
   uint64_t last_inst_count;
   uint64_t last_cycle_count;
+  uint64_t start_cycle_count; // Cycle count when it starts, default zero
   int progress;        // 0 - 100
-  int finished;
+  int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
+  int started;         // Init 0, only set to 1 when the start_inst_count is reached
   // Logging related
   FILE *logging_fp;
   // zsim write buffer, used to recirect writes
@@ -974,6 +1031,8 @@ typedef struct {
   int zsim_write_offset;
   // Previous write size
   int zsim_write_size;
+  // zsim configuration passed via the interface, which will be printed out when sim ends
+  main_zsim_info_t *zsim_info_list;
 } main_t;
 
 // Wraps around the conf init
@@ -988,6 +1047,12 @@ void main_sim_end(main_t *main);
 // Get current memory op (must be valid); Bound check is performed
 inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
   return main_latency_list_get(main->latency_list, main->mem_op_index);
+}
+
+// This will fetch it from the cc object
+inline static const char *main_get_default_shape_name(main_t *main) {
+  int shape = cc_get_default_shape(main->oc->cc);
+  return ocache_shape_names[shape];
 }
 
 // Main interface functions
@@ -1023,6 +1088,9 @@ void main_1d_to_2d(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *a
 // list, rather than from external.
 // Return value is finish cycle of the operation
 uint64_t main_mem_op(main_t *main, uint64_t cycle);
+
+// Adding info that will be printed at the end of the simulation, e.g., simulated workload type, etc.
+void main_add_info(main_t *main, const char *key, const char *value);
 
 // The following two are called to install address translations and update per-page shape info
 // The simulator should have some way to receive request from the application

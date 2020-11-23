@@ -13,6 +13,17 @@ BDI_param_t BDI_params[6] = {                         // Name    Size Order Type
   {BDI_2_1, 2, 1, 38, 4, 7, 6, 0x000000000000FF80UL}, // BDI_2_1 38   5     7
 };
 
+/*
+BDI_param_t BDI_params[6] = {                         // Name    Size Order Type
+  {BDI_8_4, 8, 4, 33, 1, 4, 9, 0xFFFFFFFF80000000UL}, // BDI_8_4 41   6     4
+  {BDI_8_2, 8, 2, 17, 1, 3, 9, 0xFFFFFFFFFFFF8000UL}, // BDI_8_2 25   3     3
+  {BDI_8_1, 8, 1, 9, 1, 2, 9, 0xFFFFFFFFFFFFFF80UL},  // BDI_8_1 17   1     2
+  {BDI_4_2, 4, 2, 34, 2, 6, 6, 0x00000000FFFF8000UL}, // BDI_4_2 38   4     6
+  {BDI_4_1, 4, 1, 18, 2, 5, 6, 0x00000000FFFFFF80UL}, // BDI_4_1 22   2     5
+  {BDI_2_1, 2, 1, 36, 4, 7, 6, 0x000000000000FF80UL}, // BDI_2_1 38   5     7
+};
+*/
+
 // Indexed using BDI types
 BDI_param_t *BDI_types[8] = {
   NULL, NULL,                           // 0 and 1 are not BDI
@@ -761,7 +772,9 @@ dmap_entry_t *dmap_find(dmap_t *dmap, uint64_t oid, uint64_t addr) {
 // Return a compressed line in the given buffer, and the type
 // If the line could not be compressed, then we return BDI_TYPE_INVALID, and the buffer is not modified
 // If the line could not be found, then we return BDI_TYPE_NOT_FOUND, and the buffer is not modified
-int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t addr, void *out_buf) {
+// The "all_zero" argument is an optional flag for returning whether the line contains all zero
+// It can be set to NULL, if don't care
+int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t addr, void *out_buf, int *all_zero) {
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0UL);
   dmap_entry_t *entry = dmap_find(dmap, oid, addr);
   if(entry == NULL) {
@@ -769,6 +782,16 @@ int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t addr, void *out_bu
   }
   // Type can be BDI_TYPE_INVALID
   int type = BDI_comp(out_buf, entry->data);
+  // type 2 is BDI_8_1, which all zero lines will be compressed to
+  if(type == 2 && all_zero != NULL) {
+    *all_zero = 1;
+    for(int i = 0;i < 8;i++) {
+      if(((uint64_t *)entry->data)[i] != 0x0UL) {
+        *all_zero = 0;
+        break;
+      }
+    }
+  }
   return type; 
 }
 
@@ -897,7 +920,7 @@ void dmap_stat_print(dmap_t *dmap) {
 //* ocache_t
 
 const char *ocache_shape_names[4] = {
-  "None", "4 * 1", "1 * 4", "2 * 2",
+  "None", "4_1", "1_4", "2_2",
 };
 
 ocache_t *ocache_init(int size, int way_count) {
@@ -1399,6 +1422,19 @@ static void ocache_insert_helper_uncompressed(
   return;
 }
 
+static void ocache_update_BDI_stat(ocache_t *ocache, int in_type) {
+  switch(in_type) {
+    case 4: ocache->BDI_8_4_count++; break;
+    case 3: ocache->BDI_8_2_count++; break;
+    case 2: ocache->BDI_8_1_count++; break;
+    case 6: ocache->BDI_4_2_count++; break;
+    case 5: ocache->BDI_4_1_count++; break;
+    case 7: ocache->BDI_2_1_count++; break;
+    default: error_exit("Unknown compressed type: %d\n", in_type);
+  }
+  return;
+}
+
 // This function implements vertical compression policy
 // The cache line can be processed with one of the following policies:
 //   1. Not compressed at all
@@ -1412,7 +1448,8 @@ int ocache_insert_helper_get_compressed_size(ocache_t *ocache, uint64_t oid, uin
   ocache->vertical_attempt_count++;
   uint8_t in_buf[UTIL_CACHE_LINE_SIZE];
   // The data must already exist in data map
-  int in_type = dmap_find_compressed(ocache->dmap, oid, addr, in_buf);
+  int all_zero;
+  int in_type = dmap_find_compressed(ocache->dmap, oid, addr, in_buf, &all_zero);
   assert(in_type != BDI_TYPE_NOT_FOUND);
   // If the line could not be BDI compressed, then we do not do anything
   // This could be changed by doing delta encoding with the base
@@ -1425,6 +1462,12 @@ int ocache_insert_helper_get_compressed_size(ocache_t *ocache, uint64_t oid, uin
   // So we can increment BDI success count here
   //
   assert(in_type >= BDI_TYPE_BEGIN && in_type < BDI_TYPE_END);
+  // Increment BDI type statistics
+  ocache_update_BDI_stat(ocache, in_type);
+  // Update zero line stats
+  if(all_zero == 1) {
+    ocache->all_zero_count++;
+  }
   BDI_param_t *param = BDI_types[in_type];
   ocache->BDI_success_count++;
   // Total inserted size, logical
@@ -1442,7 +1485,8 @@ int ocache_insert_helper_get_compressed_size(ocache_t *ocache, uint64_t oid, uin
     return param->compressed_size;
   }
   ocache->vertical_not_base_count++;
-  int base_type = dmap_find_compressed(ocache->dmap, base_oid, addr, base_buf);
+  // Pass NULL to all_zero, don't care whether base is all-zero
+  int base_type = dmap_find_compressed(ocache->dmap, base_oid, addr, base_buf, NULL);
   // If base compression type is different from the type of the new line just use normal compression
   if(base_type == BDI_TYPE_NOT_FOUND) {
     //printf("No base\n");
@@ -1828,7 +1872,6 @@ void ocache_insert_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, int d
     ocache_entry_set_valid(lru_entry, 0);
     ocache_entry_set_size(lru_entry, 0, UTIL_CACHE_LINE_SIZE);
   }
-  // Update LRU since write lookup does not update it
   ocache_update_entry_lru(ocache, entry);
   // Update dirty bits accordingly - must be after copy the evict entry
   if(dirty == 1) {
@@ -2034,6 +2077,10 @@ void ocache_stat_print(ocache_t *ocache) {
     printf("BDI success %lu before %lu after %lu (ratio %.2f%%)\n", 
       ocache->BDI_success_count, ocache->BDI_before_size_sum, ocache->BDI_after_size_sum,
       100.0 * ocache->BDI_after_size_sum / ocache->BDI_before_size_sum);
+    printf("BDI types 8_4 %lu 8_2 %lu 8_1 %lu 4_2 %lu 4_1 %lu 2_1 %lu ZERO %lu\n",
+      ocache->BDI_8_4_count, ocache->BDI_8_2_count, ocache->BDI_8_1_count, 
+      ocache->BDI_4_2_count, ocache->BDI_4_1_count, ocache->BDI_2_1_count,
+      ocache->all_zero_count);
   }
   // General stats refershed by ocache_refresh_stat()
   printf("Stat valid lines %lu sb %lu sb lines %lu ([4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu)\n", 
@@ -2063,6 +2110,20 @@ static void dram_init_stats(dram_t *dram) {
   dram->stat_read_count = 0;
   dram->stat_write_count = 0;
   dram->stat_write_size = 0;
+  // Total size
+  dram->total_read_count = 0;
+  dram->total_write_count = 0;
+  dram->total_write_size = 0;
+  dram->total_read_cycle = 0;
+  dram->total_write_cycle = 0;
+  dram->total_sb_count = 0;
+  dram->total_sb_line_count = 0;
+  // Contended
+  dram->contended_access_count = 0;
+  dram->read_contended_access_count = 0;
+  dram->write_contended_access_count = 0;
+  dram->uncontended_access_count = 0;
+  // Stat list
   dram->stat_head = NULL;
   dram->stat_tail = NULL;
   dram->stat_count = 0;
@@ -2082,8 +2143,15 @@ dram_t *dram_init(conf_t *conf) {
   // Need this for debugging, e.g., address generation
   dram->bank_count_bits = popcount_int32(bank_count - 1);
   // Read read latency and write latency
-  dram->read_latency = conf_find_int32_range(conf, "dram.read_latency", 1, INT_MAX, CONF_RANGE);
-  dram->write_latency = conf_find_int32_range(conf, "dram.write_latency", 1, INT_MAX, CONF_RANGE);
+  // We allow 0 latency for easier testing
+  dram->read_latency = conf_find_int32_range(conf, "dram.read_latency", 0, INT_MAX, CONF_RANGE);
+  dram->write_latency = conf_find_int32_range(conf, "dram.write_latency", 0, INT_MAX, CONF_RANGE);
+  if(dram->read_latency == 0) {
+    printf("Note: DRAM is using zero read latency\n");
+  }
+  if(dram->write_latency == 0) {
+    printf("Note: DRAM is using zero write latency\n");
+  }
   dram_init_stats(dram);
   return dram;
 }
@@ -2111,9 +2179,11 @@ uint64_t dram_access(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr, 
   if(dram->banks[index] < cycle) {
     // The bank is available at this moment, just serve the request immediately
     cycle += latency;
+    dram->uncontended_access_count++;
   } else {
     // Otherwise serve it in the earliest possible cycle
     cycle = dram->banks[index] + latency;
+    dram->contended_access_count++;
   }
   // Update available cycle
   dram->banks[index] = cycle;
@@ -2177,8 +2247,18 @@ void dram_stat_print(dram_t *dram) {
   printf("---------- dram_t stat ----------\n");
   printf("Stat window %lu count %d last cycle %lu\n",
     dram->stat_window, dram->stat_count, dram->stat_last_cycle);
-  printf("Curr read %u write %u write size %u\n",
+  printf("Curr window read %u write %u write size %u\n",
     dram->stat_read_count, dram->stat_write_count, dram->stat_write_size);
+  printf("Total read %lu (cycles %lu, avg %lf) write %lu (cycles %lu, avg %lf) size %lu\n",
+    dram->total_read_count, dram->total_read_cycle, (double)dram->total_read_cycle / dram->total_read_count,
+    dram->total_write_count, dram->total_write_cycle, (double)dram->total_write_cycle / dram->total_write_count,
+    dram->total_write_size);
+  printf("Write SBs %lu lines %lu avg lines %lf\n",
+    dram->total_sb_count, dram->total_sb_line_count,
+    (double)dram->total_sb_line_count / dram->total_sb_count);
+  printf("Contended %lu (read %lu write %lu) uncontended %lu\n",
+    dram->contended_access_count, dram->read_contended_access_count, dram->write_contended_access_count,
+    dram->uncontended_access_count);
   return;
 }
 
@@ -2212,6 +2292,23 @@ cc_param_t *cc_param_init(conf_t *conf) {
   }
   int l3_compressed = conf_find_bool_mandatory(conf, "l3.compressed");
   cc_param_set_l3_compressed(param, l3_compressed);
+  char *default_shape_str = conf_find_str_mandatory(conf, "cc.default_shape");
+  int shape_found = 0;
+  for(int shape = OCACHE_SHAPE_BEGIN;shape < OCACHE_SHAPE_END;shape++) {
+    if(streq(default_shape_str, ocache_shape_names[shape]) == 1) {
+      param->default_shape = shape;
+      shape_found = 1;
+    }
+  }
+  if(shape_found == 0) {
+    printf("cc.default_shape options:\n");
+    printf("    ");
+    for(int shape = OCACHE_SHAPE_BEGIN;shape < OCACHE_SHAPE_END;shape++) {
+      printf("\"%s\", ", ocache_shape_names[shape]);
+    }
+    putchar('\n');
+    error_exit("Invalid cc.default_shape: \"%s\"\n", default_shape_str);
+  }
   return param;
 }
 
@@ -2229,6 +2326,7 @@ void cc_param_free(cc_param_t *param) {
 //   l3.size, l3.way_count, l3.latency
 //   cpu.core_count
 //   l3.compressed
+//   cc.default_shape
 void cc_param_read_cache_conf(
   conf_t *conf, const char *prefix, const char *cache_name, int *size, int *way_count, int *latency) {
   char key[32];
@@ -2250,7 +2348,10 @@ void cc_param_read_cache_conf(
     error_exit("%s's set count must be a power of two (sees %d)\n", cache_name, set_count);
   }
   snprintf(key, sizeof(key), "%s.latency", prefix);
-  *latency = conf_find_int32_range(conf, key, 1, INT_MAX, CONF_RANGE);
+  *latency = conf_find_int32_range(conf, key, 0, INT_MAX, CONF_RANGE);
+  if(*latency == 0) {
+    printf("Note: Cache \"%s\" is using zero latency\n", cache_name);
+  }
   return;
 }
 
@@ -2267,34 +2368,33 @@ void cc_param_conf_print(cc_param_t *param) {
     cc_param_get_l3_size(param) / (int)UTIL_CACHE_LINE_SIZE, cc_param_get_l3_way_count(param),
     cc_param_get_l3_latency(param));
   printf("L3 compressed: %d\n", param->l3_compressed);
+  printf("Default shape: %d (%s)\n", param->default_shape, ocache_shape_names[param->default_shape]);
+  return;
+}
+
+// Initialize a single array given a pointer
+static void cc_init_stat_array(cc_t *cc, uint64_t **array_p) {
+  int core_count = cc_param_get_core_count(cc->param);
+  // Each core at each level takes uint64_t
+  int size = sizeof(uint64_t) * core_count;
+  *array_p = (uint64_t *)malloc(size);
+  SYSEXPECT(*array_p != NULL);
+  memset(*array_p, 0x00, size);
+  (void)cc;
   return;
 }
 
 // Initialize CC's per-cache, per-level stat
 static void cc_init_stat(cc_t *cc) {
-  int core_count = cc_param_get_core_count(cc->param);
-  // Always allocate and initialize this much
-  int size = sizeof(uint64_t) * core_count;
   for(int level = CC_LEVEL_BEGIN;level < CC_LEVEL_END;level++) {
-    // One element for each core on each level
-    cc->read_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->read_count[level] != NULL);
-    memset(cc->read_count[level], 0x00, size);
-    cc->write_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->write_count[level] != NULL);
-    memset(cc->write_count[level], 0x00, size);
-    cc->read_hit_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->read_hit_count[level] != NULL);
-    memset(cc->read_hit_count[level], 0x00, size);
-    cc->write_hit_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->write_hit_count[level] != NULL);
-    memset(cc->write_hit_count[level], 0x00, size);
-    cc->read_miss_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->read_miss_count[level] != NULL);
-    memset(cc->read_miss_count[level], 0x00, size);
-    cc->write_miss_count[level] = (uint64_t *)malloc(size);
-    SYSEXPECT(cc->write_miss_count[level] != NULL);
-    memset(cc->write_miss_count[level], 0x00, size);
+    cc_init_stat_array(cc, &cc->read_count[level]);
+    cc_init_stat_array(cc, &cc->write_count[level]);
+    cc_init_stat_array(cc, &cc->read_hit_count[level]);
+    cc_init_stat_array(cc, &cc->read_miss_count[level]);
+    cc_init_stat_array(cc, &cc->write_hit_count[level]);
+    cc_init_stat_array(cc, &cc->write_miss_count[level]);
+    cc_init_stat_array(cc, &cc->read_cycle_count[level]);
+    cc_init_stat_array(cc, &cc->write_cycle_count[level]);
   }
   return;
 }
@@ -2353,6 +2453,8 @@ void cc_free(cc_t *cc) {
     free(cc->write_count[i]);
     free(cc->write_hit_count[i]);
     free(cc->write_miss_count[i]);
+    free(cc->read_cycle_count[i]);
+    free(cc->write_cycle_count[i]);
   }
   // This should only be freed once
   ocache_free(cc->llc);
@@ -2562,7 +2664,7 @@ uint64_t cc_insert_recursive(
             if(pmap_entry != NULL) {
               evict_shape = pmap_entry->shape;
             } else {
-              evict_shape = OCACHE_SHAPE_NONE;
+              evict_shape = cc->param->default_shape;
             }
             // Always insert dirty since we know the line is dirty
             cc_insert_llc_recursive(cc, id, cycle, evict_oid, evict_addr, evict_shape, 1);
@@ -2580,6 +2682,34 @@ uint64_t cc_insert_recursive(
   return cycle;
 }
 
+// Update stats of read/write cycles after an access
+static void cc_update_access_cycle(
+  cc_t *cc, int id, int is_write, uint64_t end_cycle, 
+  uint64_t l1_start_cycle, uint64_t l2_start_cycle, uint64_t l3_start_cycle) {
+  if(is_write == 1) {
+    if(l1_start_cycle != -1UL) {
+      cc->write_cycle_count[CC_L1][id] += (end_cycle - l1_start_cycle);
+    }
+    if(l2_start_cycle != -1UL) {
+      cc->write_cycle_count[CC_L2][id] += (end_cycle - l2_start_cycle);
+    }
+    if(l3_start_cycle != -1UL) {
+      cc->write_cycle_count[CC_L3][id] += (end_cycle - l3_start_cycle);
+    }
+  } else {
+    if(l1_start_cycle != -1UL) {
+      cc->read_cycle_count[CC_L1][id] += (end_cycle - l1_start_cycle);
+    }
+    if(l2_start_cycle != -1UL) {
+      cc->read_cycle_count[CC_L2][id] += (end_cycle - l2_start_cycle);
+    }
+    if(l3_start_cycle != -1UL) {
+      cc->read_cycle_count[CC_L3][id] += (end_cycle - l3_start_cycle);
+    }
+  }
+  return;
+}
+
 // Simulates load on the cache hierarchy. The main memory call back may also be invoked if the requests
 // goes into the DRAM
 // This function assumes that:
@@ -2592,6 +2722,11 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
   assert(id == 0); // Only support single core
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0);
   assert(cc_main_mem_cb != NULL); // DRAM call back must be present
+  // Save this value to compute actual access latency
+  uint64_t l1_start_cycle = -1UL;
+  // These two are set during recursion
+  uint64_t l2_start_cycle = -1UL;
+  uint64_t l3_start_cycle = -1UL;
   // Use this as the shape for LLC
   int shape = -1;
   int hit_level = CC_LEVEL_END; // This means hit main memory
@@ -2601,6 +2736,13 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
       cc->write_count[level][id]++;
     } else {
       cc->read_count[level][id]++;
+    }
+    // Track start cycle
+    switch(level) {
+      case CC_L1: l1_start_cycle = cycle; break;
+      case CC_L2: l2_start_cycle = cycle; break;
+      case CC_L3: l3_start_cycle = cycle; break;
+      default: break;
     }
     // The latency is always paid as long as the cache is accessed
     cycle += cc->param->latencies[level];
@@ -2612,11 +2754,11 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
       // Only read pmap and get shape when we query LLC
       pmap_entry_t *pmap_entry = pmap_find(cc->dmap, addr);
       //assert(pmap_entry != NULL);
-      // If shape is defined, then use it. Otherwise it is not compressed
+      // If shape is defined, then use it. Otherwise use default shape
       if(pmap_entry != NULL) {
         shape = pmap_entry->shape;
       } else {
-        shape = OCACHE_SHAPE_NONE;
+        shape = cc->param->default_shape;
       }
       ocache_lookup_read(ocache, oid, addr, shape, &lookup_result);
     }
@@ -2637,6 +2779,7 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
         if(is_write == 1) {
           ocache_entry_set_dirty(lookup_result.hit_entry, 0);
         }
+        cc_update_access_cycle(cc, id, is_write, cycle, l1_start_cycle, l2_start_cycle, l3_start_cycle);
         return cycle;
       }
       // If hit lower level or miss hierarchy, update the level, and exit loop
@@ -2659,6 +2802,9 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
     // Entry needs this three fields for reads
     read_entry.oid = oid;
     read_entry.addr = addr;
+    //if(is_write == 1) {
+    //  printf("LLC write miss oid %lu addr %lu\n", oid, addr);
+    //}
     // Must have already tried LLC, so shape must have been set
     assert(shape != -1);
     // Return completion cycle for read, since we will block on this
@@ -2667,6 +2813,8 @@ uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr
   // Insert from the lowest miss level to the L1; If hit L1 this function will return immediately
   // If miss LLC, then shape will be set, otherwise it is -1
   cc_insert_recursive(cc, id, cycle, hit_level - 1, oid, addr, shape, is_write);
+  // Update access latency
+  cc_update_access_cycle(cc, id, is_write, cycle, l1_start_cycle, l2_start_cycle, l3_start_cycle);
   return cycle;
 }
 
@@ -2705,6 +2853,7 @@ uint64_t cc_main_mem_cb(cc_t *cc, uint64_t cycle, int op, ocache_entry_t *entry)
   } else {
     assert(op == CC_WRITE);
     uint64_t max_cycle = cycle;
+    dram->total_sb_count++;
     for(int index = 0;index < 4;index++) {  
       // Only write dirty lines
       if(ocache_entry_is_valid(entry, index) && ocache_entry_is_dirty(entry, index)) {
@@ -2717,6 +2866,10 @@ uint64_t cc_main_mem_cb(cc_t *cc, uint64_t cycle, int op, ocache_entry_t *entry)
         if(finish_cycle > max_cycle) {
           max_cycle = finish_cycle;
         }
+        dram->total_sb_line_count++;
+        //printf("%lu oid %lu addr %lu (entry oid %lu addr %lu)\n", 
+        //  cycle, write_oid, write_addr, entry->oid, entry->addr);
+        //break;
       }
     }
     cycle = max_cycle;
@@ -2739,21 +2892,46 @@ void cc_stat_print(cc_t *cc, int verbose) {
     uint64_t write_count = 0;
     uint64_t write_hit_count = 0;
     uint64_t write_miss_count = 0;
+    uint64_t read_cycle_count = 0;
+    uint64_t write_cycle_count = 0;
     for(int id = 0;id < cc->param->core_count;id++) {
       if(verbose == 1) {
         printf("Level %d id %d reads %lu hits %lu misses %lu writes %lu hits %lu misses %lu\n", level, id,
           cc->read_count[level][id], cc->read_hit_count[level][id], cc->read_miss_count[level][id], 
           cc->write_count[level][id], cc->write_hit_count[level][id], cc->write_miss_count[level][id]);
+        printf("Cycles read %lu write %lu\n", cc->read_cycle_count[level][id], cc->write_cycle_count[level][id]);
+        printf("  Hit ratio read %lf write %lf total %lf\n", 
+          (double)cc->read_hit_count[level][id] / (double)cc->read_count[level][id],
+          (double)cc->write_hit_count[level][id] / (double)cc->write_count[level][id],
+            (double)(cc->read_hit_count[level][id] + cc->write_hit_count[level][id]) / 
+            (double)(cc->read_count[level][id] + cc->write_count[level][id]));
+        printf("  Avg latency read %lf write %lf\n",
+          (double)cc->read_cycle_count[level][id] / (double)cc->read_count[level][id],
+          (double)cc->write_cycle_count[level][id] / (double)cc->write_count[level][id]
+        );
       }
+      assert(cc->read_hit_count[level][id] + cc->read_miss_count[level][id] == cc->read_count[level][id]);
+      assert(cc->write_hit_count[level][id] + cc->write_miss_count[level][id] == cc->write_count[level][id]);
       read_count += cc->read_count[level][id];
       read_hit_count += cc->read_hit_count[level][id];
       read_miss_count += cc->read_miss_count[level][id];
       write_count += cc->write_count[level][id];
       write_hit_count += cc->write_hit_count[level][id];
       write_miss_count += cc->write_miss_count[level][id];
+      read_cycle_count += cc->read_cycle_count[level][id];
+      write_cycle_count += cc->write_cycle_count[level][id];
     }
     printf("Level %d total reads %lu hits %lu misses %lu writes %lu hits %lu misses %lu\n", level, 
       read_count, read_hit_count, read_miss_count, write_count, write_hit_count, write_miss_count);
+    printf("Cycles read %lu write %lu\n", read_cycle_count, write_cycle_count);
+    printf("  Hit ratio read %lf write %lf total %lf\n", 
+          (double)read_hit_count / (double)read_count,
+          (double)write_hit_count / (double)write_count,
+            (double)(read_hit_count + write_hit_count) / (double)(read_count + write_count));
+    printf("  Avg latency read %lf write %lf\n",
+          (double)read_cycle_count / (double)read_count,
+          (double)write_cycle_count / (double)write_count
+        );
   }
   return;
 }
@@ -2766,6 +2944,7 @@ void cc_stat_print(cc_t *cc, int verbose) {
 //   l3.size, l3.way_count, l3.latency
 //   cpu.core_count
 //   l3.compressed
+//   cc.default_shape
 //   ---
 //   dram.bank_count
 //   dram.read_latency
@@ -2888,10 +3067,12 @@ void oc_stat_print(oc_t *oc) {
   dmap_stat_print(oc->dmap);
   // Only print stat for LLC since that is what we care about
   printf("L3:\n");
+  // Need to refersh states
+  ocache_refresh_stat(oc->l3);
   ocache_stat_print(oc->l3);
   // Print verbose
   printf("cc:\n");
-  cc_stat_print(oc->cc, 1);
+  cc_stat_print(oc->cc, 0);  // Only has a single core, do not need per-core data
   printf("DRAM:\n");
   dram_stat_print(oc->dram);
   // Generate a file name for dumping
@@ -3106,10 +3287,33 @@ void main_latency_list_stat_print(main_latency_list_t *list) {
   return;
 }
 
+// main_zsim_info_t
+
+main_zsim_info_t *main_zsim_info_init(const char *key, const char *value) {
+  main_zsim_info_t *info = (main_zsim_info_t *)malloc(sizeof(main_zsim_info_t));
+  SYSEXPECT(info != NULL);
+  memset(info, 0x00, sizeof(main_zsim_info_t));
+  info->key = (char *)malloc(strlen(key) + 1);
+  SYSEXPECT(info->key != NULL);
+  strcpy(info->key, key);
+  info->value = (char *)malloc(strlen(value) + 1);
+  SYSEXPECT(info->value != NULL);
+  strcpy(info->value, value);
+  return info;
+}
+
+void main_zsim_info_free(main_zsim_info_t *info) {
+  free(info->key);
+  free(info->value);
+  free(info);
+  return;
+}
+
 //* main_t
 
 // Read configuration file
 // main.max_inst_count - The simulation upper bound
+// main.start_inst_count - The simulation starting point
 // main.logging - Whether all requests are logged
 // main.logging_filename - The file name of the log file; Only read if logging = 1
 main_param_t *main_param_init(conf_t *conf) {
@@ -3117,6 +3321,7 @@ main_param_t *main_param_init(conf_t *conf) {
   SYSEXPECT(param != NULL);
   memset(param, 0x00, sizeof(main_param_t));
   param->max_inst_count = conf_find_uint64_range(conf, "main.max_inst_count", 1, UINT64_MAX, CONF_RANGE | CONF_ABBR);
+  param->start_inst_count = conf_find_uint64_range(conf, "main.start_inst_count", 0, UINT64_MAX, CONF_RANGE | CONF_ABBR);
   param->logging = conf_find_bool_mandatory(conf, "main.logging");
   assert(param->logging == 0 || param->logging == 1);
   if(param->logging == 1) {
@@ -3137,7 +3342,7 @@ void main_param_free(main_param_t *param) {
 
 void main_param_conf_print(main_param_t *param) {
   printf("---------- main_t param ----------\n");
-  printf("Inst count %lu\n", param->max_inst_count);
+  printf("Inst count max %lu start %lu\n", param->max_inst_count, param->start_inst_count);
   printf("Logging %d file %s\n", param->logging, param->logging ? param->logging_filename : "N/A");
   return;
 }
@@ -3148,12 +3353,14 @@ void main_param_conf_print(main_param_t *param) {
 //   l3.size, l3.way_count, l3.latency
 //   cpu.core_count
 //   l3.compressed
+//   cc.default_shape
 //   ---
 //   dram.bank_count
 //   dram.read_latency
 //   dram.write_latency
 //   ---
 //   main.max_inst_count
+//   main.start_inst_count
 //   main.logging
 //   main.logging_filename
 main_t *main_init_from_conf(conf_t *conf) {
@@ -3203,6 +3410,13 @@ void main_free(main_t *main) {
   free(main->conf_filename);
   main_param_free(main->param);
   conf_free(main->conf);
+  // Free info list
+  main_zsim_info_t *curr = main->zsim_info_list;
+  while(curr != NULL) {
+    main_zsim_info_t *next = curr->next;
+    main_zsim_info_free(curr);
+    curr = next;
+  }
   free(main);
   return;
 }
@@ -3213,6 +3427,14 @@ void main_sim_begin(main_t *main) {
   printf("\n\n========== simulation begin ==========\n");
   main->finished = 0;
   main->progress = 0;
+  if(main->param->start_inst_count == 0UL) {
+    // Immediately start
+    main->started = 1;
+    main->start_cycle_count = 0UL;
+  } else {
+    // Delayed start in report_progress()
+    main->started = 0;
+  }
   // Initialize log file
   if(main->param->logging == 1) {
     main->logging_fp = fopen(main->param->logging_filename, "wb");
@@ -3225,8 +3447,12 @@ void main_sim_begin(main_t *main) {
 
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
-  printf("Completed simulation with %lu instructions and %lu cycles (conf max %lu)\n", 
-      main->last_inst_count, main->last_cycle_count, main->param->max_inst_count);
+  uint64_t sim_inst_count = main->last_inst_count - main->param->start_inst_count;
+  uint64_t sim_cycle_count = main->last_cycle_count - main->start_cycle_count;
+  printf("Completed simulation with %lu instructions and %lu cycles (conf max %lu start %lu)\n", 
+      sim_inst_count, sim_cycle_count, 
+      main->param->max_inst_count, main->param->start_inst_count);
+  printf("  IPC = %lf\n", (double)sim_inst_count / (double)sim_cycle_count);
   main_stat_print(main);
   // Close logging file pointer
   if(main->logging_fp != NULL) {
@@ -3238,6 +3464,7 @@ void main_sim_end(main_t *main) {
 }
 
 // Return an address to redirect zsim writes, which can then be logged
+// NOT USED FOR NOW
 void *main_write_redirect(main_t *main, uint64_t addr, int size) {
   int offset = addr % UTIL_CACHE_LINE_SIZE;
   void *data = main->zsim_write_buffer + offset;
@@ -3280,14 +3507,36 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
   assert(cycle >= main->last_cycle_count);
   main->last_inst_count = inst;
   main->last_cycle_count = cycle;
-  if(inst >= main->param->max_inst_count) {
+  uint64_t actual_end_inst_count = main->param->start_inst_count + main->param->max_inst_count;
+  if(inst < main->param->start_inst_count) {
+    // Have not started simulation, just compute progress of waiting
+    // Reuse progress variable
+    int progress = (int)(100.0 * (double)inst / (double)main->param->start_inst_count);
+    if(progress != main->progress) {
+      printf("\rWait: %d%%", progress);
+      fflush(stdout); // Make sure we can see it
+      main->progress = progress;
+    }
+  } else if(inst >= actual_end_inst_count) {
     main->progress = 100; // Indicating finished
     main->finished = 1;
     // Print stats and exit the program
     main_sim_end(main);
   } else {
-    main->progress = (int)(100.0 * (double)inst / (double)main->param->max_inst_count);
-    printf("\rProgress: %d%%", main->progress);
+    // Set started flag and reset progress
+    if(main->started == 0) {
+      main->started = 1;
+      main->progress = 0;
+      main->start_cycle_count = cycle;
+    }
+    int progress = (int)(100.0 * (double) \
+      (inst - main->param->start_inst_count) / (double)main->param->max_inst_count
+    );
+    if(progress != main->progress) {
+      printf("\rProgress: %d%%", progress);
+      fflush(stdout); // Make sure we can see it
+      main->progress = progress;
+    }
   }
   return;
 }
@@ -3318,16 +3567,40 @@ void main_1d_to_2d(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *a
   return;
 }
 
+#ifndef UNIT_TEST_NO_POPULATE_DMAP
+
+// This function must only be used for simulation, but not for unit tests, since unit tests use 
+// randomly generated address as 1D address
+static void main_populate_dmap(main_t *main, uint64_t addr_1d_aligned, uint64_t oid_2d, uint64_t addr_2d) {
+  // This addr is from zsim, so it could be used as virtual address pointers
+  // In tests this must be disabled because we use random value
+  void *data = (void *)addr_1d_aligned;
+  dmap_t *dmap = oc_get_dmap(main->oc);
+  if(dmap_find(dmap, oid_2d, addr_2d) == NULL) {
+    dmap_entry_t *entry = dmap_insert(dmap, oid_2d, addr_2d);
+    memcpy(entry->data, data, UTIL_CACHE_LINE_SIZE);
+  }
+  return;
+}
+
+#endif
+
 // Calls main_read and main_write() after preparing for memory operations
 // Return OID and addr via argument
 uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   int index = main->mem_op_index;
   main->mem_op_index++;
+  // If sim has not started, just return in the same cycle
+  if(main->started == 0) {
+    return cycle;
+  }
   // This checks bound
   main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, index);
-  // This is potentially unaligned, which is directly taken from the application
+  // This is potentially unaligned, which is directly taken from the application's trace
   uint64_t addr_1d = entry->addr;
+  // This is aligned cache boundary, which is used for translation
   uint64_t addr_1d_aligned = addr_1d & ~(UTIL_CACHE_LINE_SIZE - 1);
+  // Use this to generate the exact 2D address to be accessed
   int addr_1d_offset = addr_1d - addr_1d_aligned;
   int op = entry->op;
   assert(op == MAIN_READ || op == MAIN_WRITE);
@@ -3336,6 +3609,10 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   uint64_t addr_2d, oid_2d;
   // First translate address
   main_1d_to_2d(main, addr_1d_aligned, &oid_2d, &addr_2d);
+#ifndef UNIT_TEST_NO_POPULATE_DMAP
+  // Populate the dmap, if the 1D address is first time accessed (since the dmap has not been initialized)
+  main_populate_dmap(main, addr_1d_aligned, oid_2d, addr_2d);
+#endif
   // Then call coherence controller
   if(op == MAIN_READ) {
     cycle = oc_load(main->oc, 0, cycle, oid_2d, addr_2d + addr_1d_offset, size, NULL);
@@ -3345,6 +3622,14 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
     cycle = oc_store(main->oc, 0, cycle, oid_2d, addr_2d + addr_1d_offset, size, data);
   }
   return cycle;
+}
+
+void main_add_info(main_t *main, const char *key, const char *value) {
+  main_zsim_info_t *info = main_zsim_info_init(key, value);
+  // Add it to the linked list
+  info->next = main->zsim_info_list;
+  main->zsim_info_list = info;
+  return;
 }
 
 // addr and size need not be aligned, but inserted info is always page (4KB) aligned
@@ -3396,12 +3681,34 @@ void main_conf_print(main_t *main) {
 
 void main_stat_print(main_t *main) {
   printf("---------- main_t stat ----------\n");
+  /*
+  // Print this in case sin_end is not reported
+  printf("Last reported inst %lu cycle %lu (start inst %lu cycle %lu)\n", 
+    main->last_inst_count, main->last_cycle_count,
+    main->param->start_inst_count, main->start_cycle_count);
+  printf("  IPC = %lf\n", 
+    (double)(main->last_inst_count - main->param->start_inst_count) / 
+    (double)(main->last_cycle_count - main->start_cycle_count));
+  */
+  if(main->finished == 0) {
+    main->finished = 1;
+    // Print stat on IPC
+    main_sim_end(main);
+    printf("Actual progress: %d\n", main->progress);
+  }
   printf("oc:\n");
   oc_stat_print(main->oc);
   printf("addr map:\n");
   main_addr_map_stat_print(main->addr_map);
   printf("latency list:\n");
   main_latency_list_stat_print(main->latency_list);
+  printf("zsim info:\n");
+  printf("---------- zsim info ----------\n");
+  main_zsim_info_t *curr = main->zsim_info_list;
+  while(curr != NULL) {
+    printf("  Key: \"%s\"; Value: \"%s\"\n", curr->key, curr->value);
+    curr = curr->next;
+  }
   return;
 }
 
