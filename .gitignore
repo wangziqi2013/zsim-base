@@ -7,3 +7,5 @@ build
 heartbeat
 out.cfg
 bin/*
+dram-stat-dump-*
+write_test
