@@ -6,17 +6,23 @@ l2.size = 262144
 l2.way_count = 8
 l2.latency = 8
 
-l3.size = 33554432
-l3.way_count = 10
+# 1MB
+l3.size = 1048576
+# 4MB
+#l3.size = 4194304 
+l3.way_count = 16
 l3.latency = 30
 
 cpu.core_count = 1
 
 l3.compressed = 1
 
-dram.bank_count = 1
-dram.read_latency = 100
-dram.write_latency = 200
+cc.default_shape = None
 
-main.max_inst_count = 1M
+dram.bank_count = 65536
+dram.read_latency = 300
+dram.write_latency = 300
+
+main.max_inst_count = 500M
+main.start_inst_count = 0M
 main.logging = 0
