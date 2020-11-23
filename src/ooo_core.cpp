@@ -273,6 +273,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     uint64_t reqSatisfiedCycle = dispatchCycle;
                     //if (addr != ((Address)-1L)) {
                         ooo_load_count++;
+                        //main_latency_list_entry_t *entry = main_get_mem_op(zinfo->main);
+                        //assert(entry->op == MAIN_READ);
                         reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
                         //reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
@@ -313,7 +315,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     Address addr = storeAddrs[storeIdx++];
                     ooo_store_count++;
                     main_latency_list_entry_t *entry = main_get_mem_op(zinfo->main);
-                    assert(entry->op == MAIN_WRITE);
+                    //assert(entry->op == MAIN_WRITE);
                     ooo_store_size += entry->size;
                     uint64_t reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
                     //uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
