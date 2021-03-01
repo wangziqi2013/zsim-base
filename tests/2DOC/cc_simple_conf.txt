@@ -1,0 +1,18 @@
+cc.simple.l1.size = 32768
+cc.simple.l1.way_count = 8
+cc.simple.l1.latency = 4
+
+cc.simple.l2.size = 262144
+cc.simple.l2.way_count = 8
+cc.simple.l2.latency = 8
+
+# 1MB
+cc.simple.llc.size = 1048576
+# 4MB
+#l3.size = 4194304 
+cc.simple.llc.physical_way_count = 16
+cc.simple.llc.latency = 30
+
+cc.simple.core_count = 1
+
+cc.simple.default_shape = 1_4
