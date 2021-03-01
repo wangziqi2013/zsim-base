@@ -58,25 +58,23 @@ typedef struct {
   uint64_t high_mask;       // High-1 masks for test whether high bits + sign bit are zeros or ones; Always 64 bytes
 } BDI_param_t;
 
-extern BDI_param_t BDI_params[6]; // 8-4, 8-2, 8-1, 4-2, 4-1, 2-1
-extern BDI_param_t *BDI_types[8]; // Selected using "type" field; Invalid entries that are not BDI will be NULL
+extern BDI_param_t BDI_types[8]; // Selected using "type" field; Invalid entries that are not BDI will be NULL
+extern const char *BDI_names[8];  // String names of BDI types; indexed using runtime type
 extern int BDI_comp_order[6];     // Order of types we try for compression
 
 // BDI type in the run time
-#define BDI_TYPE_BEGIN     2
-#define BDI_TYPE_END       8   // End (max + 1) value of BDI types; Other types are not BDI but may still be valid
 #define BDI_TYPE_INVALID   -1  // Could not compress; Returned by BDI_comp() and BDI_decomp()
 #define BDI_TYPE_NOT_FOUND -2  // Could not be found; Returned by dmap_find_compressed()   
 
-// Selects BDI schemes; This is the internal macro we use for writing program
-#define BDI_PARAM_BEGIN 0
-#define BDI_8_4         0
-#define BDI_8_2         1
+// Index the BDI_types array
+#define BDI_TYPE_BEGIN 2
 #define BDI_8_1         2
-#define BDI_4_2         3
-#define BDI_4_1         4
-#define BDI_2_1         5
-#define BDI_PARAM_END   6
+#define BDI_8_2         3
+#define BDI_8_4         4
+#define BDI_4_1         5
+#define BDI_4_2         6
+#define BDI_2_1         7
+#define BDI_TYPE_END    8
 
 // Helper function that writes/reads the base of the given size into the output buffer
 void *BDI_comp_write_base(void *out_buf, uint64_t base, int word_size);
@@ -111,6 +109,7 @@ void BDI_decomp_AVX2(void *out_buf, void *in_buf, BDI_param_t *param);
 
 // Returns type of compression used; BDI_TYPE_INVALID (-1) if uncompressable
 int BDI_comp(void *out_buf, void *in_buf);
+int BDI_get_comp_size(void *in_buf);
 void BDI_decomp(void *out_buf, void *in_buf, int type);
 
 // Print compressed line in text format for debugging
@@ -138,10 +137,137 @@ int FPC_pack_bits_bmi(void *_dest, int dest_offset, uint64_t *src, int bits);
 int FPC_unpack_bits(uint64_t *dest, void *src, int src_offset, int bits);
 int FPC_unpack_bits_bmi(uint64_t *dest, void *_src, int src_offset, int bits);
 // Returns the number of bits of a successful compression
-int FPC_comp(void *out_buf, void *_in_buf);
+int FPC_comp(void *out_buf, void *_in_buf); // Generate output data, return comp'ed size in bits
+int FPC_get_comp_size_bits(void *_in_buf);  // Dry run only; Return comp size in bits
 void FPC_decomp(void *_out_buf, void *in_buf);
 void FPC_print_compressed(void *in_buf);
 void FPC_print_packed_bits(uint64_t *buf, int begin_offset, int bits);
+
+//* MESI_t - Abstract coherence controller, decoupled from cache implementation
+
+// Maximum number of cores supported by this stucture
+#define MESI_MAX_SHARER   64
+
+// MESI stable states
+#define MESI_STATE_BEGIN  0
+#define MESI_STATE_I      0
+#define MESI_STATE_S      1
+#define MESI_STATE_E      2
+#define MESI_STATE_M      3
+#define MESI_STATE_END    4
+
+#define MESI_CACHE_BEGIN  0
+#define MESI_CACHE_L1     0
+#define MESI_CACHE_L2     1
+#define MESI_CACHE_LLC    2
+#define MESI_CACHE_END    3
+
+extern const char *MESI_cache_names[MESI_CACHE_END];
+extern const char *MESI_state_names[MESI_STATE_END];
+
+typedef struct {
+  // This can be accessed either way
+  union {
+    struct {
+      int8_t l1_state;
+      int8_t l2_state;
+      int8_t llc_state; // This represents the ownership of the block; Must not be E; M means LLC is owner
+    };
+    int8_t states[3];
+  };
+  union {
+    struct {
+      uint64_t l1_sharer;
+      uint64_t l2_sharer;
+    };
+    uint64_t sharers[2];
+  };
+} MESI_entry_t;
+
+// Reset the entry, i.e., in-place initialization; Set all states to STATE_I and clears the sharer list
+inline static void MESI_entry_invalidate(MESI_entry_t *entry) {
+  memset(entry, 0x00, sizeof(MESI_entry_t));
+  return;
+}
+
+inline static void MESI_entry_set_state(MESI_entry_t *entry, int cache, int state) {
+  assert(cache >= MESI_CACHE_BEGIN && cache < MESI_CACHE_END);
+  assert(state >= MESI_STATE_BEGIN && state < MESI_STATE_END);
+  entry->states[cache] = state;
+  return;
+}
+
+inline static int MESI_entry_get_state(MESI_entry_t *entry, int cache) {
+  assert(cache >= MESI_CACHE_BEGIN && cache < MESI_CACHE_END);
+  return entry->states[cache];
+}
+
+// Sets the bitmap of the sharer list; This function does not care whether the sharer has been set already
+inline static void MESI_entry_set_sharer(MESI_entry_t *entry, int cache, int sharer) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  assert(sharer >= 0 && sharer < MESI_MAX_SHARER);
+  entry->sharers[cache] |= (0x1UL << sharer);
+  return;
+}
+
+// Does not care whether the sharer is clear already
+inline static void MESI_entry_clear_sharer(MESI_entry_t *entry, int cache, int sharer) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  assert(sharer >= 0 && sharer < MESI_MAX_SHARER);
+  entry->sharers[cache] &= ~(0x1UL << sharer);
+  return;
+}
+
+inline static void MESI_entry_clear_all_sharer(MESI_entry_t *entry, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  entry->sharers[cache] = 0UL;
+  return;
+}
+
+// Returns 1 if the given sharer is set in the cache's bitmap
+inline static int MESI_entry_is_sharer(MESI_entry_t *entry, int cache, int sharer) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  assert(sharer >= 0 && sharer < MESI_MAX_SHARER);
+  return !!(entry->sharers[cache] & (0x1UL << sharer));
+}
+
+// Returns the next sharer, starting from location curr
+// If curr is out of bound, then result is undefined
+// Return value is the index of the sharer; -1 if no sharer is available
+inline static int MESI_entry_get_next_sharer(MESI_entry_t *entry, int cache, int curr) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  assert(curr >= 0 && curr <= MESI_MAX_SHARER);
+  // First mask off bits below curr, and then get the index of the first bit that is set
+  return (curr >= MESI_MAX_SHARER) ? -1 : ffs_uint64(entry->sharers[cache] & ~((0x1UL << curr) - 1)) - 1;
+}
+
+// Count the number of sharers
+inline static int MESI_entry_count_sharer(MESI_entry_t *entry, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  return popcount_uint64(entry->sharers[cache]);
+}
+
+// Return the only sharer (undefined when there is more than one sharers)
+inline static int MESI_entry_get_exclusive_sharer(MESI_entry_t *entry, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
+  assert(MESI_entry_count_sharer(entry, cache) == 1);
+  // FFS instruction returns first set bit index plus one, so we minus one here
+  return ffs_uint64(entry->sharers[cache]) - 1;
+}
+
+// An invalid entry must be all-zero
+inline static int MESI_entry_is_invalid(MESI_entry_t *entry) {
+  if(MESI_entry_count_sharer(entry, MESI_CACHE_L1) != 0) return 0;
+  if(MESI_entry_count_sharer(entry, MESI_CACHE_L2) != 0) return 0;
+  if(entry->l1_state != MESI_STATE_I || entry->l2_state != MESI_STATE_I || entry->llc_state != MESI_STATE_I) return 0;
+  return 1;
+}
+
+// Consistency check; Assertion would fail if inconsistency occurs
+// This function is disabled in no debug mode
+void MESI_entry_verify(MESI_entry_t *entry);
+void MESI_entry_print_sharer_list(MESI_entry_t *entry, int cache);
+void MESI_entry_print(MESI_entry_t *entry);
 
 //* dmap_t - Cache line level data map
 //* pmap_t - Page information
@@ -170,7 +296,8 @@ typedef struct dmap_entry_struct_t {
     // This is for per-cache line information
     struct {
       // This will will init'ed to zero
-      uint8_t data[UTIL_CACHE_LINE_SIZE]; // Data, potentially compressed
+      uint8_t data[UTIL_CACHE_LINE_SIZE]; // Data, always uncompressed, and updated from the simulator writes
+      MESI_entry_t MESI_entry; // MESI state machine
     };
     // This is for per-page information
     struct {
@@ -191,8 +318,6 @@ typedef struct {
   // Statistics fields
   uint64_t query_count;                    // Total query count
   uint64_t iter_count;
-  // pmap fields
-  int default_shape;
 } dmap_t;
 
 // pmap and dmap share the same function; pmap does not need separated init and free
@@ -215,6 +340,14 @@ void dmap_entry_unlink(dmap_entry_t *entry);
 dmap_entry_t *dmap_insert(dmap_t *dmap, uint64_t oid, uint64_t addr);
 // Can return NULL if the combination does not exist
 dmap_entry_t *dmap_find(dmap_t *dmap, uint64_t oid, uint64_t addr);
+// Returns NULL if the dmap entry is not found
+inline static MESI_entry_t *dmap_find_MESI_entry(dmap_t *dmap, uint64_t oid, uint64_t addr) {
+  dmap_entry_t *dmap_entry = dmap_find(dmap, oid, addr);
+  if(dmap_entry == NULL) {
+    return NULL;
+  }
+  return &dmap_entry->MESI_entry;
+}
 
 // The optional argument all_zero (can be NULL) returns whether the line is all zero
 int dmap_find_compressed(dmap_t *dmap, uint64_t oid, uint64_t addr, void *out_buf, int *all_zero);
@@ -233,10 +366,9 @@ inline static void dmap_write(dmap_t *dmap, uint64_t oid, uint64_t _addr, int si
 inline static pmap_t *pmap_init() { return dmap_init(); }
 inline static void pmap_free(pmap_t *pmap) { dmap_free(pmap); }
 
-inline static void pmap_set_default_shape(pmap_t *pmap, int shape) { pmap->default_shape = shape; }
 inline static int pmap_get_count(pmap_t *pmap) { return pmap->pmap_count; }
 
-pmap_entry_t *pmap_insert(pmap_t *pmap, uint64_t addr);
+pmap_entry_t *pmap_insert(pmap_t *pmap, uint64_t addr, int shape);
 // Insert a range of pages, all have the same shape
 void pmap_insert_range(pmap_t *pmap, uint64_t addr, int size, int shape);
 // addr should be cache line aligned
@@ -274,21 +406,31 @@ extern const char *ocache_shape_names[4];
 #define OCACHE_LEVEL_L2                  1
 #define OCACHE_LEVEL_L3                  2
 
+// Used for segmented ocache design
+#define OCACHE_DATA_ALIGNMENT            8
+
 // Physical slot definition
 typedef struct ocache_entry_struct_t {
   // Note that multiple compressed blocks share one OID and addr tag
-  uint64_t oid;   // Make it large, avoid overflow
-  uint64_t addr;  // Not shifted, but lower bits are zero
+  uint64_t oid;      // Make it large, avoid overflow
+  uint64_t addr;     // Not shifted, but lower bits are zero
   // LRU is 0 for invalid slot such that they will always be used for insertion when present
-  uint64_t lru;   // LRU counter value; Smallest is LRU line
+  uint64_t lru;      // LRU counter value; Smallest is LRU line
   // 4 * 1: Ordered by OIDs
   // 1 * 4: Ordered by addresses
   // 2 * 2: First ordered by OID, then by addresses
   // None: Not compressed, act like normal cache
   int shape;
-  uint8_t states;   // Valid/dirty bits, lower 4 valid, higher 4 dirty
-  int8_t sizes[4];  // Compressed size of block 0, 1, 2, 3; Must be cleared if not valid
+  uint8_t states;    // Valid/dirty bits, lower 4 valid, higher 4 dirty
+  int8_t sizes[4];   // Compressed size of block 0, 1, 2, 3; Must be cleared if not valid
+  int total_aligned_size; // Sum of aligned sizes of this entry
 } ocache_entry_t;
+
+// Align a size to the given boundary (must be power of 2)
+inline static int ocache_entry_align_size(ocache_entry_t *entry, int size) {
+  (void)entry;
+  return (size + OCACHE_DATA_ALIGNMENT - 1) & ~(OCACHE_DATA_ALIGNMENT - 1);
+} 
 
 // Returns 1 if the index is dirty, 0 otherwise
 inline static int ocache_entry_is_dirty(ocache_entry_t *entry, int index) {
@@ -347,7 +489,10 @@ inline static void ocache_entry_clear_all_state(ocache_entry_t *entry) {
 inline static void ocache_entry_set_size(ocache_entry_t *entry, int index, int size) {
   assert(index >= 0 && index < 4);
   assert(size >= 0 && size <= (int)UTIL_CACHE_LINE_SIZE);
+  entry->total_aligned_size -= ocache_entry_align_size(entry, entry->sizes[index]);
+  assert(entry->total_aligned_size >= 0);
   entry->sizes[index] = (int8_t)size;
+  entry->total_aligned_size += ocache_entry_align_size(entry, size);
   return;
 }
 
@@ -357,7 +502,7 @@ inline static int ocache_entry_get_size(ocache_entry_t *entry, int index) {
   return (int)entry->sizes[index];
 }
 
-// Return the sum of all sizes
+// Return the sum of all sizes, not aligned
 inline static int ocache_entry_get_all_size(ocache_entry_t *entry) {
   int ret = entry->sizes[0] + entry->sizes[1] + entry->sizes[2] + entry->sizes[3];
   assert(ret >= 0 && ret <= (int)UTIL_CACHE_LINE_SIZE);
@@ -369,9 +514,10 @@ inline static int ocache_entry_is_fit(ocache_entry_t *entry, int size) {
   return ocache_entry_get_all_size(entry) + size <= (int)UTIL_CACHE_LINE_SIZE;
 }
 
-// Clear the size array
+// Clear the size array and aligned size
 inline static void ocache_entry_clear_all_size(ocache_entry_t *entry) {
   memset(entry->sizes, 0x00, sizeof(entry->sizes));
+  entry->total_aligned_size = 0;
   return;
 }
 
@@ -395,7 +541,7 @@ inline static void ocache_entry_inv_index(ocache_entry_t *entry, int index) {
   assert(index >= 0 && index < 4);
   ocache_entry_clear_valid(entry, index);
   ocache_entry_clear_dirty(entry, index);
-  entry->sizes[index] = 0;
+  ocache_entry_set_size(entry, index, 0);
   return;
 }
 
@@ -406,49 +552,36 @@ inline static void ocache_entry_copy(ocache_entry_t *dest, ocache_entry_t *src) 
 
 // The following are used as return status of ocache lookup
 // Miss completely, not even invalid in a super block
-#define OCACHE_LOOKUP_MISS               0
-#define OCACHE_LOOKUP_HIT_BEGIN          1
+#define OCACHE_MISS                      0
 // Line is hit and the slot is uncompressed
-#define OCACHE_LOOKUP_HIT_NORMAL         1
+#define OCACHE_HIT_NORMAL                1
 // Line is hit and the slot is compressed
-#define OCACHE_LOOKUP_HIT_COMPRESSED     2
+#define OCACHE_HIT_COMPRESSED            2
+// The following two are used for eviction
+// Insert or evict succeeds without evicting anything
+#define OCACHE_SUCCESS                   3
+// The entry to be evicted is copied to the evict_entry of the result
+#define OCACHE_EVICT                     4
 
 // This represents a line in the ocache
 typedef struct {
-  // Result of the lookup, see OCACHE_LOOKUP_ macros
-  int state;
-  // If miss, this stores pointers to super blocks that may be candidates to 
-  // store the incoming line
-  ocache_entry_t *candidates[OCACHE_SB_SIZE];
-  // In all cases this stores the index that the requested address should be in the super block
-  int indices[OCACHE_SB_SIZE];
-  // Number of candidates; For hits always one
-  int count;
-  // The following stores hit information
-  ocache_entry_t *hit_entry;
-  int hit_index;
-  // If miss, this stores the LRU entry
-  ocache_entry_t *lru_entry;
-} ocache_lookup_result_t;
-
-#define OCACHE_INSERT_SUCCESS     0 // Nothing extra needs to be done
-#define OCACHE_INSERT_EVICT       1 // The entry to be evicted is copied to the evict_entry of the result
-
-typedef struct {
-  // Result of insert; Either inserted into a vacant slot, or evict an existing entry, or hit an entry
-  int state;
-  // The entry that will be evicted (consider this as a MSHR)
-  ocache_entry_t evict_entry;
-} ocache_insert_result_t;
-
-#define OCACHE_INV_SUCCESS        0 // Invalidation succeeds
-#define OCACHE_INV_EVICT          1 // Invalidation requires dirty eviction
-
-typedef struct {
-  int state;
-  int hit_index;                    // The index of the line in the sb that gets evicted
-  ocache_entry_t evict_entry;
-} ocache_inv_result_t;
+  int state;                    // Result of the lookup
+  ocache_entry_t *candidates[OCACHE_SB_SIZE]; // Lookup for write stores same SB entry pointers in this array
+  int indices[OCACHE_SB_SIZE];  // Stores the index that the requested address should be in the super block
+  int cand_count;               // Number of candidates (i.e., slots in the same set for the same SB)
+  ocache_entry_t *hit_entry;    // For lookup, stores the entry that is hit, if state indicates hit
+  int hit_index;                // Index within the SB for the hit block
+  ocache_entry_t *lru_entry;    // Lookup write will always store LRU entry in this
+  // Following used by insertion and eviction
+  ocache_entry_t *insert_entry; // Entry just inserted
+  int insert_index;             // Index of the entry just inserted
+  ocache_entry_t evict_entry;   // The entry that will be evicted (consider this as an eviction buffer entry or MSHR)
+  int evict_index;              // Only used for inv() related function call
+  ocache_entry_t *downgrade_entry; // Entry and index that get downgraded, if downgrade returns success; NULL if miss
+  int downgrade_index;
+  // This is used for segmented ocache
+  int total_aligned_size;       // Total aligned size of valid lines in the set; Only valid if lookup scans all
+} ocache_op_result_t;
 
 // Index computation parameters; We do some masking and shifting of addr. and OID,
 // and XOR them together to derive the index
@@ -459,12 +592,29 @@ typedef struct {
   int oid_shift;              // Right shift amount after masking
 } ocache_index_t;
 
+// This stores the snapshot node which is organized as a linked list
+typedef struct ocache_stat_snapshot_struct_t {
+  uint64_t logical_line_count;       // Valid logical lines
+  uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
+  uint64_t sb_logical_line_count;    // Valid lines in valid super blocks
+  uint64_t sb_logical_line_size_sum; // Sum of shaped line sizes
+  uint64_t sb_4_1_count;             // 4 * 1 sb count
+  uint64_t sb_1_4_count;             // 1 * 4 sb count
+  uint64_t sb_2_2_count;             // 2 * 2 sb count
+  uint64_t no_shape_line_count;      // no shape line count
+  uint64_t size_histogram[8];        // Same as the histogram in ocache
+  struct ocache_stat_snapshot_struct_t *next;
+} ocache_stat_snapshot_t;
+
+ocache_stat_snapshot_t *ocache_stat_snapshot_init();
+void ocache_stat_snapshot_free(ocache_stat_snapshot_t *snapshot);
+
 typedef struct ocache_struct_t {
   char *name;                // Optional name of the cache object, NULL by default
   int level;                 // Level of the cache (L1 - 0, L2 - 1, L3 - 2)
-  int set_count;             // Number of sets, can be arbitrary
-  int way_count;             // Number of ways, must be power of two
-  int line_count;            // Total number of cache lines
+  int set_count;             // Number of sets, must be power of two
+  int way_count;             // Number of ways, can be arbitrary
+  int line_count;            // Total number of cache lines (physical slots)
   int size;                  // total_count * UTIL_CACHE_LINE_SIZE
   int set_bits;              // Number of bits to represent the set
   // Shape related
@@ -473,9 +623,16 @@ typedef struct ocache_struct_t {
   uint64_t lru_counter;      // Use this to implement LRU
   // dmap_t object for compression
   dmap_t *dmap;              // Used if the cache is compressed, otherwise NULL
+  // Call back for compression; Can be hooked with a different function
+  int (*get_compressed_size_cb)(struct ocache_struct_t *ocache, uint64_t oid, uint64_t addr, int shape);
+  ocache_stat_snapshot_t *stat_snapshot_head; // Head of the snapshot linked list
+  ocache_stat_snapshot_t *stat_snapshot_tail; // Tail of the snapshot linked list
   // Statistics
-  uint64_t vertical_attempt_count;
-  uint64_t vertical_in_compressed_count;
+  uint8_t stat_begin[0];             // Makes the begin address of stat region
+  // General stat
+  // Vertical compression & BDI stats
+  uint64_t comp_attempt_count;
+  uint64_t vertical_in_compressed_count; // This is equivalent to BDI_success_count
   uint64_t vertical_not_base_count;
   uint64_t vertical_base_found_count;
   uint64_t vertical_same_type_count;
@@ -485,24 +642,40 @@ typedef struct ocache_struct_t {
   uint64_t vertical_after_size_sum;  // Size of lines after vertical compression 
   // BDI stats
   uint64_t BDI_success_count;
+  uint64_t BDI_failed_count;         // Lines that cannot be compressed by any of the BDI type
   uint64_t BDI_before_size_sum;
   uint64_t BDI_after_size_sum;
+  uint64_t all_zero_count;           // Whether the line is all-zero
+  // Size and counts at each stage
+  uint64_t attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
+  uint64_t BDI_uncomp_size_sum;      // BDI uncompressable lines (corresponds to BDI_failed_count)
+  uint64_t vertical_uncomp_size_sum; // BDI compressable but vertical uncompressable lines
+  uint64_t vertical_uncomp_count;    // Number of lines not compressable to vertical
+  // BDI type count, updated by get_compressed_size function of LLC
+  union {
+    struct {
+      uint64_t BDI_invalid_count[2];
+      uint64_t BDI_8_1_count;
+      uint64_t BDI_8_2_count;
+      uint64_t BDI_8_4_count;
+      uint64_t BDI_4_1_count;
+      uint64_t BDI_4_2_count;
+      uint64_t BDI_2_1_count;
+    };
+    // Indexed using run-time type
+    uint64_t BDI_compress_type_counts[8];
+  };
   // Statistics that will be refreshed by ocache_refresh_stat()
-  uint64_t valid_line_count;    // Valid physical slots
-  uint64_t sb_count;            // Valid super blocks
-  uint64_t sb_line_count;       // Valid lines in valid super blocks
-  uint64_t sb_4_1_count;        // 4 * 1 sb count
-  uint64_t sb_1_4_count;        // 1 * 4 sb count
-  uint64_t sb_2_2_count;        // 2 * 2 sb count
-  uint64_t no_shape_count;      // no shape line count
-  // BDI shape count, updated by get_compressed_size function of LLC
-  uint64_t BDI_8_4_count;
-  uint64_t BDI_8_2_count;
-  uint64_t BDI_8_1_count;
-  uint64_t BDI_4_2_count;
-  uint64_t BDI_4_1_count;
-  uint64_t BDI_2_1_count;
-  uint64_t all_zero_count; // Whether the line is all-zero
+  uint64_t logical_line_count;       // Valid logical lines
+  uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
+  uint64_t sb_logical_line_count;    // Valid lines in valid super blocks
+  uint64_t sb_logical_line_size_sum; // Sum of shaped line sizes
+  uint64_t sb_4_1_count;             // 4 * 1 sb count
+  uint64_t sb_1_4_count;             // 1 * 4 sb count
+  uint64_t sb_2_2_count;             // 2 * 2 sb count
+  uint64_t no_shape_line_count;      // no shape line count
+  uint64_t size_histogram[8];        // 8-byte interval; Only valid lines; First interval is [1, 8], not [0, 7]
+  uint8_t stat_end[0];          // Marks end address of stat region
   // Always inline this at the end to save one pointer redirection
   ocache_entry_t data[0];
 } ocache_t;
@@ -514,6 +687,13 @@ void ocache_set_name(ocache_t *ocache, const char *name);
 void ocache_set_level(ocache_t *ocache, int level);
 void ocache_set_dmap(ocache_t *ocache, dmap_t *dmap);
 inline static int ocache_is_use_shape(ocache_t *ocache) { return ocache->use_shape; }
+inline static void ocache_set_get_compressed_size_cb(
+  ocache_t *ocache, int (*cb)(ocache_t *, uint64_t, uint64_t, int)) {
+  ocache->get_compressed_size_cb = cb;
+  return;
+}
+// "BDI", "None"
+void ocache_set_compression_type(ocache_t *ocache, const char *name);
 
 uint64_t ocache_gen_addr(ocache_t *ocache, uint64_t tag, uint64_t set_id, int shape);
 uint64_t ocache_gen_addr_with_oid(ocache_t *ocache, uint64_t oid, uint64_t tag, uint64_t set_id, int shape);
@@ -521,6 +701,11 @@ void ocache_gen_addr_in_sb(ocache_t *ocache, uint64_t base_oid, uint64_t base_ad
                            uint64_t *oid_p, uint64_t *addr_p);
 uint64_t ocache_gen_addr_no_shape(ocache_t *ocache, uint64_t tag, uint64_t set_id);
 uint64_t ocache_gen_addr_page(ocache_t *ocache, uint64_t page, uint64_t line);
+
+// Returns a random set index which is always valid for the ocache
+inline static int ocache_get_random_set_index(ocache_t *ocache) {
+  return rand() % ocache->set_count;
+}
 
 // Aligns the address to a certain cache line boundary - only called for debugging
 uint64_t ocache_align_addr(uint64_t addr, int alignment);
@@ -542,36 +727,78 @@ int ocache_get_vertical_base_index(ocache_t *ocache, ocache_entry_t *entry, int 
 // Given OID, addr, shape, return the OID, addr of the vertical base
 uint64_t ocache_get_vertical_base_oid(ocache_t *ocache, uint64_t oid, int shape);
 
-void ocache_lookup_read(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_lookup_result_t *result);
+void _ocache_lookup(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, int update_lru, int scan_all, ocache_op_result_t *result);
+inline static void ocache_lookup_read(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result) {
+  _ocache_lookup(ocache, oid, addr, shape, 1, 0, result);
+}
 // This function is read-only to the ocache set
-void ocache_lookup_write(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_lookup_result_t *result);
-int ocache_insert_helper_get_compressed_size(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+inline static void ocache_lookup_write(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result) {
+  _ocache_lookup(ocache, oid, addr, shape, 0, 1, result);
+}
+// Just probe an entry without changing its LRU and do not update candidate
+inline static void ocache_lookup_probe(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result) {
+  _ocache_lookup(ocache, oid, addr, shape, 0, 0, result);
+}
+
+// Get compressed size call backs
+int ocache_insert_helper_get_compressed_size_BDI(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_insert_helper_get_compressed_size_none(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+
 void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
-                   int shape, int dirty, ocache_insert_result_t *insert_result);
-void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_inv_result_t *result);
+                   int shape, int dirty, ocache_op_result_t *insert_result);
+void ocache_after_insert_adjust(
+  ocache_t *ocache, ocache_op_result_t *insert_result, ocache_op_result_t *lookup_result);
+void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result);
+void ocache_downgrade(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result);
+
+// The following functions are obsolete and should no longer be used; Always use the shaped version
 
 // Either HIT_NORMAL or MISS; Updates hit entry and state
-void ocache_lookup_read_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_lookup_result_t *result);
+inline static void ocache_lookup_read_no_shape(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_op_result_t *result) {
+  ocache_lookup_read(ocache, oid, addr, OCACHE_SHAPE_NONE, result);
+}
 // Do not push candidate, but set lru entry if miss; Also update hit entry and state
 // This function is read-only to the ocache set
-void ocache_lookup_write_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_lookup_result_t *result);
+inline static void ocache_lookup_write_no_shape(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_op_result_t *result) {
+  ocache_lookup_write(ocache, oid, addr, OCACHE_SHAPE_NONE, result);
+}
 // Insert a full sized line, possibly hitting an existing line, an invalid line, or evict a line
-void ocache_insert_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, int dirty, ocache_insert_result_t *result);
+inline static void ocache_insert_no_shape(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int dirty, ocache_op_result_t *result) {
+  ocache_insert(ocache, oid, addr, OCACHE_SHAPE_NONE, dirty, result);
+}
 // Invalidate the exact address, if it is found. Eviction is needed if the line is dirty
-void ocache_inv_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_inv_result_t *result);
+inline static void ocache_inv_no_shape(ocache_t *ocache, uint64_t oid, uint64_t addr, ocache_op_result_t *result) {
+  ocache_inv(ocache, oid, addr, OCACHE_SHAPE_NONE, result);
+}
 
 // Returns the MRU entry of the given set; Report error if set invalid; Only used for debugging
 ocache_entry_t *ocache_get_mru(ocache_t *ocache, int set_index);
 // Returns the MRU entry of the entire cache
 ocache_entry_t *ocache_get_mru_global(ocache_t *ocache);
 
+// Reset the object's content and stats and LRU counter
+void ocache_reset(ocache_t *ocache);
+
 // Update statistics that are not updated during normal operation
 // See ocache_t object body for more details
 void ocache_refresh_stat(ocache_t *ocache);
-inline static uint64_t ocache_get_valid_line_count(ocache_t *ocache) { return ocache->valid_line_count; }
-inline static uint64_t ocache_get_sb_count(ocache_t *ocache) { return ocache->sb_count; }
-inline static uint64_t ocache_get_sb_line_count(ocache_t *ocache) { return ocache->sb_line_count; }
-inline static uint64_t ocache_get_no_shape_count(ocache_t *ocache) { return ocache->no_shape_count; }
+// Creates a snapshot of the current cache content by running ocache_refresh_stat() first and then
+// saving the current stats to a linked list
+void ocache_append_stat_snapshot(ocache_t *ocache);
+// Saves the snapshots to a file
+void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename);
+
+inline static uint64_t ocache_get_logical_line_count(ocache_t *ocache) { return ocache->logical_line_count; }
+inline static uint64_t ocache_get_sb_slot_count(ocache_t *ocache) { return ocache->sb_slot_count; }
+inline static uint64_t ocache_get_sb_logical_line_count(ocache_t *ocache) { return ocache->sb_logical_line_count; }
+inline static uint64_t ocache_get_no_shape_line_count(ocache_t *ocache) { return ocache->no_shape_line_count; }
 
 // Invalidates all OIDs >= addr_lo and < addr_hi; Both lo and hi must be cache aligned
 // Returns the number of lines invalidated
@@ -600,21 +827,223 @@ void ocache_set_print(ocache_t *ocache, int set);
 void ocache_conf_print(ocache_t *ocache);
 void ocache_stat_print(ocache_t *ocache);
 
-// dram_t - Simple DRAM timing model
+//* scache_t - Segmented cache for compression
+
+// Maximum compression ratio - change this to change the compression ratio
+#define SCACHE_MAX_RATIO      4
+
+// This is a single tag in the compressed segmented cache
+typedef struct {
+  uint64_t addr;                    // Cache line aligned, but not shifted
+  uint64_t lru;                     // Current LRU position
+  int8_t valid;
+  int8_t dirty;
+  int8_t size;                      // Unaligned size of the current line
+} scache_entry_t;
+
+// This operation sets LRU, size and valid to zero which is required as invariant for invalid entry
+inline static void scache_entry_invalidate(scache_entry_t *entry) {
+  memset(entry, 0x00, sizeof(scache_entry_t));
+  return;
+}
+
+inline static void scache_entry_dup(scache_entry_t *dest, scache_entry_t *src) {
+  memcpy(dest, src, sizeof(scache_entry_t));
+  return;
+}
+
+#define SCACHE_DATA_ALIGNMENT  4    // Compressed block size is aligned to 4 bytes
+
+// States of op_result_t
+// Used for lookup, inv
+#define SCACHE_HIT             1
+#define SCACHE_MISS            2
+// Used for insert, inv
+#define SCACHE_SUCCESS         3
+#define SCACHE_EVICT           4
+
+// Maximum number of possible evicts per operation (this can be higher than the actual possible number)
+#define SCACHE_MAX_EVICT_ENTRY 16
+
+// Unified structure for returning operation result
+typedef struct {
+  int state;
+  union {
+    scache_entry_t *lru_entry;       // LRU in the current set
+    scache_entry_t *hit_entry;       // hit entry in the current set
+    scache_entry_t *insert_entry;    // Inserted entry for insert operation; Always not NULL for insertion
+    scache_entry_t *inv_entry;       // Invalidated entry, NULL if inv misses
+    scache_entry_t *downgrade_entry; // Downgraded entry, NULL if downgrade misses
+  };
+  int total_aligned_size;           // Aligned size of compressed lines in the set
+  int evict_count;                  // Number of evictions
+  // Copied entry (used for eviction); Insert may need multiple evictions
+  scache_entry_t evict_entries[SCACHE_MAX_EVICT_ENTRY]; 
+} scache_op_result_t;
+
+typedef struct scache_stat_snapshot_struct_t {
+  uint64_t logical_line_count;
+  uint64_t uncomp_logical_line_count;
+  uint64_t comp_line_size;
+  struct scache_stat_snapshot_struct_t *next;
+} scache_stat_snapshot_t;
+
+scache_stat_snapshot_t *scache_stat_snapshot_init();
+void scache_stat_snapshot_free(scache_stat_snapshot_t *snapshot);
+
+// Everything without "physical" prefix is logical
+typedef struct scache_struct_t {
+  int size;               // Total size, in bytes
+  int ratio;              // Only stored for conf printing
+  int physical_way_count; // Only stored for conf printing; Normal operation does not need this
+  int way_count;          // Logical way count, i.e., number of tags per set
+  int physical_line_count;
+  int line_count;         // Number of tags, i.e., logical line count
+  int set_count;
+  int set_size;           // Number of bytes storage available in a set
+  int set_bits;           // Number of bits in the set bit mask
+  uint64_t addr_mask;     // Before shift
+  int addr_shift;
+  uint64_t lru_counter;   // Global LRU counter
+  dmap_t *dmap;           // Data map object storing data
+  int (*get_compressed_size_cb)(struct scache_struct_t *scache, uint64_t addr); // Call back for the compressed size
+  uint8_t stat_begin[0];
+  // Statistics - BDI
+  uint64_t BDI_attempt_count;   // Number of BDI compression attempts, including succeesses and failures
+  uint64_t BDI_success_count;   // BDI success, i.e., compressable by BDI
+  uint64_t BDI_fail_count;
+  uint64_t BDI_type_counts[8];  // BDI types
+  uint64_t all_zero_count;      // All-zero lines
+  uint64_t BDI_attempt_size;    // Attempted sizes before compression
+  uint64_t BDI_uncomp_size;     // Lines that are not compressed by BDI
+  uint64_t BDI_before_size;     // Successful lines only
+  uint64_t BDI_after_size;      // Total size of lines compressed by BDI, only successful ones, including zero lines
+  // Statistics - FPC
+  uint64_t FPC_attempt_count;
+  uint64_t FPC_success_count;
+  uint64_t FPC_fail_count;
+  uint64_t FPC_attempt_size;    // Attempted size, before compression
+  uint64_t FPC_uncomp_size;     // Failed sizes
+  uint64_t FPC_before_size;     // Only successful lines
+  uint64_t FPC_after_size;      // Only successful lines
+  uint64_t FPC_size_counts[8];  // FPC size counts, index i counts size [8i, 8i + 8)
+  // Statistics - General
+  uint64_t uncompressed_count;  // Not compressed
+  uint64_t read_count;          // Reads, not including internal lookups
+  uint64_t insert_count;        // Number of insertion operations
+  uint64_t inv_count;           // Number of evictions
+  uint64_t inv_success_count;   // Number of successful evictions
+  uint64_t downgrade_count;     // Number of downgrades
+  uint64_t downgrade_success_count; // Number of successful downgrades (line is hit)
+  uint64_t evict_line_count;    // Number of lines evicted (can be insertion or eviction)
+  // Statistics after tag walk - comp line size and uncomp line count can be derived from these three
+  uint64_t logical_line_count;        // Number of valid logical lines
+  uint64_t uncomp_logical_line_count; // Number of uncompressed logical lines
+  uint64_t comp_line_size;            // Compressed line size sum
+  uint8_t stat_end[0];
+  // Snapshot linked list head and tail
+  scache_stat_snapshot_t *stat_snapshot_head;
+  scache_stat_snapshot_t *stat_snapshot_tail;
+  // Entries
+  scache_entry_t data[0]; // Must be allocated based on actual number of tags in the cache
+} scache_t;
+
+void scache_init_param(scache_t *scache, int size, int physical_way_count, int ratio);
+scache_t *scache_init(int size, int physical_way_count, int ratio);
+scache_t *scache_init_by_set_count(int set_count, int physical_way_count, int ratio);
+void scache_free(scache_t *scache);
+
+inline static int scache_gen_index(scache_t *scache, uint64_t addr) {
+  return (int)((addr & scache->addr_mask) >> scache->addr_shift);
+}
+
+inline static scache_entry_t *scache_get_set_begin(scache_t *scache, uint64_t addr) {
+  int index = scache_gen_index(scache, addr);
+  return scache->data + scache->way_count * index;
+}
+
+inline static void scache_set_dmap(scache_t *scache, dmap_t *dmap) {
+  scache->dmap = dmap;
+  return;
+}
+
+inline static void scache_set_get_compressed_size_cb(scache_t *scache, int (*cb)(scache_t *, uint64_t)) {
+  scache->get_compressed_size_cb = cb;
+  return;
+}
+
+// Align a size to the given boundary (must be power of 2)
+inline static int scache_align_size(scache_t *scache, int size) {
+  (void)scache;
+  return (size + SCACHE_DATA_ALIGNMENT - 1) & ~(SCACHE_DATA_ALIGNMENT - 1);
+} 
+
+inline static void scache_update_entry_lru(scache_t *scache, scache_entry_t *entry) {
+  entry->lru = scache->lru_counter++;
+  return;
+}
+
+// Returns a random set index used for testing. The returned value is guaranteed to be a valid index
+inline static int scache_get_random_set_index(scache_t *scache) {
+  return rand() % scache->set_count;
+}
+
+// Generate an address given the tag and set index
+inline static uint64_t scache_gen_addr(scache_t *scache, int set_index, uint64_t tag) {
+  assert(set_index >= 0 && set_index < scache->set_count);
+  return (((uint64_t)set_index) << UTIL_CACHE_LINE_BITS) + (tag << (UTIL_CACHE_LINE_BITS + scache->set_bits));
+}
+
+// Sets a compression call back using a name
+// Valid values are "BDI", "FPC", "None"
+void scache_set_compression_type(scache_t *scache, const char *name);
+void _scache_lookup(scache_t *scache, uint64_t addr, int update_lru, int scan_all, scache_op_result_t *result);
+// Performs lookup with an address; Return lookup result in the result parameter
+inline static void scache_lookup(scache_t *scache, uint64_t addr, scache_op_result_t *result) {
+  scache->read_count++;
+  _scache_lookup(scache, addr, 1, 0, result); // Update LRU, do not update total aligned size
+  return;
+}
+void scache_insert(scache_t *scache, uint64_t addr, int _dirty, scache_op_result_t *result);
+
+void scache_inv(scache_t *scache, uint64_t addr, scache_op_result_t *result);
+void scache_downgrade(scache_t *scache, uint64_t addr, scache_op_result_t *result);
+
+// Reset everything, including lines and stat
+void scache_reset(scache_t *scache);
+
+// Stat refresh and snapshot
+void scache_refresh_stat(scache_t *scache);
+void scache_append_stat_snapshot(scache_t *scache);
+void scache_save_stat_snapshot(scache_t *scache, const char *name);
+
+// For debugging; print the content of a set; Valid entries only
+void scache_print_set(scache_t *scache, int set_index);
+
+void scache_conf_print(scache_t *scache);
+void scache_stat_print(scache_t *scache);
+
+//* dram_t - Simple DRAM timing model
 
 // Each sample span 10K cycle
 #define DRAM_STAT_WINDOW_SIZE   10000
 
-typedef struct dram_stat_struct_t {
-  uint64_t cycle_count;
-  uint32_t read_count;
-  uint32_t write_count;
-  uint32_t write_size;
-  dram_stat_struct_t *next;
-} dram_stat_t;
+// May be used by other modules
+#define DRAM_READ               0
+#define DRAM_WRITE              1
 
-dram_stat_t *dram_stat_init();
-void dram_stat_free(dram_stat_t *stat);
+typedef struct dram_stat_snapshot_struct_t {
+  uint64_t cycle_count;        // Number of cycles in this window
+  uint64_t read_count;
+  uint64_t write_count;
+  uint64_t write_size;
+  uint64_t read_cycle;         // Total cycles spent on read in this window
+  uint64_t write_cycle;        // Total cycles spent on write in this window
+  struct dram_stat_snapshot_struct_t *next;
+} dram_stat_snapshot_t;
+
+dram_stat_snapshot_t *dram_stat_snapshot_init();
+void dram_stat_snapshot_free(dram_stat_snapshot_t *stat);
 
 typedef struct {
   // Read from the conf
@@ -627,11 +1056,11 @@ typedef struct {
   int addr_shift;
   int bank_count_bits;  // Number of bits in the address mask
   // Statistics
-  uint64_t stat_window;      // By default, set to DRAM_STAT_WINDOW_SIZE; Can be set manually for debugging
-  uint64_t stat_last_cycle;  // Bandwidth since the most recent interval
-  uint32_t stat_read_count;  // Number of reads since "last_cycle"
-  uint32_t stat_write_count; // Number of writes since "last_cycle"
-  uint32_t stat_write_size;  // Number of bytes written since "last_cycle"
+  uint64_t stat_read_count;  // Number of reads since "last_cycle"
+  uint64_t stat_write_count; // Number of writes since "last_cycle"
+  uint64_t stat_write_size;  // Number of bytes written since "last_cycle"
+  uint64_t stat_read_cycle;  // Number of cycles spent on read since "last_cycle"
+  uint64_t stat_write_cycle; // Number of cycles spent on write since "last_cycle"
   // Total aggregations
   uint64_t total_read_count;
   uint64_t total_write_count;
@@ -646,9 +1075,8 @@ typedef struct {
   uint64_t read_contended_access_count;
   uint64_t write_contended_access_count;
   uint64_t uncontended_access_count;
-  dram_stat_t *stat_head;    // Head of linked list
-  dram_stat_t *stat_tail;    // Head of linked list
-  int stat_count;
+  dram_stat_snapshot_t *stat_snapshot_head;    // Head of linked list
+  dram_stat_snapshot_t *stat_snapshot_tail;    // Head of linked list
   // Bank timing
   uint64_t banks[0];
 } dram_t;
@@ -660,9 +1088,6 @@ inline static int dram_get_bank_count(dram_t *dram) { return dram->bank_count; }
 inline static uint64_t dram_get_bank_cycle(dram_t *dram, int index) {
   assert(index >= 0 && index < dram->bank_count);
   return dram->banks[index];
-}
-inline static void dram_set_stat_window(dram_t *dram, uint64_t window) {
-  dram->stat_window = window;
 }
 
 inline static int dram_gen_bank_index(dram_t *dram, uint64_t oid, uint64_t addr) {
@@ -689,184 +1114,466 @@ inline static uint64_t dram_read(dram_t *dram, uint64_t cycle, uint64_t oid, uin
   dram->total_read_count++;
   uint64_t ret = dram_access(dram, cycle, oid, addr, dram->read_latency);
   dram->total_read_cycle += (ret - cycle);
+  dram->stat_read_cycle += (ret - cycle);
   if(ret - cycle > (uint64_t)dram->read_latency) {
     dram->read_contended_access_count++;
   }
   return ret;
 }
+
 inline static uint64_t dram_write(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr, uint64_t size) {
+  // Update stat window variables
   dram->stat_write_count++;
   dram->stat_write_size += size;
+  // Update total aggregated variables
   dram->total_write_count++;
   dram->total_write_size += size;
   uint64_t ret = dram_access(dram, cycle, oid, addr, dram->write_latency);
   dram->total_write_cycle += (ret - cycle);
+  dram->stat_write_cycle += (ret - cycle);
   if(ret - cycle > (uint64_t)dram->write_latency) {
     dram->write_contended_access_count++;
   }
   return ret;
 }
 
+// Returns the maximum bank cycle, i.e., the cycle when all banks are free
+uint64_t dram_get_max_cycle(dram_t *dram);
+
+void dram_append_stat_snapshot(dram_t *dram);
 // Dump stats into a file
-void dram_stat_dump(dram_t *dram, const char *filename);
+void dram_save_stat_snapshot(dram_t *dram, const char *filename);
 
 void dram_conf_print(dram_t *dram);
 void dram_stat_print(dram_t *dram);
 
-// cc_t
+//* cc_common_t - Common components for all cc objects
 
-#define CC_CORE_COUNT_MAX  64
-#define CC_CACHE_NAME_MAX  64
+#define CC_STAT_BEGIN             0
+#define CC_STAT_LOOKUP            0       // Number of lookups, both read and write
+#define CC_STAT_INSERT            1       // Number of inserts
+#define CC_STAT_EVICT             2       // Number of insert evictions
+#define CC_STAT_INV               3       // Number of coherence invs and inclusiveness-induced invs
+#define CC_STAT_DOWNGRADE         4       // Number of coherence downgrades
+// Functional stats
+#define CC_STAT_LOAD              5
+#define CC_STAT_STORE             6
+#define CC_STAT_LOAD_HIT          7
+#define CC_STAT_STORE_HIT         8
+#define CC_STAT_LOAD_MISS         9
+#define CC_STAT_STORE_MISS        10
+// Cycle stats
+#define CC_STAT_LOAD_CYCLE        11
+#define CC_STAT_STORE_CYCLE       12
+#define CC_STAT_END               13
 
-#define CC_LEVEL_COUNT     3    // Three-level hierarchy
-#define CC_LEVEL_BEGIN     0
-#define CC_L1              0
-#define CC_L2              1
-#define CC_L3              2
-#define CC_LEVEL_END       3
+typedef void (*cc_dram_debug_cb_t)(int op, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int size);
 
-// Coherence controller parameters
+// String names of cc stats
+extern const char *cc_common_stat_names[CC_STAT_END];
+
+// Common data structures of coherence controller
 typedef struct {
-  int core_count;
-  // Whether the LLC is compressed
-  int l3_compressed;
-  // Parameters for all levels
-  int sizes[CC_LEVEL_COUNT];
-  int way_counts[CC_LEVEL_COUNT];
-  int latencies[CC_LEVEL_COUNT];
-  // pmap's default shape if an entry could not be found
-  int default_shape;
-} cc_param_t;
+  dmap_t *dmap;                           // No ownership
+  dram_t *dram;                           // No ownership
+  conf_t *conf;                           // No ownership; NULL if not init'ed from a conf object
+  int core_count;                         // Number of L1s and L2s
+  uint64_t *stats[3];                     // First dimension cache level, second core ID * stat type, core ID first
+  // DRAM stats
+  uint64_t dram_read_count;
+  uint64_t dram_write_count;
+  uint64_t dram_read_cycle;
+  uint64_t dram_write_bytes;
+  // Cache conf
+  union {
+    struct {
+      int l1_size;
+      int l2_size;
+      int llc_size;
+    };
+    int cache_sizes[3];
+  };
+  union {
+    struct {
+      int l1_way_count;
+      int l2_way_count;
+      int llc_physical_way_count;
+    };
+    int cache_way_counts[3];
+  };
+  union {
+    struct {
+      int l1_latency;
+      int l2_latency;
+      int llc_latency;
+    };
+    int cache_latencies[3];
+  };
+  // Debugging call back - Only called if set; All DRAM requests will be duplicated to this function
+  cc_dram_debug_cb_t dram_debug_cb;
+} cc_common_t;
 
-inline static void cc_param_set_core_count(cc_param_t *param, int core_count) { param->core_count = core_count; }
-inline static int cc_param_get_core_count(cc_param_t *param) { return param->core_count; }
+void cc_common_init_stats(cc_common_t *commons, int core_count);
+void cc_common_free_stats(cc_common_t *commons);
 
-inline static void cc_param_set_l3_compressed(cc_param_t *param, int val) { param->l3_compressed = val; }
-inline static int cc_param_get_l3_compressed(cc_param_t *param) { return param->l3_compressed; }
-
-inline static void cc_param_set_l1_size(cc_param_t *param, int size) { param->sizes[CC_L1] = size; }
-inline static void cc_param_set_l2_size(cc_param_t *param, int size) { param->sizes[CC_L2] = size; }
-inline static void cc_param_set_l3_size(cc_param_t *param, int size) { param->sizes[CC_L3] = size; }
-
-inline static int cc_param_get_l1_size(cc_param_t *param) { return param->sizes[CC_L1]; }
-inline static int cc_param_get_l2_size(cc_param_t *param) { return param->sizes[CC_L2]; }
-inline static int cc_param_get_l3_size(cc_param_t *param) { return param->sizes[CC_L3]; }
-
-inline static void cc_param_set_l1_way_count(cc_param_t *param, int count) { param->way_counts[CC_L1] = count; }
-inline static void cc_param_set_l2_way_count(cc_param_t *param, int count) { param->way_counts[CC_L2] = count; }
-inline static void cc_param_set_l3_way_count(cc_param_t *param, int count) { param->way_counts[CC_L3] = count; }
-
-inline static int cc_param_get_l1_way_count(cc_param_t *param) { return param->way_counts[CC_L1]; }
-inline static int cc_param_get_l2_way_count(cc_param_t *param) { return param->way_counts[CC_L2]; }
-inline static int cc_param_get_l3_way_count(cc_param_t *param) { return param->way_counts[CC_L3]; }
-
-inline static void cc_param_set_l1_latency(cc_param_t *param, int latency) { param->latencies[CC_L1] = latency; }
-inline static void cc_param_set_l2_latency(cc_param_t *param, int latency) { param->latencies[CC_L2] = latency; }
-inline static void cc_param_set_l3_latency(cc_param_t *param, int latency) { param->latencies[CC_L3] = latency; }
-
-inline static int cc_param_get_l1_latency(cc_param_t *param) { return param->latencies[CC_L1]; }
-inline static int cc_param_get_l2_latency(cc_param_t *param) { return param->latencies[CC_L2]; }
-inline static int cc_param_get_l3_latency(cc_param_t *param) { return param->latencies[CC_L3]; }
-
-cc_param_t *cc_param_init(conf_t *conf);
-void cc_param_free(cc_param_t *param);
-
-void cc_param_read_cache_conf(
-  conf_t *conf, const char *prefix, const char *cache_name, int *size, int *way_count, int *latency);
-
-void cc_param_conf_print(cc_param_t *param);
-
-// Passed to DRAM interface
-#define CC_READ         0
-#define CC_WRITE        1
-
-// DRAM read/write call back, used by the cc
-// It takes entry variable. For write, it must contain all blocks that are evicted
-// For read, only oid, addr, shape is used to indicate the address to be loaded
-typedef uint64_t (*cc_main_mem_cb_t)(
-  struct cc_struct_t *cc, uint64_t cycle, int op, ocache_entry_t *entry
-);
-
-typedef struct cc_struct_t {
-  ocache_t **caches[CC_LEVEL_COUNT]; // Array of cache pointers, first dimension is level
-  int use_shape[CC_LEVEL_COUNT];     // Whether the level uses shaped cache, default 0
-  ocache_t *llc;                     // Single last-level cache instance
-  dmap_t *dmap;                      // Set using external functions; Optional (can be NULL); No ownership
-  dram_t *dram;                      // Set using external functions; Optional; No ownership
-  cc_param_t *param;                 // All level parameters, has ownership
-  // Main memory access call back pointer; Use this for debugging, i.e., intercept DRAM requests
-  cc_main_mem_cb_t main_mem_cb;
-  // Statistics; First dimension is level
-  uint64_t *read_count[CC_LEVEL_COUNT];
-  uint64_t *write_count[CC_LEVEL_COUNT];
-  uint64_t *read_hit_count[CC_LEVEL_COUNT];
-  uint64_t *read_miss_count[CC_LEVEL_COUNT];
-  uint64_t *write_hit_count[CC_LEVEL_COUNT];
-  uint64_t *write_miss_count[CC_LEVEL_COUNT];
-  // Stats on read/write cycles, recursive
-  uint64_t *read_cycle_count[CC_LEVEL_COUNT];
-  uint64_t *write_cycle_count[CC_LEVEL_COUNT];
-} cc_t;
-
-// This also transfers ownership of the param object to the CC object
-cc_t *cc_init(conf_t *conf);
-void cc_free(cc_t *cc);
-
-void cc_set_dmap(cc_t *cc, dmap_t *dmap); // This does not set ownership
-void cc_set_dram(cc_t *cc, dram_t *dram); // This does not set ownership
-inline static void cc_set_main_mem_cb(cc_t *cc, cc_main_mem_cb_t cb) { cc->main_mem_cb = cb; }
-
-inline static int cc_get_default_shape(cc_t *cc) { return cc->param->default_shape; }
-
-inline static ocache_t *cc_get_ocache(cc_t *cc, int level, int core) {
-  assert(level >= CC_LEVEL_BEGIN && level < CC_LEVEL_END);
-  assert(core >= 0 && core < cc->param->core_count);
-  return cc->caches[level][core];
+// Resets all stats to zero
+inline static void cc_common_reset_stats(cc_common_t *commons) {
+  cc_common_free_stats(commons);
+  cc_common_init_stats(commons, commons->core_count);
+  return;
 }
 
-// Recursively evict an entry from the LLC, taking into consideration the evictions from upper levels
-uint64_t cc_inv_llc_recursive(cc_t *cc, int id, uint64_t cycle, ocache_entry_t *entry, ocache_entry_t *result);
-// Insert into the LLC, handles recursive evictions
-uint64_t cc_insert_llc_recursive(
-  cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
-// The following two call the above two for special-case handling
-uint64_t cc_inv_recursive(
-  cc_t *cc, int id, int level, uint64_t cycle, uint64_t oid, uint64_t addr, int *dirty);
-uint64_t cc_insert_recursive(
-  cc_t *cc, int id, uint64_t cycle, int start_level, uint64_t oid, uint64_t addr, int shape, int is_write);
+// Returns a pointer to the stat variable
+// Note that the first dimension is cache level, then core ID, the last dimension is type
+inline static uint64_t *cc_common_get_stat_ptr(cc_common_t *commons, int cache, int id, int type) {
+  assert(type >= CC_STAT_BEGIN && type < CC_STAT_END);
+  assert(cache >= MESI_CACHE_BEGIN && cache < MESI_CACHE_END);
+  assert(id >= 0 && id < commons->core_count);
+  return commons->stats[cache] + id * CC_STAT_END + type;
+}
+
+// Update access cycle for each component in the hierarchy
+void cc_common_update_access_cycles(
+  cc_common_t *commons, int id, int is_store, int end_level, uint64_t begin_cycle, uint64_t end_cycle);
+
+void cc_common_print_stats(cc_common_t *commons);
+
+//* cc_scache_t - Multicore coherence controller for scache
+
+// Per-core cache reference; LLC is shared, so the pointer refers to a shared object; L1 and L2 are private
+typedef struct {
+  int id;                                 // ID of the core
+  union {
+    struct {
+      scache_t *l1;
+      scache_t *l2;
+      scache_t *llc;                      // Does not own (points to shared_llc)
+    };
+    scache_t *scaches[3];                 // Use MESI_CACHE_L1/L2/LLC to address
+  };
+} cc_scache_core_t;
+
+typedef struct {
+  cc_common_t commons;                    // Common fields that are essential to all types of CCs
+  cc_scache_core_t *cores;                // Array of private cache and shared cache references
+  scache_t *shared_llc;                   // Has ownership
+  // This one is unique to LLC
+  int llc_ratio;
+} cc_scache_t;
+
+// Initialize caches structure, without filling the cache objects
+void cc_scache_init_cores(cc_scache_t *cc, int core_count);
+void cc_scache_init_llc(
+  cc_scache_t *cc, int size, int physical_way_count, int ratio, int latency, const char *algorithm);
+void cc_scache_init_l1_l2(cc_scache_t *cc, int cache, int size, int way_count, int latency);
+cc_scache_t *cc_scache_init_conf(conf_t *conf); // Initialize with configuration files (rather than ad-hoc)
+cc_scache_t *cc_scache_init(); // This does not init anything
+void cc_scache_free(cc_scache_t *cc);
+
+// Returns the private cache; LLC is not supported
+inline static scache_t *cc_scache_get_core_cache(cc_scache_t *cc, int cache, int id) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  assert(id >= 0 && id < cc->commons.core_count);
+  return cc->cores[id].scaches[cache];
+}
+
+// Returns the latency of a given cache; No id is required since all caches are identical on the same level
+inline static int cc_scache_get_latency(cc_scache_t *cc, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  return cc->commons.cache_latencies[cache];
+}
+
+void cc_scache_set_dmap(cc_scache_t *cc, dmap_t *dmap);
+inline static void cc_scache_clear_dmap(cc_scache_t *cc) { cc->commons.dmap = NULL; }
+void cc_scache_set_dram(cc_scache_t *cc, dram_t *dram);
+inline static void cc_scache_clear_dram(cc_scache_t *cc) { cc->commons.dram = NULL; }
+
+inline static void cc_scache_set_dram_debug_cb(cc_scache_t *cc, cc_dram_debug_cb_t cb) {
+  cc->commons.dram_debug_cb = cb;
+  return;
+}
+
+int cc_scache_is_line_invalid(cc_scache_t *cc, int cache, int id, uint64_t addr);
+int cc_scache_is_line_dirty(cc_scache_t *cc, int cache, int id, uint64_t addr);
+
+uint64_t cc_scache_llc_insert_recursive(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr, int dirty);
+uint64_t cc_scache_l2_insert_recursive(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr, int dirty);
+uint64_t cc_scache_l1_insert_recursive(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr, int dirty);
+
+uint64_t cc_scache_load(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr);
+uint64_t cc_scache_store(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr);
+
+void cc_scache_print_set(cc_scache_t *cc, int cache, int id, int set_index);
+void cc_scache_print_MESI_entry(cc_scache_t *cc, uint64_t addr);
+
+// Function that sets up a testing scenario by inserting into all levels and setting MESI states; 
+// Only called for debugging
+void cc_scache_insert_levels(cc_scache_t *cc, int begin, int id, uint64_t addr, const int *state_vec);
+// state_vec starts at L1, L2 and LLC respectively
+inline static void cc_scache_l1_insert_levels(cc_scache_t *cc, int id, uint64_t addr, const int *state_vec) {
+  cc_scache_insert_levels(cc, MESI_CACHE_L1, id, addr, state_vec);
+}
+inline static void cc_scache_l2_insert_levels(cc_scache_t *cc, int id, uint64_t addr, const int *state_vec) {
+  cc_scache_insert_levels(cc, MESI_CACHE_L2, id, addr, state_vec);
+}
+inline static void cc_scache_llc_insert_levels(cc_scache_t *cc, int id, uint64_t addr, const int *state_vec) {
+  cc_scache_insert_levels(cc, MESI_CACHE_LLC, id, addr, state_vec);
+}
+
+void cc_scache_conf_print(cc_scache_t *cc);
+void cc_scache_stat_print(cc_scache_t *cc);
+
+//* cc_ocache_t
+
+typedef struct {
+  int id;
+  union {
+    struct {
+      ocache_t *l1;
+      ocache_t *l2;
+      ocache_t *llc;
+    };
+    ocache_t *ocaches[3];
+  };
+} cc_ocache_core_t;
+
+typedef struct {
+  cc_common_t commons;
+  cc_ocache_core_t *cores;
+  ocache_t *shared_llc;
+  int default_shape;            // The shape of lines when it is not explicitly given in the shape map
+} cc_ocache_t;
+
+// All having the exact semantics as cc_scache_ counterparts
+void cc_ocache_init_cores(cc_scache_t *cc, int core_count);
+void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency); 
+void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, int latency);
+cc_ocache_t *cc_ocache_init_conf(conf_t *conf); 
+cc_ocache_t *cc_ocache_init();
+void cc_ocache_free(cc_ocache_t *cc);
+
+inline static ocache_t *cc_ocache_get_core_cache(cc_ocache_t *cc, int cache, int id) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  assert(id >= 0 && id < cc->commons.core_count);
+  return cc->cores[id].ocaches[cache];
+}
+
+inline static int cc_ocache_get_latency(cc_ocache_t *cc, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  return cc->commons.cache_latencies[cache];
+}
+
+void cc_ocache_set_dmap(cc_ocache_t *cc, dmap_t *dmap);
+inline static void cc_ocache_clear_dmap(cc_ocache_t *cc) { cc->commons.dmap = NULL; }
+void cc_ocache_set_dram(cc_ocache_t *cc, dram_t *dram);
+inline static void cc_ocache_clear_dram(cc_ocache_t *cc) { cc->commons.dram = NULL; }
+
+inline static void cc_ocache_set_dram_debug_cb(cc_ocache_t *cc, cc_dram_debug_cb_t cb) {
+  cc->commons.dram_debug_cb = cb;
+  return;
+}
+
+inline static int cc_ocache_get_default_shape(cc_ocache_t *cc) {
+  return cc->default_shape;
+}
+
+inline static void cc_ocache_set_default_shape(cc_ocache_t *cc, int shape) {
+  assert(shape >= OCACHE_SHAPE_BEGIN && shape < OCACHE_SHAPE_END);
+  cc->default_shape = shape;
+  return;
+}
+
+// Debugging functions for assertion
+
+int cc_ocache_is_line_invalid(cc_ocache_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+int cc_ocache_is_line_dirty(cc_ocache_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+int cc_ocache_get_line_shape(cc_ocache_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+
+// Insert recursive
+
+uint64_t cc_ocache_llc_insert_recursive(
+  cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
+uint64_t cc_ocache_l2_insert_recursive(
+  cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
+uint64_t cc_ocache_l1_insert_recursive(
+  cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
+
+uint64_t cc_ocache_load(cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t cc_ocache_store(cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+void cc_ocache_print_set(cc_ocache_t *cc, int cache, int id, int set_index);
+void cc_ocache_print_MESI_entry(cc_ocache_t *cc, uint64_t addr);
+
+void cc_ocache_insert_levels(
+  cc_ocache_t *cc, int begin, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec);
+
+inline static void cc_ocache_l1_insert_levels(
+  cc_ocache_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_ocache_insert_levels(cc, MESI_CACHE_L1, id, oid, addr, shape, state_vec);
+}
+inline static void cc_ocache_l2_insert_levels(
+  cc_ocache_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_ocache_insert_levels(cc, MESI_CACHE_L2, id, oid, addr, shape, state_vec);
+}
+inline static void cc_ocache_llc_insert_levels(
+  cc_ocache_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_ocache_insert_levels(cc, MESI_CACHE_LLC, id, oid, addr, shape, state_vec);
+}
+
+void cc_ocache_conf_print(cc_ocache_t *cc);
+void cc_ocache_stat_print(cc_ocache_t *cc);
+
+//* cc_simple_t
+
+typedef struct {
+  union {
+    struct {
+      ocache_t *l1;
+      ocache_t *l2;
+      ocache_t *llc;
+    };
+    ocache_t *ocaches[MESI_CACHE_END];
+  };
+} cc_simple_core_t;
+
+typedef struct cc_struct_t {
+  cc_common_t commons;
+  int use_shape[MESI_CACHE_END];     // Whether the level uses shaped cache, default 0
+  cc_simple_core_t *cores; // Note that there is only a single core
+  ocache_t *shared_llc;
+  int default_shape;
+} cc_simple_t;
+
+// This also transfers ownership of the param object to the CC object
+cc_simple_t *cc_simple_init_conf(conf_t *conf);
+cc_simple_t *cc_simple_init();
+void cc_simple_free(cc_simple_t *cc);
+
+inline static ocache_t *cc_simple_get_core_cache(cc_simple_t *cc, int cache, int id) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  assert(id == 0);
+  (void)id;
+  return cc->cores[0].ocaches[cache];
+}
+
+inline static int cc_simple_get_latency(cc_simple_t *cc, int cache) {
+  assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2 || cache == MESI_CACHE_LLC);
+  return cc->commons.cache_latencies[cache];
+}
+
+void cc_simple_set_dmap(cc_simple_t *cc, dmap_t *dmap); // This does not set ownership
+void cc_simple_set_dram(cc_simple_t *cc, dram_t *dram); // This does not set ownership
+void cc_simple_clear_dmap(cc_simple_t *cc);
+void cc_simple_clear_dram(cc_simple_t *cc);
+
+inline static void cc_simple_set_dram_debug_cb(cc_simple_t *cc, cc_dram_debug_cb_t cb) {
+  cc->commons.dram_debug_cb = cb;
+  return;
+}
+
+inline static void cc_simple_clear_dram_debug_cb(cc_simple_t *cc) {
+  cc->commons.dram_debug_cb = NULL;
+  return;
+}
+
+inline static int cc_simple_get_default_shape(cc_simple_t *cc) { return cc->default_shape; }
+
+uint64_t cc_simple_llc_insert_recursive(
+  cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
+uint64_t cc_simple_l2_insert_recursive(
+  cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
+uint64_t cc_simple_l1_insert_recursive(
+  cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int shape, int dirty);
 
 // Simulates load and store on the cache hierarchy; These functions only perform coherence actions without
 // actually involving data and page shapes
-uint64_t cc_access(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int is_write);
-uint64_t cc_load(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
-uint64_t cc_store(cc_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t cc_simple_access(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int is_write);
+uint64_t cc_simple_load(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t cc_simple_store(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
 
-// This is the main memory call back
-uint64_t cc_main_mem_cb(cc_t *cc, uint64_t cycle, int op, ocache_entry_t *entry);
+// Used for tests
+int cc_simple_is_line_invalid(cc_simple_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+int cc_simple_is_line_dirty(cc_simple_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+int cc_simple_get_line_shape(cc_simple_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
 
-void cc_conf_print(cc_t *cc);
-void cc_stat_print(cc_t *cc, int verbose);
+// Just access the line without any side-effect besides changing the LRU. The line must exist in the cache
+void cc_simple_touch(cc_simple_t *cc, int cache, int id, uint64_t oid, uint64_t addr, int shape);
+
+void cc_simple_insert_levels(
+  cc_simple_t *cc, int begin, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec);
+inline static void cc_simple_l1_insert_levels(
+  cc_simple_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_simple_insert_levels(cc, MESI_CACHE_L1, id, oid, addr, shape, state_vec);
+}
+inline static void cc_simple_l2_insert_levels(
+  cc_simple_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_simple_insert_levels(cc, MESI_CACHE_L2, id, oid, addr, shape, state_vec);
+}
+inline static void cc_simple_llc_insert_levels(
+  cc_simple_t *cc, int id, uint64_t oid, uint64_t addr, int shape, const int *state_vec) {
+  cc_simple_insert_levels(cc, MESI_CACHE_LLC, id, oid, addr, shape, state_vec);
+}
+
+void cc_simple_print_set(cc_simple_t *cc, int cache, int id, int set_index);
+
+void cc_simple_conf_print(cc_simple_t *cc);
+void cc_simple_stat_print(cc_simple_t *cc);
 
 //* oc_t - Overlay Compression top level class
 
+struct oc_struct_t;
+
+// scache/ocache's coherence controller call back function for load and store
+typedef uint64_t (*oc_cc_cb_t)(struct oc_struct_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+// Used for oc.cc_simple_type
+#define OC_CC_SIMPLE     0
+#define OC_CC_SCACHE     1 
+#define OC_CC_OCACHE     2
+
+extern const char *oc_cc_simple_type_names[3];
+
 // Currently only support single core
-typedef struct {
+typedef struct oc_struct_t {
   dmap_t *dmap;          // Unified dmap and pmap; Has ownership; Default shape is configured by oc_t conf
   dram_t *dram;          // DRAM timing model; Has ownership
-  cc_t *cc;              // cc and cache objects
-  ocache_t *l1;
-  ocache_t *l2;
-  ocache_t *l3;
+  // One of them is used
+  union {
+    cc_simple_t *cc_simple;
+    cc_scache_t *cc_scache;
+    cc_ocache_t *cc_ocache;
+  };
+  // cc type
+  int cc_type;
+  // This points to the commons structure to both cc, such that we do not need two functions for accessing them
+  cc_common_t *cc_commons;
+  // Load and store call backs
+  oc_cc_cb_t load_cb;
+  oc_cc_cb_t store_cb;
 } oc_t;
+
+// Initializes the cc based on conf options; Also init cc_commons and load/store cbs
+void oc_init_cc(oc_t *oc, conf_t *conf);
 
 oc_t *oc_init(conf_t *conf);
 void oc_free(oc_t *oc);
 
-// The following two are top-level load and store, which wraps cc_load() and cc_store(). 
+// Wrapper functions
+
+uint64_t oc_simple_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t oc_simple_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+uint64_t oc_scache_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t oc_scache_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+uint64_t oc_ocache_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t oc_ocache_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+// The following two are top-level load and store, which wraps cc_simple_load() and cc_simple_store(). 
 // They will take care of data operations.
 
 // Convert an arbitrary range to cache aligned accesses
-void oc_gen_line_addr(oc_t *oc, uint64_t addr, int size, uint64_t *base_addr, int *line_count);
+void oc_gen_aligned_line_addr(oc_t *oc, uint64_t addr, int size, uint64_t *base_addr, int *line_count);
 
 // Writing size bytes to buf, which will be consumed by the application program
 uint64_t oc_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int size, void *buf);
@@ -876,9 +1583,18 @@ uint64_t oc_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr,
 inline static dmap_t *oc_get_dmap(oc_t *oc) { return oc->dmap; }
 inline static pmap_t *oc_get_pmap(oc_t *oc) { return oc->dmap; }
 
+void oc_append_stat_snapshot(oc_t *oc);
+void oc_save_stat_snapshot(oc_t *oc);
+
+// Remove dump files from DRAM and various cache objects
+void oc_remove_dump_files(oc_t *oc);
+
+// Prints out a given set on a given level
+void oc_print_set(oc_t *oc, int cache, int id, int set_index);
+
 // Top-level conf and stat printf
 void oc_conf_print(oc_t *oc);
-void oc_stat_print(oc_t *oc); // This will write DRAM stat dump to a file
+void oc_stat_print(oc_t *oc); // This will also write DRAM and cache stat dump to a text file
 
 //* main_addr_map_t - A hash table mapping 1D address to 2D address
 
@@ -929,7 +1645,7 @@ void main_addr_map_stat_print(main_addr_map_t *addr_map);
 
 // Initial capacity of the list
 #define MAIN_LATENCY_LIST_INIT_COUNT 128
-// Size of the data buffer
+// Size of the data buffer for store values
 #define MAIN_LATENCY_DATA_SIZE       256
 
 typedef struct {
@@ -1013,7 +1729,7 @@ typedef struct {
   // Components
   oc_t *oc;                          // Overlay compression
   main_addr_map_t *addr_map;         // Mapping from 1D address to 2D space
-  main_latency_list_t *latency_list; // Recording latency values
+  main_latency_list_t *latency_list; // Recording mem op latency; zSim only input latency to the hierarchy after BB sim
   int mem_op_index;                  // Current index into the latency list; Used during simulation; Reset to 0 per bb
   // Progress report
   uint64_t last_inst_count;
@@ -1022,9 +1738,12 @@ typedef struct {
   int progress;        // 0 - 100
   int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
+  // Return values of time(NULL)
+  uint64_t start_time;
+  uint64_t end_time;
   // Logging related
   FILE *logging_fp;
-  // zsim write buffer, used to recirect writes
+  // zsim write buffer, used to redirect writes
   // Must be aligned such that certain instructions will not incur alignment errors
   uint8_t zsim_write_buffer[MAIN_MEM_OP_MAX_SIZE * 2] __attribute__((aligned(64)));
   // Offset into the buffer
@@ -1037,7 +1756,7 @@ typedef struct {
 
 // Wraps around the conf init
 main_t *main_init(const char *conf_filename);
-main_t *main_init_from_conf(conf_t *conf);
+main_t *main_init_conf(conf_t *conf);
 void main_free(main_t *main);
 
 // Called before and after the simulation respectively
@@ -1047,12 +1766,6 @@ void main_sim_end(main_t *main);
 // Get current memory op (must be valid); Bound check is performed
 inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
   return main_latency_list_get(main->latency_list, main->mem_op_index);
-}
-
-// This will fetch it from the cc object
-inline static const char *main_get_default_shape_name(main_t *main) {
-  int shape = cc_get_default_shape(main->oc->cc);
-  return ocache_shape_names[shape];
 }
 
 // Main interface functions

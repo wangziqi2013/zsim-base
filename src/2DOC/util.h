@@ -22,8 +22,8 @@
 #endif
 
 // Error reporting and system call assertion
-#define SYSEXPECT(expr) do { if(!(expr)) { perror(__func__); exit(1); } } while(0)
-#define error_exit(fmt, ...) do { fprintf(stderr, "%s error: " fmt, __func__, ##__VA_ARGS__); exit(1); } while(0);
+#define SYSEXPECT(expr) do { if(!(expr)) { perror(__func__); assert(0); exit(1); } } while(0)
+#define error_exit(fmt, ...) do { fprintf(stderr, "%s error: " fmt, __func__, ##__VA_ARGS__); assert(0); exit(1); } while(0);
 #ifndef NDEBUG
 #define dbg_printf(fmt, ...) do { fprintf(stderr, fmt, ##__VA_ARGS__); } while(0);
 #else
@@ -219,7 +219,7 @@ typedef struct conf_node_struct_t {
 void conf_node_free(conf_node_t *node);
 
 // Configuration files are flat structured "key = value" pairs; Lines beginning 
-// with "#" are comments
+// with "#" are comments; Lines beginning with "%" are directives
 typedef struct conf_struct_t {
   int item_count;          // Number of key-value pairs
   conf_node_t *head;       // Linked list of configurations

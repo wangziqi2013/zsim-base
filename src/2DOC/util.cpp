@@ -154,6 +154,61 @@ void conf_insert_ext(conf_t *conf, const char *k, const char *v) {
   return;
 }
 
+// Handles directives starting with "%"
+// buf points to the "%" character
+// Supported directives:
+//   %include <filename> - As if the content of <filename> is copied to the current file
+void conf_init_directive(conf_t *conf, char *buf, int curr_line) {
+  assert(buf[0] == '%');
+  int len = strlen(buf);
+  // End of the directive's command, either the entire line, or till the first space
+  int cmd_end_index = len;
+  for(int i = 1;i < len;i++) {
+    if(isspace(buf[i])) {
+      cmd_end_index = i;
+      break;
+    }
+  }
+  if(cmd_end_index == 1) {
+    error_exit("Empty directive (line %d)\n", curr_line);
+  }
+  // Copy to a temp buffer; Length is "cmd_end_index - 1" and we add the terminating zero
+  char cmd[cmd_end_index];
+  memcpy(cmd, buf + 1, cmd_end_index - 1);
+  cmd[cmd_end_index - 1] = '\0';
+  if(streq(cmd, "include") == 1) {
+    int name_start_index = cmd_end_index;
+    while(name_start_index < len && isspace(buf[name_start_index])) {
+      name_start_index++;
+    }
+    if(name_start_index == len) {
+      error_exit("There is no file name for %%include directive (line %d)\n", curr_line);
+    } else if(buf[name_start_index] == '\"' || buf[name_start_index] == '\'') {
+      error_exit("%%include directive's file name does not need quotation mark (line %d)\n", curr_line);
+    }
+    int name_end_index = name_start_index;
+    while(name_end_index < len && !isspace(buf[name_end_index])) {
+      name_end_index++;
+    }
+    int filename_len = name_end_index - name_start_index;
+    char filename[filename_len + 1];
+    memcpy(filename, buf + name_start_index, filename_len);
+    filename[filename_len] = '\0';
+    // Recursively create a temp conf
+    conf_t *include_conf = conf_init(filename);
+    // Copy all kv pairs to the current conf
+    conf_node_t *curr = include_conf->head;
+    while(curr != NULL) {
+      conf_insert(conf, curr->key, curr->value, strlen(curr->key), strlen(curr->value), curr->line);
+      curr = curr->next;
+    }
+    conf_free(include_conf);
+  } else {
+    error_exit("Unknown directive: \"%s\" (line %d)\n", cmd, curr_line);
+  }
+  return;
+}
+
 conf_t *conf_init(const char *filename) {
   conf_t *conf = conf_init_empty();
   assert(conf->filename == NULL);
@@ -179,20 +234,29 @@ conf_t *conf_init(const char *filename) {
     int len = strlen(buf);
     assert(len < 1024);
     if(len > 0 && buf[len - 1] != '\n' && !feof(fp)) // Check for lines that do not end with '\n' within first 1023 bytes
-      error_exit("Line %d too long (> 1024 bytes)\n", curr_line);
+      error_exit("Line %d too long (> 1024 bytes, file \"%s\")\n", curr_line, filename);
     int empty_line = 1;               // Whether the line content is all space character
+    int first_char = -1;              // First non-space character of the line
     for(int i = 0;i < len;i++) {
       if(empty_line && buf[i] == '#') {
         break;                        // Skip the line if begins with '#'
       } else if(!isspace(buf[i])) { 
+        first_char = i;
         empty_line = 0;
         break;
       }
     }
-    if(empty_line) continue;
-    int assign_index = -1;
+    if(empty_line) {
+      continue;
+    } else if(buf[first_char] == '%') { // Check whether it is directive, which has a "%" before the line
+      conf_init_directive(conf, buf + first_char, curr_line);
+      continue;
+    }
+    int assign_index = -1; // The index of the "=" symbol
     for(int i = 0;i < len;i++) if(buf[i] == '=') assign_index = i;
-    if(assign_index == -1) error_exit("Did not find \"=\" sign on line %d\n", curr_line);
+    if(assign_index == -1) {
+      error_exit("Did not find \"=\" sign on line %d (file \"%s\")\n", curr_line, filename);
+    }
     int key_begin = 0, key_end = assign_index - 1;
     int value_begin = assign_index + 1, value_end = len - 1;
     assert(key_begin <= key_end);
@@ -201,12 +265,16 @@ conf_t *conf_init(const char *filename) {
       if(isspace(buf[key_begin])) key_begin++;
       if(isspace(buf[key_end])) key_end--;
     }
-    if(key_begin == key_end && isspace(buf[key_begin])) 
-      error_exit("Empty key on line %d\n", curr_line);
+    if(key_begin == key_end && isspace(buf[key_begin])) {
+      error_exit("Empty key on line %d (file \"%s\")\n", curr_line, filename);
+    }
+    assert(key_begin == first_char);
     // Special processing: Remove everything in the value after '#'
     for(int i = value_begin;i < value_end;i++) {
       if(buf[i] == '#') {
-        if(i == value_begin) error_exit("Comment must not occur after \'=\'\n");
+        if(i == value_begin) {
+          error_exit("Comment must not occur after \'=\' (line %d file \"%s\")\n", curr_line, filename);
+        }
         value_end = i - 1;
         // Enable the following to print the string between value begin and end
         /*char t = buf[value_end + 1]; 
@@ -221,10 +289,11 @@ conf_t *conf_init(const char *filename) {
       if(isspace(buf[value_end])) value_end--;
     }
     if(value_begin == value_end && isspace(buf[value_begin])) { // Crossed and the current value is space
-      error_exit("Empty value on line %d\n", curr_line);
+      error_exit("Empty value on line %d file \"%s\"\n", curr_line, filename);
     } else if(buf[value_begin] == '\"' || buf[value_begin] == '\'' || 
               buf[value_end] == '\"' || buf[value_end] == '\'') {
-      error_exit("Value should not start or end with \"\'\" or \"\"\" (line %d)\n", curr_line);
+      error_exit("Value should not start or end with \"\'\" or \"\"\" (line %d file \"%s\")\n", 
+        curr_line, filename);
     }
     
     int key_len = key_end - key_begin + 1;
