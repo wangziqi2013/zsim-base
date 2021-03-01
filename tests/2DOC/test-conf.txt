@@ -1,23 +1,10 @@
-l1.size = 32768
-l1.way_count = 8
-l1.latency = 4
 
-l2.size = 262144
-l2.way_count = 8
-l2.latency = 8
+oc.cc_type = simple
 
-# 1MB
-l3.size = 1048576
-# 4MB
-#l3.size = 4194304 
-l3.way_count = 16
-l3.latency = 30
+%include /home/ziqiw/data_disk_2/zsim-2DOC/tests/2DOC/cc_simple_conf.txt
 
-cpu.core_count = 1
-
-l3.compressed = 1
-
-cc.default_shape = None
+#%include cc_simple_scache.txt
+#%include cc_simple_ocache.txt
 
 dram.bank_count = 65536
 dram.read_latency = 300
