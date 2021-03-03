@@ -19,3 +19,5 @@ cc.simple.llc.algorithm = BDI
 cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
+
+main.result_suffix = BDI_1_4

@@ -19,3 +19,5 @@ cc.simple.llc.algorithm = None
 cc.simple.core_count = 1
 
 cc.simple.default_shape = None
+
+main.result_suffix = uncomp

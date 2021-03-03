@@ -22,4 +22,6 @@ cc.scache.core_count = 1
 
 cc.scache.llc.ratio = 2
 
-cc.scache.llc.algorithm = BDI
+cc.scache.llc.algorithm = FPC
+
+main.result_suffix = scache_FPC

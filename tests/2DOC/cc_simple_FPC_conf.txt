@@ -19,3 +19,5 @@ cc.simple.llc.algorithm = FPC
 cc.simple.core_count = 1
 
 cc.simple.default_shape = None
+
+main.result_suffix = simple_FPC
