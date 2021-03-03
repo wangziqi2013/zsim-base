@@ -197,7 +197,7 @@ march = "core2" # ensure compatibility across condor nodes
 
 buildFlags = {"debug": "-g -O0",
               "opt": "-march=%s -g -O3 -funroll-loops" % march, # unroll loops tends to help in zsim, but in general it can cause slowdown
-              "release": "-march=%s -O3 -DNASSERT -funroll-loops -fweb" % march} # fweb saves ~4% exec time, but makes debugging a world of pain, so careful
+              "release": "-march=%s -O3 -DNASSERT -DNDEBUG -funroll-loops -fweb" % march} # fweb saves ~4% exec time, but makes debugging a world of pain, so careful
 
 pgoPhase = GetOption('pgoPhase')
 
