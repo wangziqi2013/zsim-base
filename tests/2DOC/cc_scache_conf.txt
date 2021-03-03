@@ -1,6 +1,8 @@
 
 # SCACHE CONF
 
+oc.cc_type = scache
+
 cc.scache.l1.size = 32768
 cc.scache.l1.way_count = 8
 cc.scache.l1.latency = 4
