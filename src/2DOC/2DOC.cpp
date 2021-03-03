@@ -1091,8 +1091,6 @@ ocache_t *ocache_init(int size, int way_count) {
   ocache->level = OCACHE_LEVEL_NONE;
   // LRU entry has this zero, so normal entry should always have one
   ocache->lru_counter = 1UL;
-  // By default, use BDI as compression function
-  ocache_set_get_compressed_size_cb(ocache, ocache_insert_helper_get_compressed_size_BDI);
   return ocache;
 }
 
@@ -1195,9 +1193,11 @@ void ocache_set_dmap(ocache_t *ocache, dmap_t *dmap) {
 // Valid values are: "BDI", "None"
 void ocache_set_compression_type(ocache_t *ocache, const char *name) {
   if(streq(name, "BDI") == 1) {
-    ocache_set_get_compressed_size_cb(ocache, ocache_insert_helper_get_compressed_size_BDI);
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_cb);
+  } else if(streq(name, "FPC") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_cb);
   } else if(streq(name, "None") == 1) {
-    ocache_set_get_compressed_size_cb(ocache, ocache_insert_helper_get_compressed_size_none);
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
   } else {
     error_exit("Unknown ocache compression type: \"%s\"\n", name);
   }
@@ -1579,9 +1579,33 @@ static void ocache_insert_helper_uncompressed(
 }
 
 // None compression type, always stores uncompressed data
-int ocache_insert_helper_get_compressed_size_none(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
   (void)ocache; (void)oid; (void)addr; (void)shape;
   return (int)UTIL_CACHE_LINE_SIZE;
+}
+
+int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  assert(ocache->dmap != NULL); (void)shape;
+  ocache->comp_attempt_count++;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *entry = dmap_find(ocache->dmap, oid, addr);
+  if(entry == NULL) {
+    error_exit("Entry for FPC compression is not found\n");
+  }
+  int FPC_bits = FPC_get_comp_size_bits(entry->data);
+  if(FPC_bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    ocache->FPC_fail_count++;
+    ocache->FPC_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int FPC_bytes = (FPC_bits + 7) / 8;
+  ocache->FPC_success_count++;
+  ocache->FPC_before_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->FPC_after_size_sum += FPC_bytes;
+  assert(FPC_bytes > 0 && FPC_bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  ocache->FPC_size_counts[(FPC_bytes - 1) / 8]++;
+  return FPC_bytes;
 }
 
 // This function implements vertical compression policy
@@ -1594,11 +1618,11 @@ int ocache_insert_helper_get_compressed_size_none(ocache_t *ocache, uint64_t oid
 // This function updates five statistics counters
 // This function is the default compression algorithm for ocache (do not need to be set explicitly), but it can
 // be replaced by calling ocache_set_get_compressed_size_cb()
-int ocache_insert_helper_get_compressed_size_BDI(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
   assert(ocache->dmap != NULL);
   // Total number of insertions
   ocache->comp_attempt_count++;
-  ocache->attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
   uint8_t in_buf[UTIL_CACHE_LINE_SIZE];
   // The data must already exist in data map
   int all_zero;
@@ -1882,18 +1906,18 @@ void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr,
   // ---------------------------------------------------------------------------
   int state = lookup_result.state;
   assert(state == OCACHE_MISS || state == OCACHE_HIT_COMPRESSED);
-  // This functions returns the size of the line after all kinds of compression
-  int bdi_size = ocache->get_compressed_size_cb(ocache, oid, addr, shape);
+  // This functions returns the size of the line after compression
+  int comp_size = ocache->get_compressed_size_cb(ocache, oid, addr, shape);
   if(state == OCACHE_MISS) {
     if(lookup_result.cand_count == 0) {
       // Case 1.1.2: Compressed line miss, no candidate, evict an existing entry and make a super block
       ocache_insert_helper_compressed_miss_no_candid(
-        ocache, oid, addr, shape, dirty, bdi_size, insert_result, &lookup_result
+        ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
       );
     } else {
       // Case 1.2: Compressed line miss, with candidate, try other super blocks
       ocache_insert_helper_compressed_miss_with_candid(
-        ocache, oid, addr, shape, dirty, bdi_size, insert_result, &lookup_result
+        ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
       );
     }
     return;
@@ -1901,7 +1925,7 @@ void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr,
   assert(state == OCACHE_HIT_COMPRESSED);
   // Case 3: Compressed line hit
   ocache_insert_helper_compressed_hit(
-    ocache, oid, addr, shape, dirty, bdi_size, insert_result, &lookup_result
+    ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
   );
   // Re-adjust lines in the SB entries
   ocache_after_insert_adjust(ocache, insert_result, &lookup_result);
@@ -2357,6 +2381,16 @@ void ocache_conf_print(ocache_t *ocache) {
       ocache_shape_names[i], ocache->indices[i].addr_mask, ocache->indices[i].addr_shift,
       ocache->indices[i].oid_mask, ocache->indices[i].oid_shift);
   }
+  printf("Algorithm: ");
+  if(ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_cb) {
+    printf("BDI\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_FPC_cb) {
+    printf("FPC\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
+    printf("None\n");
+  } else {
+    printf("Unknown (debugging?)\n");
+  }
   printf("-----------------------------------\n");
   return;
 }
@@ -2365,13 +2399,15 @@ void ocache_conf_print(ocache_t *ocache) {
 void ocache_stat_print(ocache_t *ocache) {
   printf("---------- ocache_t stat ----------\n");
   // Vertical compression stats, only printed for LLC
-  if(ocache->use_shape == 1) {
-    printf("Total attempted %lu BDI success %lu (failed %lu) not base %lu base found %lu"
-           " type match %lu vertical success %lu\n",
-      ocache->comp_attempt_count, ocache->BDI_success_count, 
-      ocache->BDI_failed_count,
+  if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb) {
+    printf("Total attempted %lu BDI success %lu (failed %lu, rate %.2lf%%) not base %lu base found %lu"
+           " type match %lu vertical success %lu (rate from BDI %.2lf%%, overall %.2lf%%)\n",
+      ocache->comp_attempt_count, ocache->BDI_success_count, ocache->BDI_failed_count,
+      100.0 * ocache->BDI_success_count / (double)ocache->comp_attempt_count,
       ocache->vertical_not_base_count, ocache->vertical_base_found_count,
-      ocache->vertical_same_type_count, ocache->vertical_success_count);
+      ocache->vertical_same_type_count, ocache->vertical_success_count,
+      100.0 * ocache->vertical_success_count / (double)ocache->BDI_success_count,
+      100.0 * ocache->vertical_success_count / (double)ocache->comp_attempt_count);
     printf("Vertical success only before size %lu after %lu (ratio %.2f%%, %.2fx)\n",
       ocache->vertical_before_size_sum, ocache->vertical_after_size_sum,
       100.0 * ocache->vertical_after_size_sum / (double)ocache->vertical_before_size_sum,
@@ -2382,11 +2418,11 @@ void ocache_stat_print(ocache_t *ocache) {
       (double)ocache->BDI_before_size_sum / (double)ocache->BDI_after_size_sum);
     printf("BDI overall success rate %.2f%% before size %lu after %lu (ratio %.2f%%, %.2fx)\n",
       (100.0 * ocache->BDI_success_count) / (double)ocache->comp_attempt_count,
-      ocache->attempt_size_sum, 
+      ocache->comp_attempt_size_sum, 
       ocache->BDI_after_size_sum + ocache->BDI_uncomp_size_sum,
       100.0 * (ocache->BDI_after_size_sum + ocache->BDI_uncomp_size_sum) / 
-        (double)ocache->attempt_size_sum, 
-      (double)ocache->attempt_size_sum / 
+        (double)ocache->comp_attempt_size_sum, 
+      (double)ocache->comp_attempt_size_sum / 
         (double)(ocache->BDI_after_size_sum + ocache->BDI_uncomp_size_sum));
     printf("Vertical overall success rate %.2f%% before size %lu after %lu (ratio %.2f%%, %.2fx) \n",
       (100.0 * ocache->vertical_success_count) / (double)ocache->BDI_success_count,
@@ -2398,11 +2434,11 @@ void ocache_stat_print(ocache_t *ocache) {
         (double)(ocache->vertical_uncomp_size_sum + ocache->vertical_after_size_sum));
     printf("Overall success rate %.2f%% before size %lu after size %lu (ratio %.2f%%, %.2fx)\n",
       100.0 * (ocache->vertical_success_count) / (double)ocache->comp_attempt_count,
-      ocache->attempt_size_sum,
+      ocache->comp_attempt_size_sum,
       ocache->BDI_uncomp_size_sum + ocache->vertical_uncomp_size_sum + ocache->vertical_after_size_sum,
       100.0 * (ocache->BDI_uncomp_size_sum + ocache->vertical_uncomp_size_sum + ocache->vertical_after_size_sum) / 
-        (double)ocache->attempt_size_sum, 
-      (double)ocache->attempt_size_sum / 
+        (double)ocache->comp_attempt_size_sum, 
+      (double)ocache->comp_attempt_size_sum / 
         (double)(ocache->BDI_uncomp_size_sum + ocache->vertical_uncomp_size_sum + ocache->vertical_after_size_sum));
     //printf("BDI types [8_4] %lu [8_2] %lu [8_1] %lu [4_2] %lu [4_1] %lu [2_1] %lu [ZERO] %lu\n",
     //  ocache->BDI_8_4_count, ocache->BDI_8_2_count, ocache->BDI_8_1_count, 
@@ -2417,14 +2453,40 @@ void ocache_stat_print(ocache_t *ocache) {
     // These two constitute all cases
     assert(ocache->BDI_success_count + ocache->BDI_failed_count == ocache->comp_attempt_count);
     assert(ocache->vertical_success_count + ocache->vertical_uncomp_count == ocache->BDI_success_count);
+  } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_FPC_cb) {
+    printf("FPC attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      ocache->comp_attempt_count, ocache->FPC_success_count, ocache->FPC_fail_count,
+      100.0 * ocache->FPC_success_count / (double)ocache->comp_attempt_count);
+    printf("FPC success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->FPC_before_size_sum, ocache->FPC_after_size_sum,
+      100.0 * ocache->FPC_after_size_sum / (double)ocache->FPC_before_size_sum,
+      (double)ocache->FPC_before_size_sum / (double)ocache->FPC_after_size_sum);
+    printf("FPC overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->comp_attempt_size_sum, ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum,
+      100.0 * (ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum) / (double)ocache->comp_attempt_size_sum,
+      (double)ocache->comp_attempt_size_sum / (double)(ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum));
+    printf("Size classes ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->FPC_size_counts[i]);
+    }
+    putchar('\n');
+  } else {
+    printf("Unknown compression method (debugging?)\n");
   }
-  // General stats refershed by ocache_refresh_stat()
+  // General stats refershed by ocache_refresh_stat(). Note that these are unrelated to BDI, and are still valid
+  // for FPC-based compression
   ocache_refresh_stat(ocache);
-  printf("Logical lines %lu sb %lu sb logical lines %lu (avg. %.4lf lines per sb)\n"
+  printf("Logical lines %lu sb %lu sb logical lines %lu (avg. %.4lf lines per sb) sb line size %lu\n"
          "[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
     ocache->logical_line_count, ocache->sb_slot_count, ocache->sb_logical_line_count,
     (double)ocache->sb_logical_line_count / (double)ocache->sb_slot_count,
+    ocache->sb_logical_line_size_sum,
     ocache->sb_4_1_count, ocache->sb_1_4_count, ocache->sb_2_2_count, ocache->no_shape_line_count);
+  printf("Size histogram: ");
+  for(int i = 0;i < 8;i++) {
+    printf("[%d-%d] %lu ", i * 8 + 1, (i + 1) * 8, ocache->size_histogram[i]);
+  }
+  putchar('\n');
   printf("-----------------------------------\n");
   return;
 }
@@ -2826,6 +2888,7 @@ void scache_refresh_stat(scache_t *scache) {
   scache->logical_line_count = 0UL;
   scache->uncomp_logical_line_count = 0UL;
   scache->comp_line_size = 0UL;
+  scache->aligned_comp_line_size = 0UL;
   scache_entry_t *entry = scache->data;
   //printf("Line count %d\n", scache->line_count);
   for(int i = 0;i < scache->line_count;i++) {
@@ -2839,6 +2902,7 @@ void scache_refresh_stat(scache_t *scache) {
       scache->uncomp_logical_line_count++;                 // Uncompressed logical line
     } else {
       scache->comp_line_size += (uint64_t)entry->size;     // Aggregate compressed line count
+      scache->aligned_comp_line_size += (uint64_t)scache_align_size(scache, entry->size);
     }
     entry++;
   }
@@ -2846,7 +2910,7 @@ void scache_refresh_stat(scache_t *scache) {
 }
 
 // This function saves:
-//   logical_line_count, uncomp_logical_line_count, comp_line_size
+//   logical_line_count, uncomp_logical_line_count, comp_line_size, aligned_comp_line_size
 void scache_append_stat_snapshot(scache_t *scache) {
   scache_stat_snapshot_t *snapshot = scache_stat_snapshot_init();
   snapshot->next = NULL;
@@ -2864,6 +2928,7 @@ void scache_append_stat_snapshot(scache_t *scache) {
   snapshot->logical_line_count = scache->logical_line_count;
   snapshot->uncomp_logical_line_count = scache->uncomp_logical_line_count;
   snapshot->comp_line_size = scache->comp_line_size;
+  snapshot->aligned_comp_line_size = scache->aligned_comp_line_size;
   return;
 }
 
@@ -2874,12 +2939,13 @@ void scache_append_stat_snapshot(scache_t *scache) {
 void scache_save_stat_snapshot(scache_t *scache, const char *name) {
   FILE *fp = fopen(name, "w");
   SYSEXPECT(fp != NULL);
-  fprintf(fp, "logical_line_count, uncomp_logical_line_count, comp_line_size, "
+  fprintf(fp, "logical_line_count, uncomp_logical_line_count, comp_line_size, aligned_comp_line_size, "
               "comp_logical_line_count, uncomp_line_size\n");
   scache_stat_snapshot_t *snapshot = scache->stat_snapshot_head;
   while(snapshot != NULL) {
-    fprintf(fp, "%lu, %lu, %lu, %lu, %lu\n",
+    fprintf(fp, "%lu, %lu, %lu, %lu, %lu, %lu\n",
       snapshot->logical_line_count, snapshot->uncomp_logical_line_count, snapshot->comp_line_size,
+      snapshot->aligned_comp_line_size,
       snapshot->logical_line_count - snapshot->uncomp_logical_line_count,
       UTIL_CACHE_LINE_SIZE * snapshot->uncomp_logical_line_count);
     snapshot = snapshot->next;
@@ -2953,8 +3019,9 @@ void scache_stat_print(scache_t *scache) {
       100.0 * (scache->BDI_uncomp_size + scache->BDI_after_size) / (double)scache->BDI_attempt_size,
       (double)scache->BDI_attempt_size / (double)(scache->BDI_uncomp_size + scache->BDI_after_size));
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_FPC_cb) { 
-    printf("FPC attempt %lu success %lu fail %lu\n",
-      scache->FPC_attempt_count, scache->FPC_success_count, scache->FPC_fail_count);
+    printf("FPC attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      scache->FPC_attempt_count, scache->FPC_success_count, scache->FPC_fail_count,
+      100.0 * scache->FPC_success_count / (double)scache->FPC_attempt_count);
     printf("FPC success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
       scache->FPC_before_size, scache->FPC_after_size,
       100.0 * scache->FPC_after_size / (double)scache->FPC_before_size,
@@ -3237,9 +3304,9 @@ void cc_common_print_stats(cc_common_t *commons) {
       100.0 * (double)total_counts[CC_STAT_STORE_HIT] / (double)total_counts[CC_STAT_STORE],
       100.0 * (double)total_counts[CC_STAT_STORE_MISS] / (double)total_counts[CC_STAT_STORE],
       100.0 * (double)(total_counts[CC_STAT_LOAD_HIT] + total_counts[CC_STAT_STORE_HIT]) / 
-      100.0 * (double)(total_counts[CC_STAT_LOAD] + total_counts[CC_STAT_STORE]),
+        (double)(total_counts[CC_STAT_LOAD] + total_counts[CC_STAT_STORE]),
       100.0 * (double)(total_counts[CC_STAT_LOAD_MISS] + total_counts[CC_STAT_STORE_MISS]) / 
-      100.0 * (double)(total_counts[CC_STAT_LOAD] + total_counts[CC_STAT_STORE]));
+        (double)(total_counts[CC_STAT_LOAD] + total_counts[CC_STAT_STORE]));
     for(int i = 0;i < (int)strlen(MESI_cache_names[cache]);i++) putchar(' ');
     printf(" | ");
     printf("Load cycle %.2lf store cycle %.2lf\n",
@@ -3962,7 +4029,7 @@ void cc_ocache_init_cores(cc_ocache_t *cc, int core_count) {
   return;
 }
 
-void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency) {
+void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency, const char *algorithm) {
   cc->shared_llc = ocache_init(size, physical_way_count);
   assert(cc->cores != NULL);
   for(int i = 0;i < cc->commons.core_count;i++) {
@@ -3971,8 +4038,8 @@ void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int l
   cc->commons.llc_latency = latency;
   cc->commons.llc_size = size;
   cc->commons.llc_physical_way_count = physical_way_count;
-  // Initialize ocache compression for LLC; Note that dmap has not been set yet
-  ocache_set_compression_type(cc->shared_llc, "BDI");
+  // This may report error
+  ocache_set_compression_type(cc->shared_llc, algorithm);
   ocache_set_level(cc->shared_llc, MESI_CACHE_LLC);
   ocache_set_name(cc->shared_llc, "Shared LLC");
   return;
@@ -4034,7 +4101,8 @@ cc_ocache_t *cc_ocache_init_conf(conf_t *conf) {
     conf_find_int32_range(conf, "cc.ocache.llc.physical_way_count", 1, CONF_INT32_MAX, CONF_RANGE);
   int llc_latency = \
     conf_find_int32_range(conf, "cc.ocache.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
-  cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_latency);
+  const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.ocache.llc.algorithm");
+  cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_latency, llc_algorithm);
   // Default shape
   const char *default_shape = conf_find_str_mandatory(conf, "cc.ocache.default_shape");
   assert(default_shape != NULL);
@@ -4719,11 +4787,15 @@ cc_simple_t *cc_simple_init_conf(conf_t *conf) {
     conf_find_int32_range(conf, "cc.simple.llc.physical_way_count", 1, CONF_INT32_MAX, CONF_RANGE);
   int llc_latency = \
     conf_find_int32_range(conf, "cc.simple.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
+  const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.simple.llc.algorithm");
   cc->commons.llc_latency = llc_latency;
   cc->commons.llc_size = llc_size;
   cc->commons.llc_physical_way_count = llc_physical_way_count;
   cc->cores[0].llc = ocache_init(llc_size, llc_physical_way_count);
   cc->shared_llc = cc->cores[0].llc;
+  ocache_set_level(cc->shared_llc, MESI_CACHE_LLC);
+  ocache_set_name(cc->shared_llc, "Shared LLC (cc_simple)");
+  ocache_set_compression_type(cc->shared_llc, llc_algorithm);
   // Default shape
   const char *default_shape = conf_find_str_mandatory(conf, "cc.simple.default_shape");
   assert(default_shape != NULL);
@@ -5299,30 +5371,40 @@ void oc_append_stat_snapshot(oc_t *oc) {
 }
 
 // Note that this function does not take file name since the name is generated within
-void oc_save_stat_snapshot(oc_t *oc) {
+// This function takes a prefix which will be prepended to the generated file name. The prefix can be
+// a folder or fire name. If NULL then ignored
+void oc_save_stat_snapshot(oc_t *oc, char *prefix) {
   // Generate a file name for dumping
-  char filename[256];
+  char filename[1024];
   memset(filename, 0x00, sizeof(filename));
+  if(prefix != NULL) {
+    strcpy(filename, prefix);
+  }
+  int prefix_len = strlen(prefix);
   switch(oc->cc_type) {
     case OC_CC_SIMPLE:
-      snprintf(filename, sizeof(filename), "cc-simple-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
+        "cc-simple-snapshot-%lu.csv", (uint64_t)time(NULL));
       printf("Saving cc_simple stats to file \"%s\"\n", filename);
       ocache_save_stat_snapshot(oc->cc_simple->shared_llc, filename);
       break;
     case OC_CC_SCACHE:
-      snprintf(filename, sizeof(filename), "cc-scache-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
+        "cc-scache-snapshot-%lu.csv", (uint64_t)time(NULL));
       printf("Saving cc_scache stats to file \"%s\"\n", filename);
       scache_save_stat_snapshot(oc->cc_scache->shared_llc, filename);
       break;
     case OC_CC_OCACHE: 
-      snprintf(filename, sizeof(filename), "cc-ocache-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
+        "cc-ocache-snapshot-%lu.csv", (uint64_t)time(NULL));
       printf("Saving cc_ocache stats to file \"%s\"\n", filename);
       ocache_save_stat_snapshot(oc->cc_ocache->shared_llc, filename);
       break;
     default: assert(0); break;
   }
   // Save DRAM snapshot
-  snprintf(filename, sizeof(filename), "dram-snapshot-%lu.csv", (uint64_t)time(NULL));
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
+    "dram-snapshot-%lu.csv", (uint64_t)time(NULL));
   printf("Saving DRAM stats to file \"%s\"\n", filename);
   dram_save_stat_snapshot(oc->dram, filename);
   return;
@@ -5702,11 +5784,16 @@ main_t *main_init(const char *conf_filename) {
   main->conf_filename = (char *)malloc(len + 1);
   SYSEXPECT(main->conf_filename != NULL);
   strcpy(main->conf_filename, conf_filename);
+  main->cwd = main_get_cwd(main);
+  // Must be the last one to call
+  main_sim_begin(main);
   return main;
 }
 
 void main_free(main_t *main) {
   // Free components
+  free(main->cwd);
+  free(main->result_dir);
   main_latency_list_free(main->latency_list);
   main_addr_map_free(main->addr_map);
   oc_free(main->oc);
@@ -5729,6 +5816,7 @@ void main_sim_begin(main_t *main) {
   // Print conf first
   main_conf_print(main);
   printf("\n\n========== simulation begin ==========\n");
+  main->begin_time = time(NULL);
   main->finished = 0;
   main->progress = 0;
   if(main->param->start_inst_count == 0UL) {
@@ -5746,41 +5834,37 @@ void main_sim_begin(main_t *main) {
   } else {
     main->logging_fp = NULL;
   }
+  // Create directory for the result files
+  main->result_dir = (char *)malloc(MAIN_RESULT_DIR_SIZE);
+  SYSEXPECT(main->result_dir);
+  snprintf(main->result_dir, MAIN_RESULT_DIR_SIZE, "result_%lu", main->begin_time);
+  struct stat st;
+  if(stat(main->result_dir, &st) == -1) {
+    int ret = mkdir(main->result_dir, 0700);
+    SYSEXPECT(ret == 0);
+  }
   return;
 }
 
+// This can be called when report progress function finds out that the simulation has come to an end
+// This function does not return
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
-  uint64_t sim_inst_count = main->last_inst_count - main->param->start_inst_count;
-  uint64_t sim_cycle_count = main->last_cycle_count - main->start_cycle_count;
-  printf("Completed simulation with %lu instructions and %lu cycles (conf max %lu start %lu)\n", 
-      sim_inst_count, sim_cycle_count, 
-      main->param->max_inst_count, main->param->start_inst_count);
-  printf("  IPC = %lf\n", (double)sim_inst_count / (double)sim_cycle_count);
+  main->end_time = time(NULL);
   main_stat_print(main);
   // Close logging file pointer
   if(main->logging_fp != NULL) {
     fclose(main->logging_fp);
   }
   // Save stat snapshots to text files
-  oc_save_stat_snapshot(main->oc);
+  char save_prefix[1024];
+  strcpy(save_prefix, main->result_dir);
+  strcat(save_prefix, "/");
+  oc_save_stat_snapshot(main->oc, save_prefix);
+  main_save_conf_stat(main, save_prefix);
   // Just terminate here
   exit(0);
   return;
-}
-
-// Return an address to redirect zsim writes, which can then be logged
-// NOT USED FOR NOW
-void *main_write_redirect(main_t *main, uint64_t addr, int size) {
-  int offset = addr % UTIL_CACHE_LINE_SIZE;
-  void *data = main->zsim_write_buffer + offset;
-  if(offset + size > (int)sizeof(main->zsim_write_buffer)) {
-    error_exit("Memory write addr %lX size %d too large for buffer (offset %d size %lu)\n",
-      addr, size, offset, sizeof(main->zsim_write_buffer));
-  }
-  main->zsim_write_offset = offset;
-  main->zsim_write_size = size;
-  return data;
 }
 
 // Append log object and data to the opened log file
@@ -5945,6 +6029,15 @@ void main_add_info(main_t *main, const char *key, const char *value) {
   return;
 }
 
+// The return value is malloc'ed from the heap and should be free'd manually
+char *main_get_cwd(main_t *main) {
+  // buf is NULL and size is zero, meaning this call will allocate a large buffer
+  char *ret = getcwd(NULL, 0);
+  SYSEXPECT(ret != NULL);
+  (void)main;
+  return ret;
+}
+
 // addr and size need not be aligned, but inserted info is always page (4KB) aligned
 // The address should be 2D address, not 1D flat address
 void main_update_shape(main_t *main, uint64_t addr, int size, int shape) {
@@ -5977,11 +6070,45 @@ void main_zsim_debug_print_all(main_t *main) {
   return;
 }
 
+void main_save_conf_stat(main_t *main, char *prefix) {
+  char filename[1024];
+  memset(filename, 0x00, sizeof(filename));
+  if(prefix != NULL) {
+    strcpy(filename, prefix);
+  }
+  int prefix_len = strlen(prefix);
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "conf-%lu.txt", main->begin_time);
+  int saved_stdout = dup(STDOUT_FILENO);
+  // Create the file, and truncate it if already exists
+  int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  SYSEXPECT(fd != -1);
+  dup2(fd, STDOUT_FILENO); // Check `man stdin` for more info
+  main_conf_print(main);
+  int close_ret = close(fd);
+  SYSEXPECT(close_ret == 0);
+  // This will close fd since the last ref has been closed
+  dup2(saved_stdout, STDOUT_FILENO);
+  //
+  // Then do the same with stat
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "stat-%lu.txt", main->begin_time);
+  saved_stdout = dup(STDOUT_FILENO);
+  fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  SYSEXPECT(fd != -1);
+  dup2(fd, STDOUT_FILENO);
+  main_stat_print(main);
+  close_ret = close(fd);
+  SYSEXPECT(close_ret == 0);
+  // This will close fd since the last ref has been closed
+  dup2(saved_stdout, STDOUT_FILENO);
+  return;
+}
+
 void main_conf_print(main_t *main) {
   main_param_conf_print(main->param);
   printf("---------- main_t conf ----------\n");
   // Read from conf file
   main_param_conf_print(main->param);
+  printf("CWD: \"%s\"\n", main->cwd); // Current working directory
   printf("conf file name \"%s\"\n", main->conf_filename);
   printf("oc:\n");
   oc_conf_print(main->oc);
@@ -5994,15 +6121,12 @@ void main_conf_print(main_t *main) {
 
 void main_stat_print(main_t *main) {
   printf("---------- main_t stat ----------\n");
-  /*
-  // Print this in case sin_end is not reported
-  printf("Last reported inst %lu cycle %lu (start inst %lu cycle %lu)\n", 
-    main->last_inst_count, main->last_cycle_count,
-    main->param->start_inst_count, main->start_cycle_count);
-  printf("  IPC = %lf\n", 
-    (double)(main->last_inst_count - main->param->start_inst_count) / 
-    (double)(main->last_cycle_count - main->start_cycle_count));
-  */
+  uint64_t sim_inst_count = main->last_inst_count - main->param->start_inst_count;
+  uint64_t sim_cycle_count = main->last_cycle_count - main->start_cycle_count;
+  printf("Completed simulation with %lu instructions and %lu cycles (conf max %lu start %lu)\n", 
+      sim_inst_count, sim_cycle_count, 
+      main->param->max_inst_count, main->param->start_inst_count);
+  printf("  IPC = %lf\n", (double)sim_inst_count / (double)sim_cycle_count);
   if(main->finished == 0) {
     main->finished = 1;
     // Print stat on IPC

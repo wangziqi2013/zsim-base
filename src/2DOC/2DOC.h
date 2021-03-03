@@ -630,8 +630,9 @@ typedef struct ocache_struct_t {
   // Statistics
   uint8_t stat_begin[0];             // Makes the begin address of stat region
   // General stat
+  uint64_t comp_attempt_count;       // Number of compression attempts
+  uint64_t comp_attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
   // Vertical compression & BDI stats
-  uint64_t comp_attempt_count;
   uint64_t vertical_in_compressed_count; // This is equivalent to BDI_success_count
   uint64_t vertical_not_base_count;
   uint64_t vertical_base_found_count;
@@ -646,8 +647,7 @@ typedef struct ocache_struct_t {
   uint64_t BDI_before_size_sum;
   uint64_t BDI_after_size_sum;
   uint64_t all_zero_count;           // Whether the line is all-zero
-  // Size and counts at each stage
-  uint64_t attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
+  // Size and counts at each BDI and vertical stage
   uint64_t BDI_uncomp_size_sum;      // BDI uncompressable lines (corresponds to BDI_failed_count)
   uint64_t vertical_uncomp_size_sum; // BDI compressable but vertical uncompressable lines
   uint64_t vertical_uncomp_count;    // Number of lines not compressable to vertical
@@ -665,6 +665,13 @@ typedef struct ocache_struct_t {
     // Indexed using run-time type
     uint64_t BDI_compress_type_counts[8];
   };
+  // FPC-specific stats
+  uint64_t FPC_success_count;        // Number of requests that are smaller after FPC
+  uint64_t FPC_fail_count;           // Number of requests that failed FPC
+  uint64_t FPC_uncomp_size_sum;      // Size sum of lines that failed FPC
+  uint64_t FPC_before_size_sum;      // Size sum before compression, only for successful lines
+  uint64_t FPC_after_size_sum;       // Size sum after compression, only for successful lines
+  uint64_t FPC_size_counts[8];       // Size distribution of FPC
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -745,8 +752,9 @@ inline static void ocache_lookup_probe(
 }
 
 // Get compressed size call backs
-int ocache_insert_helper_get_compressed_size_BDI(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
-int ocache_insert_helper_get_compressed_size_none(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 
 void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
                    int shape, int dirty, ocache_op_result_t *insert_result);
@@ -885,6 +893,7 @@ typedef struct scache_stat_snapshot_struct_t {
   uint64_t logical_line_count;
   uint64_t uncomp_logical_line_count;
   uint64_t comp_line_size;
+  uint64_t aligned_comp_line_size;
   struct scache_stat_snapshot_struct_t *next;
 } scache_stat_snapshot_t;
 
@@ -939,7 +948,8 @@ typedef struct scache_struct_t {
   // Statistics after tag walk - comp line size and uncomp line count can be derived from these three
   uint64_t logical_line_count;        // Number of valid logical lines
   uint64_t uncomp_logical_line_count; // Number of uncompressed logical lines
-  uint64_t comp_line_size;            // Compressed line size sum
+  uint64_t comp_line_size;            // Compressed line size sum, unaligned (value stored in scache_entry_t)
+  uint64_t aligned_comp_line_size;    // Aligned compressed line size sum
   uint8_t stat_end[0];
   // Snapshot linked list head and tail
   scache_stat_snapshot_t *stat_snapshot_head;
@@ -1346,7 +1356,7 @@ typedef struct {
 
 // All having the exact semantics as cc_scache_ counterparts
 void cc_ocache_init_cores(cc_scache_t *cc, int core_count);
-void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency); 
+void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency, const char *algorithm);
 void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, int latency);
 cc_ocache_t *cc_ocache_init_conf(conf_t *conf); 
 cc_ocache_t *cc_ocache_init();
@@ -1584,7 +1594,7 @@ inline static dmap_t *oc_get_dmap(oc_t *oc) { return oc->dmap; }
 inline static pmap_t *oc_get_pmap(oc_t *oc) { return oc->dmap; }
 
 void oc_append_stat_snapshot(oc_t *oc);
-void oc_save_stat_snapshot(oc_t *oc);
+void oc_save_stat_snapshot(oc_t *oc, char *prefix);
 
 // Remove dump files from DRAM and various cache objects
 void oc_remove_dump_files(oc_t *oc);
@@ -1683,6 +1693,7 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 
 // Maximum number of bytes of a memory operation
 #define MAIN_MEM_OP_MAX_SIZE     256
+#define MAIN_RESULT_DIR_SIZE     256
 
 // Memory operation
 #define MAIN_READ             0
@@ -1738,8 +1749,10 @@ typedef struct {
   int progress;        // 0 - 100
   int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
-  // Return values of time(NULL)
-  uint64_t start_time;
+  char *cwd;           // Current working directory; has ownership
+  char *result_dir;    // Stores result directory name, relative path (only the dir name), has ownership
+  // Return values of time(NULL), filled on sim_begin and sim_end respectively
+  uint64_t begin_time;
   uint64_t end_time;
   // Logging related
   FILE *logging_fp;
@@ -1770,12 +1783,6 @@ inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
 
 // Main interface functions
 
-// Return an address which:
-//   (1) Has the same alignment as addr
-//   (2) Is in main->zsim_write_buffer
-// This function is used to redirect application writes via zsim, which receives application data
-void *main_write_redirect(main_t *main, uint64_t addr, int size);
-
 // Append a log entry; Assumes logging is enabled
 void main_append_log(main_t *main, uint64_t cycle, int op, uint64_t addr, int size, void *data);
 
@@ -1805,6 +1812,9 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle);
 // Adding info that will be printed at the end of the simulation, e.g., simulated workload type, etc.
 void main_add_info(main_t *main, const char *key, const char *value);
 
+// Returns a malloc()'ed string buffer which is the cwd of the program
+char *main_get_cwd(main_t *main);
+
 // The following two are called to install address translations and update per-page shape info
 // The simulator should have some way to receive request from the application
 
@@ -1818,6 +1828,9 @@ void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data);
 
 // zsim debug print
 void main_zsim_debug_print_all(main_t *main);
+
+// Saves conf and stat to seperate files on the disk. The prefix serves the same purpose as the oc save function
+void main_save_conf_stat(main_t *main, char *prefix);
 
 // Not called by programmer, when sim begins and ends they will be called
 void main_conf_print(main_t *main);

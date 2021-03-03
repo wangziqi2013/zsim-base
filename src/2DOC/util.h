@@ -10,6 +10,9 @@
 #include <string.h>
 #include <error.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
 #include <time.h>
 #include <xmmintrin.h>
 #include <emmintrin.h>
@@ -232,6 +235,7 @@ inline static char *conf_str_skip_space(char *s) { while(isspace(*s) && *s != '\
 
 void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line);
 void conf_insert_ext(conf_t *conf, const char *k, const char *v); // Insert external files, line is set to -1
+void conf_init_directive(conf_t *conf, char *buf, int curr_line);
 conf_t *conf_init(const char *filename);                    // Open a file and load contents into the conf buffer
 conf_t *conf_init_empty();                                  // Initialize an empty conf object without reading file
 conf_t *conf_init_from_str(const char *s);                  // Initialize from a string
