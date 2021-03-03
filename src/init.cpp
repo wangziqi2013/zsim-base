@@ -434,20 +434,25 @@ static void InitSystem(Config& config) {
     };
 
     // Initialize 2DOC module
-    string main_conf = config.get<const char *>("sim.main_conf", "");
-    if(main_conf.size() == 0) {
+    const char *main_conf = config.get<const char *>("sim.main_conf", "");
+    if(strlen(main_conf) == 0) {
         error_exit("Did not find main_conf in conf file\n");
     }
-    zinfo->main = main_init(main_conf.c_str());
+    zinfo->main = main_init(main_conf);
     // Report process0.command to zsim
-    string cmd = config.get<const char *>("process0.command", "");
-    main_add_info(zinfo->main, "process0.command", cmd.c_str());
+    const char *cmd = config.get<const char *>("process0.command", "");
+    main_add_info(zinfo->main, "process0.command", cmd);
     // Report default shape
     //main_add_info(zinfo->main, "Default shape", main_get_default_shape_name(zinfo->main));
     // Report main conf file name
-    string main_conf_filename = config.get<const char *>("sim.main_conf", "");
-    main_add_info(zinfo->main, "sim.main_conf", main_conf_filename.c_str());
-
+    const char *main_conf_filename = config.get<const char *>("sim.main_conf", "");
+    main_add_info(zinfo->main, "sim.main_conf", main_conf_filename);
+    // Set main.app_name which will be reflected on result dir name
+    const char *main_app_name = config.get<const char *>("main.app_name", "");
+    if(strlen(main_app_name) > 0) {
+        main_set_app_name(zinfo->main, main_app_name);
+        main_add_info(zinfo->main, "main.app_name", main_app_name);
+    }
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
