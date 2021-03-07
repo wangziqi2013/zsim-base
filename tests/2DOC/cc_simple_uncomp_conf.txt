@@ -20,4 +20,4 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = None
 
-main.result_suffix = uncomp
+main.result_suffix = simple_uncomp

@@ -24,4 +24,4 @@ cc.scache.llc.ratio = 2
 
 cc.scache.llc.algorithm = FPC
 
-main.result_suffix = scache_FPC
+main.result_suffix = simple_scache_FPC

@@ -20,4 +20,4 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = 2_2
 
-main.result_suffix = BDI_2_2
+main.result_suffix = simple_BDI_2_2

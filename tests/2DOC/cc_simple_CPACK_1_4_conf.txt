@@ -20,4 +20,4 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
 
-main.result_suffix = CPACK_1_4
+main.result_suffix = simple_CPACK_1_4

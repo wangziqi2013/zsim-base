@@ -1,0 +1,29 @@
+
+
+#%include tests/2DOC/cc_simple_BDI_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_BDI_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
+
+%include tests/2DOC/cc_simple_CPACK_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_uncomp_conf.txt
+
+#%include tests/2DOC/cc_scache_BDI_conf.txt
+
+#%include tests/2DOC/cc_scache_conf.txt
+
+#%include tests/2DOC/cc_ocache_conf.txt
+
+dram.bank_count = 65536
+dram.read_latency = 300
+dram.write_latency = 300
+
+main.max_inst_count = 500M
+main.start_inst_count = 300M
+main.logging = 0
