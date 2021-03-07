@@ -6,11 +6,15 @@
 
 #%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
 
+#%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
+
 #%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
 
-%include tests/2DOC/cc_simple_CPACK_1_4_conf.txt
+#%include tests/2DOC/cc_simple_CPACK_1_4_conf.txt
 
-#%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
+%include tests/2DOC/cc_simple_MBD_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_MBD_2_2_conf.txt
 
 #%include tests/2DOC/cc_simple_uncomp_conf.txt
 

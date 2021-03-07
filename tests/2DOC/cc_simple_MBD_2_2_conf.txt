@@ -14,7 +14,7 @@ cc.simple.llc.size = 1048576
 #l3.size = 4194304 
 cc.simple.llc.physical_way_count = 16
 cc.simple.llc.latency = 30
-cc.simple.llc.algorithm = CPACK
+cc.simple.llc.algorithm = MBD
 
 cc.simple.core_count = 1
 
