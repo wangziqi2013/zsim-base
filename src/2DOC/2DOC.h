@@ -145,50 +145,117 @@ void FPC_print_packed_bits(uint64_t *buf, int begin_offset, int bits);
 
 //* CPACK
 
+#define CPACK_DICT_COUNT  16    // Number of entries in the dictionary
+#define CPACK_WORD_COUNT 16    // Number of 32-bit words in a block to be compressed
+
 typedef struct {
-  int count;                  // Number of valid entries
-  uint32_t data[16];          // First entry is always MRU, last LRU
-} CPACK_dir_t;
+  int count;                      // Number of valid entries
+  int next_slot_index;            // Index of the next usable slot
+  uint32_t data[CPACK_DICT_COUNT]; // First entry is always MRU, last LRU
+} CPACK_dict_t;
 
-inline static void CPACK_dir_invalidate(CPACK_dir_t *dir) {
-  dir->count = 0;
-  return;
-}
-
-// Exchange data field of two entries
-inline static void CPACK_dir_update_LRU(CPACK_dir_t *dir, int index) {
-  assert(index >= 0 && index < dir->count);
-  uint32_t temp = dir->data[0];
-  dir->data[0] = dir->data[index];
-  dir->data[index] = temp;
+inline static void CPACK_dict_invalidate(CPACK_dict_t *dict) {
+  dict->count = 0;
+  dict->next_slot_index = 0;
   return;
 }
 
 // Get a free entry, possibly evicting the LRU entry
-inline static int CPACK_dir_get_free_entry_index(CPACK_dir_t *dir) {
-  if(dir->count == 16) {
-    return 15;
-  } else {
-    return dir->count++;
+inline static int CPACK_dict_get_free_entry_index(CPACK_dict_t *dict) {
+  if(dict->next_slot_index == CPACK_DICT_COUNT) {
+    dict->next_slot_index = 0;
   }
+  return dict->next_slot_index++;
 }
 
 // This function also updates LRU
-inline static void CPACK_dir_insert(CPACK_dir_t *dir, uint32_t data) {
-  int index = CPACK_dir_get_free_entry_index(dir);
-  dir->data[index] = data;
-  CPACK_dir_update_LRU(dir, index);
+inline static void CPACK_dict_insert(CPACK_dict_t *dict, uint32_t data) {
+  int index = CPACK_dict_get_free_entry_index(dict);
+  dict->data[index] = data;
+  if(dict->count != CPACK_DICT_COUNT) {
+    dict->count++;
+  }
   return;
 }
 
 // Search pattern match of the word; output stores the output, return value is # of bits in the output
-int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output);
+int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output);
 
 int CPACK_comp(void *out_buf, void *_in_buf);
 void CPACK_decomp(void *out_buf, void *in_buf);
 int CPACK_get_comp_size_bits(void *_in_buf); // Dry run only, no output buffer
 
 void CPACK_print_compressed(void *in_buf);
+
+//* MBD - Experimental Multi-Based Delta compression
+
+#define MBD_DICT_COUNT        8
+#define MBD_RESERVED_COUNT    1
+
+#define MBD_COLLECT_STAT      1
+
+typedef struct {
+  int count;
+  int next_slot_index;
+  uint32_t data[MBD_DICT_COUNT];
+#ifdef MBD_COLLECT_STAT 
+  // Statistics about a compression instance
+  uint32_t delta_size_dist[4]; // 4, 8, 12, 16 bits
+  uint32_t zero_count;
+  uint32_t uncomp_count;
+  uint32_t match_count;
+#endif
+} MBD_dict_t;
+
+// Initially there is one entry, which is zero
+inline static void MBD_dict_invalidate(MBD_dict_t *dict) {
+  dict->count = 1;
+  dict->next_slot_index = 1;
+  dict->data[0] = 0;
+#ifdef MBD_COLLECT_STAT 
+  memset(dict->delta_size_dist, 0x00, sizeof(dict->delta_size_dist));
+#endif
+  return;
+}
+
+inline static int MBD_dict_get_free_entry_index(MBD_dict_t *dict) {
+  if(dict->next_slot_index == MBD_DICT_COUNT) {
+    dict->next_slot_index = 1;
+  }
+  return dict->next_slot_index++;
+}
+
+// This function also updates LRU
+inline static void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
+  int index = MBD_dict_get_free_entry_index(dict);
+  dict->data[index] = data;
+  if(dict->count != MBD_DICT_COUNT) {
+    dict->count++;
+  }
+  return;
+}
+
+// Same intf as CPACK, but performs min-delta search
+int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output);
+
+// Size is the number of bytes in the input stream, which must be a multiple of 4 (32 bit)
+int _MBD_comp(void *out_buf, void *_in_buf, int size);
+void _MBD_decomp(void *_out_buf, void *in_buf, int size);
+void _MBD_print_compressed(void *in_buf, int size);
+int _MBD_get_comp_size_bits(void *_in_buf, int size);
+
+inline static int MBD_comp(void *out_buf, void *_in_buf) { 
+  return _MBD_comp(out_buf, _in_buf, UTIL_CACHE_LINE_SIZE); 
+}
+inline static void MBD_decomp(void *out_buf, void *in_buf) { 
+  _MBD_decomp(out_buf, in_buf, UTIL_CACHE_LINE_SIZE); 
+}
+inline static void MBD_print_compressed(void *in_buf) {
+  _MBD_print_compressed(in_buf, UTIL_CACHE_LINE_SIZE);
+} 
+inline static int MBD_get_comp_size_bits(void *_in_buf) {
+  return _MBD_get_comp_size_bits(_in_buf, UTIL_CACHE_LINE_SIZE);
+}
 
 //* MESI_t - Abstract coherence controller, decoupled from cache implementation
 
@@ -727,6 +794,13 @@ typedef struct ocache_struct_t {
   uint64_t CPACK_before_size_sum;
   uint64_t CPACK_after_size_sum;
   uint64_t CPACK_size_counts[8];
+  // MBD-specific stats
+  uint64_t MBD_success_count;        
+  uint64_t MBD_fail_count;         
+  uint64_t MBD_uncomp_size_sum;
+  uint64_t MBD_before_size_sum;
+  uint64_t MBD_after_size_sum;
+  uint64_t MBD_size_counts[8];
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -811,6 +885,7 @@ inline static void ocache_lookup_probe(
 int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 
 void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
@@ -993,6 +1068,15 @@ typedef struct scache_struct_t {
   uint64_t FPC_before_size;     // Only successful lines
   uint64_t FPC_after_size;      // Only successful lines
   uint64_t FPC_size_counts[8];  // FPC size counts, index i counts size [8i, 8i + 8)
+  // Statistics - CPACK
+  uint64_t CPACK_attempt_count;
+  uint64_t CPACK_success_count;
+  uint64_t CPACK_fail_count;
+  uint64_t CPACK_attempt_size;
+  uint64_t CPACK_uncomp_size;
+  uint64_t CPACK_before_size;
+  uint64_t CPACK_after_size;
+  uint64_t CPACK_size_counts[8];
   // Statistics - General
   uint64_t uncompressed_count;  // Not compressed
   uint64_t read_count;          // Reads, not including internal lookups

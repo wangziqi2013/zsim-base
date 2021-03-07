@@ -706,7 +706,7 @@ void FPC_print_compressed(void *in_buf) {
 
 //* CPACK
 
-int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output) {
+int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output) {
   if(word == 0) {
     // Case zzzz, code 2'b00
     *output = 0;
@@ -716,11 +716,11 @@ int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output) {
     *output = (((uint64_t)word & 0xFFUL) << 4) | 0x7UL;
     return 12;
   }
-  assert(dir->count >= 0 && dir->count < 16);
+  assert(dict->count >= 0 && dict->count <= CPACK_DICT_COUNT);
   // Generate the best result
   int min_bits = 32;
-  for(int i = 0;i < dir->count;i++) {
-    uint32_t data = dir->data[i];
+  for(int i = 0;i < dict->count;i++) {
+    uint32_t data = dict->data[i];
     if(data == word) {
       // case mmmm, code 2'b10 + 4-bit index
       // Special case: This is always the min, so we can return immediately
@@ -751,20 +751,21 @@ int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output) {
 int CPACK_comp(void *out_buf, void *_in_buf) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
-  CPACK_dir_t dir;
-  CPACK_dir_invalidate(&dir);
-  for(int i = 0;i < 16;i++) {
+  CPACK_dict_t dict;
+  CPACK_dict_invalidate(&dict);
+  for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output;
     // Find a match
     uint32_t word = *in_buf;
-    int ret = CPACK_search(&dir, word, &output);
+    int ret = CPACK_search(&dict, word, &output);
     //printf("ret %d\n", ret);
     FPC_pack_bits_bmi(out_buf, bits, &output, ret);
     bits += ret;
     // Insert the word into the dictionary, if word fails zero pattern matching
     // Hack: If it fails the encoded length is 2 or 12
+    // Full match also does not insert
     if(ret != 2 && ret != 12) {
-      CPACK_dir_insert(&dir, word);
+      CPACK_dict_insert(&dict, word);
     }
     in_buf++;
   }
@@ -774,9 +775,9 @@ int CPACK_comp(void *out_buf, void *_in_buf) {
 void CPACK_decomp(void *_out_buf, void *in_buf) {
   uint32_t *out_buf = (uint32_t *)_out_buf;
   int bits = 0;
-  CPACK_dir_t dir;
-  CPACK_dir_invalidate(&dir);
-  for(int i = 0;i < 16;i++) {
+  CPACK_dict_t dict;
+  CPACK_dict_invalidate(&dict);
+  for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output = 0UL;
     uint32_t word;
     // This is cleared if the recovered word is zero matched
@@ -786,12 +787,12 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; break;
       case 1: bits += 34; word = (uint32_t)(output >> 2); break;
-      case 2: bits += 6; word = dir.data[(int)(output >> 2) & 0xF]; break;
+      case 2: bits += 6; word = dict.data[(int)(output >> 2) & 0xF]; break;
       default: {
         switch((int)output & 0xF) {
           case 0x3: {
             int index = ((int)output >> 4) & 0xF;
-            word = (dir.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
+            word = (dict.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
             bits += 24;
           } break;
           case 0x7: {
@@ -801,7 +802,7 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
           } break;
           case 0xB: {
             int index = ((int)output >> 4) & 0xF;
-            word = (dir.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
+            word = (dict.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
             bits += 16;
           } break;
           default: {
@@ -813,7 +814,7 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
     *out_buf = word;
     // Insert the word into the dictionary, if the decoded word is not matched
     if(need_insert == 1) {
-      CPACK_dir_insert(&dir, word);
+      CPACK_dict_insert(&dict, word);
     }
     out_buf++;
   }
@@ -823,16 +824,16 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
 int CPACK_get_comp_size_bits(void *_in_buf) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
-  CPACK_dir_t dir;
-  CPACK_dir_invalidate(&dir);
-  for(int i = 0;i < 16;i++) {
+  CPACK_dict_t dict;
+  CPACK_dict_invalidate(&dict);
+  for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output;
     uint32_t word = *in_buf;
-    int ret = CPACK_search(&dir, word, &output);
+    int ret = CPACK_search(&dict, word, &output);
     (void)output;
     bits += ret;
     if(ret != 2 && ret != 12) {
-      CPACK_dir_insert(&dir, word);
+      CPACK_dict_insert(&dict, word);
     }
     in_buf++;
   }
@@ -841,9 +842,9 @@ int CPACK_get_comp_size_bits(void *_in_buf) {
 
 void CPACK_print_compressed(void *in_buf) {
   int bits = 0;
-  CPACK_dir_t dir;
-  CPACK_dir_invalidate(&dir);
-  for(int i = 0;i < 16;i++) {
+  CPACK_dict_t dict;
+  CPACK_dict_invalidate(&dict);
+  for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output = 0UL;
     uint32_t word;
     int need_insert = 1;
@@ -852,12 +853,12 @@ void CPACK_print_compressed(void *in_buf) {
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
       case 1: bits += 34; word = (uint32_t)(output >> 2); code = 1; break;
-      case 2: bits += 6; word = dir.data[(int)(output >> 2) & 0xF]; code = 2; break;
+      case 2: bits += 6; word = dict.data[(int)(output >> 2) & 0xF]; code = 2; break;
       default: {
         switch((int)output & 0xF) {
           case 0x3: {
             int index = ((int)output >> 4) & 0xF;
-            word = (dir.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
+            word = (dict.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
             bits += 24;
             code = 0x3;
           } break;
@@ -869,7 +870,7 @@ void CPACK_print_compressed(void *in_buf) {
           } break;
           case 0xB: {
             int index = ((int)output >> 4) & 0xF;
-            word = (dir.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
+            word = (dict.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
             bits += 16;
             code = 0xB;
           } break;
@@ -881,8 +882,267 @@ void CPACK_print_compressed(void *in_buf) {
     }
     printf("Index %d code 0x%X word %u (0x%X)\n", i, code, word, word);
     if(need_insert == 1) {
-      CPACK_dir_insert(&dir, word);
+      CPACK_dict_insert(&dict, word);
     }
+  }
+  return;
+}
+//* MBD
+
+int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
+  if(word == 0) {
+    // All zero, code 2'b00
+    *output = 0;
+#ifdef MBD_COLLECT_STAT 
+    dict->zero_count++;
+#endif
+    return 2;
+  }
+  assert(dict->count >= 1 && dict->count <= MBD_DICT_COUNT);
+  // Generate the best result
+  int min_bits = 32;
+  for(int i = 0;i < dict->count;i++) {
+    uint32_t data = dict->data[i];
+    if(data == word) {
+      //printf("Hit dict index %d (count %d)\n", i, dict->count);
+      // Direct match, code 2'b01 + 3-bit index
+      // Special case: This is always the min, so we can return immediately
+      *output = ((uint64_t)i << 2) | 0x1UL;
+#ifdef MBD_COLLECT_STAT 
+      dict->match_count++;
+#endif
+      return 5;
+    }
+    uint32_t delta = word - data;
+    uint32_t masked_delta;
+    masked_delta = delta & ~0x7U;
+    if(masked_delta == 0 || masked_delta == ~0x7U) {
+      if(min_bits > 11) {
+        // 4-bit delta, code 4'0011 + 3-bit index + 4-bit delta
+        *output = ((delta & 0xF) << 7) | ((uint64_t)i << 4) | 0x3UL;
+        min_bits = 11;
+      }
+    } else {
+      masked_delta = delta & ~0x7FU;
+      if(masked_delta == 0 || masked_delta == ~0x7FU) {
+        if(min_bits > 15) {
+          // 8-bit delta, code 4'0111 + 3-bit index + 8-bit delta
+          *output = ((delta & 0xFFU) << 7) | ((uint64_t)i << 4) | 0x7UL;
+          min_bits = 15;
+        }
+      } else {
+        masked_delta = delta & ~0x7FFU;
+        if(masked_delta == 0 || masked_delta == ~0x7FFU) {
+          if(min_bits > 19) {
+            // 12-bit delta, code 4'1011 + 3-bit index + 12-bit delta
+            *output = ((delta & 0xFFFU) << 7) | ((uint64_t)i << 4) | 0xBUL;
+            min_bits = 19;
+          }
+        } else {
+          masked_delta = delta & ~0x7FFFU;
+          if(masked_delta == 0 || masked_delta == ~0x7FFFU) {
+            if(min_bits > 23) {
+              // 16-bit delta, code 4'1111 + 3-bit index + 16-bit delta
+              *output = ((delta & 0xFFFFU) << 7) | ((uint64_t)i << 4) | 0xFUL;
+              min_bits = 23;
+            }
+          }
+        }
+      }
+    }
+  }
+  if(min_bits != 32) {
+#ifdef MBD_COLLECT_STAT 
+    switch(min_bits) {
+      case 11: dict->delta_size_dist[0]++; break;
+      case 15: dict->delta_size_dist[1]++; break;
+      case 19: dict->delta_size_dist[2]++; break;
+      case 23: dict->delta_size_dist[3]++; break;
+      default: assert(0); break;
+    }
+#endif
+    return min_bits;
+  }
+  // Uncompressable, code 2'b10 + 4 byte
+  *output = ((uint64_t)word << 2) | 0x2UL;
+  //printf("Miss dict count %d\n", dict->count);
+#ifdef MBD_COLLECT_STAT 
+  dict->uncomp_count++;
+#endif
+  return 34;
+}
+
+// This function processes a block consisting of 32-bit words. Input size must be aligned
+int _MBD_comp(void *out_buf, void *_in_buf, int size) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  MBD_dict_t dict;
+  assert(size > 0 && size % 4 == 0);
+  MBD_dict_invalidate(&dict);
+  int count = size >> 2;
+  for(int i = 0;i < count;i++) {
+    uint64_t output;
+    // Find a match
+    uint32_t word = *in_buf;
+    int ret = MBD_search(&dict, word, &output);
+    //printf("ret %d\n", ret);
+    FPC_pack_bits_bmi(out_buf, bits, &output, ret);
+    bits += ret;
+    // Return value 2 means that it is zero
+    if(ret != 2) {
+      MBD_dict_insert(&dict, word);
+    }
+    //for(int i = 0;i < dict.count;i++) printf("0x%X, ", dict.data[i]);
+    //putchar('\n');
+    in_buf++;
+  }
+  return bits;
+}
+
+void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
+  uint32_t *out_buf = (uint32_t *)_out_buf;
+  int bits = 0;
+  MBD_dict_t dict;
+  MBD_dict_invalidate(&dict);
+  assert(size > 0 && size % 4 == 0);
+  int count = size >> 2;
+  for(int i = 0;i < count;i++) {
+    uint64_t output = 0UL;
+    uint32_t word;
+    // This is cleared if the recovered word is zero matched
+    int need_insert = 1;
+    // 34 bits is the maximum compressed size of a word
+    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    switch((int)output & 0x3) {
+      case 0: bits += 2; word = 0; need_insert = 0; break;
+      case 1: bits += 5; word = dict.data[(int)(output >> 2) & 0x7]; break;
+      case 2: bits += 34; word = (uint32_t)(output >> 2); break;
+      default: {
+        switch((int)output & 0xF) {
+          case 0x3: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFU;
+            word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
+            bits += 11;
+          } break;
+          case 0x7: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFU;
+            word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
+            bits += 15;
+          } break;
+          case 0xB: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFU;
+            word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
+            bits += 19;
+          } break;
+          case 0xF: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFFU;
+            word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
+            bits += 23;
+          } break;
+          default: {
+            error_exit("Undefined case during CPACK decompression\n");
+          } break;
+        }
+      } break;
+    }
+    *out_buf = word;
+    // Insert the word into the dictionary, if the decoded word is not matched
+    if(need_insert == 1) {
+      MBD_dict_insert(&dict, word);
+    }
+    out_buf++;
+  }
+  return;
+}
+
+
+// This function processes a block consisting of 32-bit words. Input size must be aligned
+int _MBD_get_comp_size_bits(void *_in_buf, int size) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  MBD_dict_t dict;
+  assert(size > 0 && size % 4 == 0);
+  MBD_dict_invalidate(&dict);
+  int count = size >> 2;
+  for(int i = 0;i < count;i++) {
+    uint64_t output;
+    // Find a match
+    uint32_t word = *in_buf;
+    int ret = MBD_search(&dict, word, &output);
+    (void)output;
+    bits += ret;
+    // Return value 2 means that it is zero
+    if(ret != 2) {
+      MBD_dict_insert(&dict, word);
+    }
+    in_buf++;
+  }
+  return bits;
+}
+
+void _MBD_print_compressed(void *in_buf, int size) {
+  int bits = 0;
+  MBD_dict_t dict;
+  MBD_dict_invalidate(&dict);
+  assert(size > 0 && size % 4 == 0);
+  int count = size >> 2;
+  for(int i = 0;i < count;i++) {
+    uint64_t output = 0UL;
+    uint32_t word;
+    int code;
+    // This is cleared if the recovered word is zero matched
+    int need_insert = 1;
+    // 34 bits is the maximum compressed size of a word
+    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    switch((int)output & 0x3) {
+      case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
+      case 1: bits += 5; word = dict.data[(int)(output >> 2) & 0x7]; code = 1; break;
+      case 2: bits += 34; word = (uint32_t)(output >> 2); code = 2; break;
+      default: {
+        switch((int)output & 0xF) {
+          case 0x3: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFU;
+            word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
+            bits += 11;
+            code = 0x3; 
+          } break;
+          case 0x7: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFU;
+            word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
+            bits += 15;
+            code = 0x7; 
+          } break;
+          case 0xB: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFU;
+            word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
+            bits += 19;
+            code = 0xB; 
+          } break;
+          case 0xF: {
+            int index = ((int)output >> 4) & 0x7;
+            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFFU;
+            word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
+            bits += 23;
+            code = 0xF; 
+          } break;
+          default: {
+            error_exit("Undefined case during CPACK decompression\n");
+          } break;
+        }
+      } break;
+    }
+    // Insert the word into the dictionary, if the decoded word is not matched
+    if(need_insert == 1) {
+      MBD_dict_insert(&dict, word);
+    }
+    printf("Index %d code 0x%X word %u (0x%X)\n", i, code, word, word);
   }
   return;
 }
@@ -1383,6 +1643,8 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_cb);
   } else if(streq(name, "CPACK") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_CPACK_cb);
+  } else if(streq(name, "MBD") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
   } else if(streq(name, "None") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
   } else {
@@ -1816,6 +2078,30 @@ int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t
   assert(bytes > 0 && bytes <= 64);
   // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
   ocache->CPACK_size_counts[(bytes - 1) / 8]++;
+  return bytes;
+}
+
+int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  assert(ocache->dmap != NULL); (void)shape;
+  ocache->comp_attempt_count++;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *entry = dmap_find(ocache->dmap, oid, addr);
+  if(entry == NULL) {
+    error_exit("Entry for MBD compression is not found\n");
+  }
+  int bits = MBD_get_comp_size_bits(entry->data);
+  if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    ocache->MBD_fail_count++;
+    ocache->MBD_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int bytes = (bits + 7) / 8;
+  ocache->MBD_success_count++;
+  ocache->MBD_before_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->MBD_after_size_sum += bytes;
+  assert(bytes > 0 && bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  ocache->MBD_size_counts[(bytes - 1) / 8]++;
   return bytes;
 }
 
@@ -2610,6 +2896,8 @@ void ocache_conf_print(ocache_t *ocache) {
     printf("FPC\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_CPACK_cb) {
     printf("CPACK\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_MBD_cb) {
+    printf("MBD\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
   } else {
@@ -2709,6 +2997,23 @@ void ocache_stat_print(ocache_t *ocache) {
     printf("Size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->CPACK_size_counts[i]);
+    }
+    putchar('\n');
+  } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_MBD_cb) {
+    printf("MBD attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      ocache->comp_attempt_count, ocache->MBD_success_count, ocache->MBD_fail_count,
+      100.0 * ocache->MBD_success_count / (double)ocache->comp_attempt_count);
+    printf("MBD success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->MBD_before_size_sum, ocache->MBD_after_size_sum,
+      100.0 * ocache->MBD_after_size_sum / (double)ocache->MBD_before_size_sum,
+      (double)ocache->MBD_before_size_sum / (double)ocache->MBD_after_size_sum);
+    printf("MBD overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->comp_attempt_size_sum, ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum,
+      100.0 * (ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum) / (double)ocache->comp_attempt_size_sum,
+      (double)ocache->comp_attempt_size_sum / (double)(ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum));
+    printf("Size classes ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->MBD_size_counts[i]);
     }
     putchar('\n');
   } else {
@@ -2890,6 +3195,29 @@ static int scache_get_compressed_size_FPC_cb(scache_t *scache, uint64_t addr) {
   return FPC_bytes;
 }
 
+static int scache_get_compressed_size_CPACK_cb(scache_t *scache, uint64_t addr) {
+  scache->CPACK_attempt_count++;
+  scache->CPACK_attempt_size += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *dmap_entry = dmap_find(scache->dmap, 0UL, addr);
+  if(dmap_entry == NULL) {
+    error_exit("Data to be compressed cannot be found on addr 0x%lX\n", addr);
+  }
+  int bits = CPACK_get_comp_size_bits(dmap_entry->data);
+  if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    scache->CPACK_fail_count++;
+    scache->CPACK_uncomp_size += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int bytes = (bits + 7) / 8;
+  scache->CPACK_success_count++;
+  scache->CPACK_before_size += UTIL_CACHE_LINE_SIZE;
+  scache->CPACK_after_size += bytes;
+  assert(bytes > 0 && bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  scache->CPACK_size_counts[(bytes - 1) / 8]++;
+  return bytes;
+}
+
 // Trivial call back; No compression, always return full size cache line
 static int scache_get_compressed_size_None_cb(scache_t *scache, uint64_t addr) {
   (void)addr; (void)scache;
@@ -2906,6 +3234,8 @@ void scache_set_compression_type(scache_t *scache, const char *name) {
     scache->get_compressed_size_cb = scache_get_compressed_size_BDI_cb;
   } else if(streq(name, "FPC") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_FPC_cb;
+  } else if(streq(name, "CPACK") == 1) {
+    scache->get_compressed_size_cb = scache_get_compressed_size_CPACK_cb;
   } else if(streq(name, "None") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_None_cb;
   } else {
@@ -3230,6 +3560,8 @@ void scache_conf_print(scache_t *scache) {
     printf("BDI\n");
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_FPC_cb) {
     printf("FPC\n");
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_CPACK_cb) {
+    printf("CPACK\n");
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
     printf("None\n");
   } else if(scache->get_compressed_size_cb == NULL) {
@@ -3279,6 +3611,23 @@ void scache_stat_print(scache_t *scache) {
     printf("Size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->FPC_size_counts[i]);
+    }
+    putchar('\n');
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_CPACK_cb) { 
+    printf("CPACK attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      scache->CPACK_attempt_count, scache->CPACK_success_count, scache->CPACK_fail_count,
+      100.0 * scache->CPACK_success_count / (double)scache->CPACK_attempt_count);
+    printf("CPACK success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->CPACK_before_size, scache->CPACK_after_size,
+      100.0 * scache->CPACK_after_size / (double)scache->CPACK_before_size,
+      (double)scache->CPACK_before_size / (double)scache->CPACK_after_size);
+    printf("CPACK overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->CPACK_attempt_size, scache->CPACK_uncomp_size + scache->CPACK_after_size,
+      100.0 * (scache->CPACK_uncomp_size + scache->CPACK_after_size) / (double)scache->CPACK_attempt_size,
+      (double)scache->CPACK_attempt_size / (double)(scache->CPACK_uncomp_size + scache->CPACK_after_size));
+    printf("Size classes ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->CPACK_size_counts[i]);
     }
     putchar('\n');
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
@@ -3562,9 +3911,11 @@ void cc_common_print_stats(cc_common_t *commons) {
   // Print DRAM stats
   printf("DRAM | reads %lu writes %lu rd_cycle %lu wr_bytes %lu\n",
     commons->dram_read_count, commons->dram_write_count, commons->dram_read_cycle, commons->dram_write_bytes);
-  printf("     | Avg. rd_latency %.2lf wr_size %.2lf\n",
+  printf("     | Avg. rd_latency %.2lf wr_size %.2lf (%.2lf%%, %.2lfx)\n",
     (double)commons->dram_read_cycle / (double)commons->dram_read_count,
-    (double)commons->dram_write_bytes / (double)commons->dram_write_count);
+    (double)commons->dram_write_bytes / (double)commons->dram_write_count,
+    ((double)commons->dram_write_bytes / (double)commons->dram_write_count) / (double)UTIL_CACHE_LINE_SIZE,
+    (double)UTIL_CACHE_LINE_SIZE / ((double)commons->dram_write_bytes / (double)commons->dram_write_count));
   return;
 }
 
@@ -3658,9 +4009,6 @@ cc_scache_t *cc_scache_init_conf(conf_t *conf) {
   int llc_ratio = conf_find_int32_range(
     conf, "cc.scache.llc.ratio", 1, CONF_INT32_MAX, CONF_RANGE);
   const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.scache.llc.algorithm");
-  if(streq(llc_algorithm, "BDI") == 0 && streq(llc_algorithm, "FPC") == 0 && streq(llc_algorithm, "None") == 0) {
-    error_exit("Unknown LLC compression algorithm for LLC (\"%s\")\n", llc_algorithm);
-  }
   cc_scache_init_llc(cc, llc_size, llc_physical_way_count, llc_ratio, llc_latency, llc_algorithm);
   return cc;
 }
