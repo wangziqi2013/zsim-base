@@ -394,6 +394,8 @@ int FPC_pack_bits(void *dest, int dest_offset, uint64_t *src, int bits) {
 }
 
 // Using BMI bit extraction interface
+// dest_offset is the bit offset into the dest buffer, which can be arbitrary large
+// bits in the number of bits to be appended at dest_offset, which must be <= 64
 int FPC_pack_bits_bmi(void *_dest, int dest_offset, uint64_t *src, int bits) {
   assert(FPC_BIT_COPY_GRANULARITY == 64);
   assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
@@ -699,6 +701,189 @@ void FPC_print_compressed(void *in_buf) {
   }
   printf("Data bits %d total bits %d (offset %d)\n", data_bits, total_bits, offset);
   assert(count == iter);
+  return;
+}
+
+//* CPACK
+
+int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output) {
+  if(word == 0) {
+    // Case zzzz, code 2'b00
+    *output = 0;
+    return 2;
+  } else if((word & 0xFFFFFF00) == 0) {
+    // Case zzzx, code 4'0111 + lowest byte
+    *output = (((uint64_t)word & 0xFFUL) << 4) | 0x7UL;
+    return 12;
+  }
+  assert(dir->count >= 0 && dir->count < 16);
+  // Generate the best result
+  int min_bits = 32;
+  for(int i = 0;i < dir->count;i++) {
+    uint32_t data = dir->data[i];
+    if(data == word) {
+      // case mmmm, code 2'b10 + 4-bit index
+      // Special case: This is always the min, so we can return immediately
+      *output = ((uint64_t)i << 2) | 0x2UL;
+      return 6;
+    } else if((data & 0xFFFFFF00) == (word & 0xFFFFFF00)) {
+      // case mmmx, code 4'1011 + 4-bit index + 1-byte low
+      if(min_bits > 16) {
+        *output = ((word & 0xFF) << 8) | ((uint64_t)i << 4) | 0xBUL;
+        min_bits = 16;
+      }
+    } else if((data & 0xFFFF0000) == (word & 0xFFFF0000)) {
+      // case mmxx, code 4'b0011 + 4-bit index + 2-byte low
+      if(min_bits > 24) {
+        *output = ((word & 0xFFFF) << 8) | ((uint64_t)i << 4) | 0x3UL;
+        min_bits = 24;
+      }
+    }
+  }
+  if(min_bits != 32) {
+    return min_bits;
+  }
+  // Case xxxx, code 2'b01 + 4 byte
+  *output = ((uint64_t)word << 2) | 0x1UL;
+  return 34;
+}
+
+int CPACK_comp(void *out_buf, void *_in_buf) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  CPACK_dir_t dir;
+  CPACK_dir_invalidate(&dir);
+  for(int i = 0;i < 16;i++) {
+    uint64_t output;
+    // Find a match
+    uint32_t word = *in_buf;
+    int ret = CPACK_search(&dir, word, &output);
+    //printf("ret %d\n", ret);
+    FPC_pack_bits_bmi(out_buf, bits, &output, ret);
+    bits += ret;
+    // Insert the word into the dictionary, if word fails zero pattern matching
+    // Hack: If it fails the encoded length is 2 or 12
+    if(ret != 2 && ret != 12) {
+      CPACK_dir_insert(&dir, word);
+    }
+    in_buf++;
+  }
+  return bits;
+}
+
+void CPACK_decomp(void *_out_buf, void *in_buf) {
+  uint32_t *out_buf = (uint32_t *)_out_buf;
+  int bits = 0;
+  CPACK_dir_t dir;
+  CPACK_dir_invalidate(&dir);
+  for(int i = 0;i < 16;i++) {
+    uint64_t output = 0UL;
+    uint32_t word;
+    // This is cleared if the recovered word is zero matched
+    int need_insert = 1;
+    // 34 bits is the maximum compressed size of a word
+    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    switch((int)output & 0x3) {
+      case 0: bits += 2; word = 0; need_insert = 0; break;
+      case 1: bits += 34; word = (uint32_t)(output >> 2); break;
+      case 2: bits += 6; word = dir.data[(int)(output >> 2) & 0xF]; break;
+      default: {
+        switch((int)output & 0xF) {
+          case 0x3: {
+            int index = ((int)output >> 4) & 0xF;
+            word = (dir.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
+            bits += 24;
+          } break;
+          case 0x7: {
+            word = (uint32_t)((output >> 4) & 0xFF);
+            bits += 12;
+            need_insert = 0;
+          } break;
+          case 0xB: {
+            int index = ((int)output >> 4) & 0xF;
+            word = (dir.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
+            bits += 16;
+          } break;
+          default: {
+            error_exit("Undefined case during CPACK decompression\n");
+          } break;
+        }
+      } break;
+    }
+    *out_buf = word;
+    // Insert the word into the dictionary, if the decoded word is not matched
+    if(need_insert == 1) {
+      CPACK_dir_insert(&dir, word);
+    }
+    out_buf++;
+  }
+  return;
+}
+
+int CPACK_get_comp_size_bits(void *_in_buf) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  CPACK_dir_t dir;
+  CPACK_dir_invalidate(&dir);
+  for(int i = 0;i < 16;i++) {
+    uint64_t output;
+    uint32_t word = *in_buf;
+    int ret = CPACK_search(&dir, word, &output);
+    (void)output;
+    bits += ret;
+    if(ret != 2 && ret != 12) {
+      CPACK_dir_insert(&dir, word);
+    }
+    in_buf++;
+  }
+  return bits;
+}
+
+void CPACK_print_compressed(void *in_buf) {
+  int bits = 0;
+  CPACK_dir_t dir;
+  CPACK_dir_invalidate(&dir);
+  for(int i = 0;i < 16;i++) {
+    uint64_t output = 0UL;
+    uint32_t word;
+    int need_insert = 1;
+    int code;
+    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    switch((int)output & 0x3) {
+      case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
+      case 1: bits += 34; word = (uint32_t)(output >> 2); code = 1; break;
+      case 2: bits += 6; word = dir.data[(int)(output >> 2) & 0xF]; code = 2; break;
+      default: {
+        switch((int)output & 0xF) {
+          case 0x3: {
+            int index = ((int)output >> 4) & 0xF;
+            word = (dir.data[index] & 0xFFFF0000) | (((int)output >> 8) & 0x0000FFFF);
+            bits += 24;
+            code = 0x3;
+          } break;
+          case 0x7: {
+            word = (uint32_t)((output >> 4) & 0xFF);
+            bits += 12;
+            need_insert = 0;
+            code = 0x7;
+          } break;
+          case 0xB: {
+            int index = ((int)output >> 4) & 0xF;
+            word = (dir.data[index] & 0xFFFFFF00) | (((int)output >> 8) & 0x000000FF);
+            bits += 16;
+            code = 0xB;
+          } break;
+          default: {
+            error_exit("Undefined case during CPACK decompression\n");
+          } break;
+        }
+      } break;
+    }
+    printf("Index %d code 0x%X word %u (0x%X)\n", i, code, word, word);
+    if(need_insert == 1) {
+      CPACK_dir_insert(&dir, word);
+    }
+  }
   return;
 }
 
@@ -1196,6 +1381,8 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_cb);
   } else if(streq(name, "FPC") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_cb);
+  } else if(streq(name, "CPACK") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_CPACK_cb);
   } else if(streq(name, "None") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
   } else {
@@ -1606,6 +1793,30 @@ int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
   ocache->FPC_size_counts[(FPC_bytes - 1) / 8]++;
   return FPC_bytes;
+}
+
+int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  assert(ocache->dmap != NULL); (void)shape;
+  ocache->comp_attempt_count++;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *entry = dmap_find(ocache->dmap, oid, addr);
+  if(entry == NULL) {
+    error_exit("Entry for CPACK compression is not found\n");
+  }
+  int bits = CPACK_get_comp_size_bits(entry->data);
+  if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    ocache->CPACK_fail_count++;
+    ocache->CPACK_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int bytes = (bits + 7) / 8;
+  ocache->CPACK_success_count++;
+  ocache->CPACK_before_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->CPACK_after_size_sum += bytes;
+  assert(bytes > 0 && bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  ocache->CPACK_size_counts[(bytes - 1) / 8]++;
+  return bytes;
 }
 
 // This function implements vertical compression policy
@@ -2203,6 +2414,8 @@ void ocache_refresh_stat(ocache_t *ocache) {
   ocache->sb_1_4_count = 0UL;
   ocache->sb_2_2_count = 0UL;
   memset(ocache->size_histogram, 0x00, sizeof(ocache->size_histogram));
+  memset(ocache->sb_logical_line_count_dist, 0x00, sizeof(ocache->sb_logical_line_count_dist));
+  //
   for(int i = 0;i < ocache->line_count;i++) {
     // Only do it when the line is valid
     if(ocache_entry_is_all_invalid(entry) == 0) {
@@ -2216,6 +2429,9 @@ void ocache_refresh_stat(ocache_t *ocache) {
         ocache->logical_line_count += lines; // Multiple logical lines per slot
         ocache->sb_slot_count++;
         ocache->sb_logical_line_count += lines;
+        assert(lines >= 1 && lines <= 4);
+        // Subtract by one to make to [0, 3]
+        ocache->sb_logical_line_count_dist[lines - 1]++;
         switch(entry->shape) {
           case OCACHE_SHAPE_4_1: ocache->sb_4_1_count++; break;
           case OCACHE_SHAPE_1_4: ocache->sb_1_4_count++; break;
@@ -2260,6 +2476,9 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
   snapshot->sb_2_2_count = ocache->sb_2_2_count;
   // Also copy the histogram array
   memcpy(snapshot->size_histogram, ocache->size_histogram, sizeof(ocache->size_histogram));
+  memcpy(snapshot->sb_logical_line_count_dist, 
+         ocache->sb_logical_line_count_dist, 
+         sizeof(ocache->sb_logical_line_count_dist));
   return;
 }
 
@@ -2272,15 +2491,14 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
 //   1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64
 // This function does not create or write any file if there is no snapshot
 void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
-  if(ocache->stat_snapshot_head == NULL) {
-    assert(ocache->stat_snapshot_tail == NULL);
-    return;
-  }
   FILE *fp = fopen(filename, "w");
   SYSEXPECT(fp != NULL);
   fprintf(fp, "logical_line_count, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, "
               "sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count, "
-              "1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64\n");
+              // Size distribution
+              "1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64, "
+              // Logical line count distribution
+              "singleton, pair, trio, quad\n");
   ocache_stat_snapshot_t *snapshot = ocache->stat_snapshot_head;
   while(snapshot != NULL) {
     fprintf(fp, "%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu",
@@ -2290,6 +2508,10 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
     // Then print histogram elements, note that we prepend a comma before the number
     for(int i = 0;i < 8;i++) {
       fprintf(fp, ", %lu", snapshot->size_histogram[i]);
+    }
+    // Print logical line count distribution
+    for(int i = 0;i < 4;i++) {
+      fprintf(fp, ", %lu", snapshot->sb_logical_line_count_dist[i]);
     }
     fputc('\n', fp);
     snapshot = snapshot->next;
@@ -2386,6 +2608,8 @@ void ocache_conf_print(ocache_t *ocache) {
     printf("BDI\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_FPC_cb) {
     printf("FPC\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_CPACK_cb) {
+    printf("CPACK\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
   } else {
@@ -2470,6 +2694,23 @@ void ocache_stat_print(ocache_t *ocache) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->FPC_size_counts[i]);
     }
     putchar('\n');
+  } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_CPACK_cb) {
+    printf("CPACK attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      ocache->comp_attempt_count, ocache->CPACK_success_count, ocache->CPACK_fail_count,
+      100.0 * ocache->CPACK_success_count / (double)ocache->comp_attempt_count);
+    printf("CPACK success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->CPACK_before_size_sum, ocache->CPACK_after_size_sum,
+      100.0 * ocache->CPACK_after_size_sum / (double)ocache->CPACK_before_size_sum,
+      (double)ocache->CPACK_before_size_sum / (double)ocache->CPACK_after_size_sum);
+    printf("CPACK overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      ocache->comp_attempt_size_sum, ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum,
+      100.0 * (ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum) / (double)ocache->comp_attempt_size_sum,
+      (double)ocache->comp_attempt_size_sum / (double)(ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum));
+    printf("Size classes ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->CPACK_size_counts[i]);
+    }
+    putchar('\n');
   } else {
     printf("Unknown compression method (debugging?)\n");
   }
@@ -2485,6 +2726,11 @@ void ocache_stat_print(ocache_t *ocache) {
   printf("Size histogram: ");
   for(int i = 0;i < 8;i++) {
     printf("[%d-%d] %lu ", i * 8 + 1, (i + 1) * 8, ocache->size_histogram[i]);
+  }
+  putchar('\n');
+  printf("Logical line count dist: ");
+  for(int i = 0;i < 4;i++) {
+    printf("[%d] %lu ", i + 1, ocache->sb_logical_line_count_dist[i]);
   }
   putchar('\n');
   printf("-----------------------------------\n");
@@ -5383,28 +5629,24 @@ void oc_save_stat_snapshot(oc_t *oc, char *prefix) {
   int prefix_len = strlen(prefix);
   switch(oc->cc_type) {
     case OC_CC_SIMPLE:
-      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
-        "cc-simple-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "cc-simple-snapshot.csv");
       printf("Saving cc_simple stats to file \"%s\"\n", filename);
       ocache_save_stat_snapshot(oc->cc_simple->shared_llc, filename);
       break;
     case OC_CC_SCACHE:
-      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
-        "cc-scache-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "cc-scache-snapshot.csv");
       printf("Saving cc_scache stats to file \"%s\"\n", filename);
       scache_save_stat_snapshot(oc->cc_scache->shared_llc, filename);
       break;
     case OC_CC_OCACHE: 
-      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
-        "cc-ocache-snapshot-%lu.csv", (uint64_t)time(NULL));
+      snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "cc-ocache-snapshot.csv");
       printf("Saving cc_ocache stats to file \"%s\"\n", filename);
       ocache_save_stat_snapshot(oc->cc_ocache->shared_llc, filename);
       break;
     default: assert(0); break;
   }
   // Save DRAM snapshot
-  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, 
-    "dram-snapshot-%lu.csv", (uint64_t)time(NULL));
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "dram-snapshot.csv");
   printf("Saving DRAM stats to file \"%s\"\n", filename);
   dram_save_stat_snapshot(oc->dram, filename);
   return;
@@ -5412,14 +5654,10 @@ void oc_save_stat_snapshot(oc_t *oc, char *prefix) {
 
 // Called by debuggers to avoid leaving trash files
 void oc_remove_dump_files(oc_t *oc) {
-  int ret = 0;
-  ret += system("rm dram-snapshot-*.txt");
-  ret += system("rm cc-simple-snapshot-*.txt");
-  ret += system("rm cc-scache-snapshot-*.txt");
-  ret += system("rm cc-ocache-snapshot-*.txt");
-  if(ret != 0) {
-    printf("At least one system() call in oc_remove_dump_files() reported error\n");
-  }
+  remove("dram-snapshot.csv");
+  remove("cc-simple-snapshot.csv");
+  remove("cc-scache-snapshot.csv");
+  remove("cc-ocache-snapshot.csv");
   (void)oc;
   return;
 }
@@ -5749,6 +5987,7 @@ void main_param_conf_print(main_param_t *param) {
 //   main.start_inst_count
 //   main.logging
 //   main.logging_filename
+//   main.result_suffix
 main_t *main_init_conf(conf_t *conf) {
   main_t *main = (main_t *)malloc(sizeof(main_t));
   SYSEXPECT(main != NULL);
@@ -5771,6 +6010,27 @@ main_t *main_init_conf(conf_t *conf) {
     error_exit("Field main->zsim_write_buffer is not properly aligned (alignment = %lu)\n",
       (uint64_t)&main->zsim_write_buffer % 64);
   }
+  // Read result suffix, optional
+  char *result_suffix = NULL;
+  int result_suffix_found = conf_find_str(conf, "main.result_suffix", &result_suffix);
+  if(result_suffix_found == 1) {
+    if(strlen(result_suffix) > MAIN_RESULT_SUFFIX_MAX_SIZE) {
+      error_exit("Result suffix \"%s\" is too long (max %d)\n", result_suffix, MAIN_RESULT_SUFFIX_MAX_SIZE);
+    }
+    main->result_suffix = strclone(result_suffix);
+  } else {
+    main->result_suffix = NULL;
+  } 
+  char *app_name = NULL;
+  int app_name_found = conf_find_str(conf, "main.app_name", &app_name);
+  if(app_name_found == 1) {
+    if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
+      error_exit("App name \"%s\" is too long (max %d)\n", app_name, MAIN_APP_NAME_MAX_SIZE);
+    }
+    main->app_name = strclone(app_name);
+  } else {
+    main->app_name = NULL;
+  } 
   return main;
 }
 
@@ -5794,6 +6054,8 @@ void main_free(main_t *main) {
   // Free components
   free(main->cwd);
   free(main->result_dir);
+  free(main->result_suffix);
+  free(main->app_name);
   main_latency_list_free(main->latency_list);
   main_addr_map_free(main->addr_map);
   oc_free(main->oc);
@@ -5838,11 +6100,6 @@ void main_sim_begin(main_t *main) {
   main->result_dir = (char *)malloc(MAIN_RESULT_DIR_SIZE);
   SYSEXPECT(main->result_dir);
   snprintf(main->result_dir, MAIN_RESULT_DIR_SIZE, "result_%lu", main->begin_time);
-  struct stat st;
-  if(stat(main->result_dir, &st) == -1) {
-    int ret = mkdir(main->result_dir, 0700);
-    SYSEXPECT(ret == 0);
-  }
   return;
 }
 
@@ -5857,13 +6114,52 @@ void main_sim_end(main_t *main) {
     fclose(main->logging_fp);
   }
   // Save stat snapshots to text files
-  char save_prefix[1024];
-  strcpy(save_prefix, main->result_dir);
-  strcat(save_prefix, "/");
-  oc_save_stat_snapshot(main->oc, save_prefix);
-  main_save_conf_stat(main, save_prefix);
-  // Just terminate here
+  char save_dir[1024];
+  main_gen_result_dir_name(main, save_dir);
+  // Check whether the buf is overflown
+  if(strlen(save_dir) > 1022) {
+    error_exit("Dir name buffer too large; Stack overflows\n");
+  }
+  // First create the directory for saving
+  struct stat st;
+  if(stat(save_dir, &st) == -1) {
+    int ret = mkdir(save_dir, 0700);
+    SYSEXPECT(ret == 0);
+  }
+  // Then build the suffix
+  strcat(save_dir, "/");
+  oc_save_stat_snapshot(main->oc, save_dir);
+  main_save_conf_stat(main, save_dir);
+  // Just terminate here under non-debug mode
+#ifndef UNIT_TEST
   exit(0);
+#endif
+  return;
+}
+
+// Generates the directory name used to save result;
+// Format is: result_[time]_[app name]_[custom suffix], without the trailing "/"
+// This function does not check buffer size. Always assume it is large enough
+void main_gen_result_dir_name(main_t *main, char *buf) {
+  strcpy(buf, main->result_dir);
+  if(main->app_name != NULL) {
+    strcat(buf, "_");
+    strcat(buf, main->app_name);
+  }
+  if(main->result_suffix != NULL) {
+    strcat(buf, "_");
+    strcat(buf, main->result_suffix);
+  }
+  return;
+}
+
+void main_set_app_name(main_t *main, const char *app_name) {
+  if(main->app_name != NULL) {
+    error_exit("main's app_name is already set, value \"%s\"\n", main->app_name);
+  } else if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
+    error_exit("app_name's length exceeds largest allowed\n");
+  }
+  main->app_name = strclone(app_name);
   return;
 }
 
@@ -6077,7 +6373,7 @@ void main_save_conf_stat(main_t *main, char *prefix) {
     strcpy(filename, prefix);
   }
   int prefix_len = strlen(prefix);
-  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "conf-%lu.txt", main->begin_time);
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "conf.txt");
   int saved_stdout = dup(STDOUT_FILENO);
   // Create the file, and truncate it if already exists
   int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -6090,7 +6386,7 @@ void main_save_conf_stat(main_t *main, char *prefix) {
   dup2(saved_stdout, STDOUT_FILENO);
   //
   // Then do the same with stat
-  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "stat-%lu.txt", main->begin_time);
+  snprintf(filename + prefix_len, sizeof(filename) - prefix_len, "stat.txt");
   saved_stdout = dup(STDOUT_FILENO);
   fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   SYSEXPECT(fd != -1);
@@ -6109,6 +6405,7 @@ void main_conf_print(main_t *main) {
   // Read from conf file
   main_param_conf_print(main->param);
   printf("CWD: \"%s\"\n", main->cwd); // Current working directory
+  printf("Result suffix: \"%s\"\n", main->result_suffix);
   printf("conf file name \"%s\"\n", main->conf_filename);
   printf("oc:\n");
   oc_conf_print(main->oc);

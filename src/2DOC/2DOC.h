@@ -143,6 +143,53 @@ void FPC_decomp(void *_out_buf, void *in_buf);
 void FPC_print_compressed(void *in_buf);
 void FPC_print_packed_bits(uint64_t *buf, int begin_offset, int bits);
 
+//* CPACK
+
+typedef struct {
+  int count;                  // Number of valid entries
+  uint32_t data[16];          // First entry is always MRU, last LRU
+} CPACK_dir_t;
+
+inline static void CPACK_dir_invalidate(CPACK_dir_t *dir) {
+  dir->count = 0;
+  return;
+}
+
+// Exchange data field of two entries
+inline static void CPACK_dir_update_LRU(CPACK_dir_t *dir, int index) {
+  assert(index >= 0 && index < dir->count);
+  uint32_t temp = dir->data[0];
+  dir->data[0] = dir->data[index];
+  dir->data[index] = temp;
+  return;
+}
+
+// Get a free entry, possibly evicting the LRU entry
+inline static int CPACK_dir_get_free_entry_index(CPACK_dir_t *dir) {
+  if(dir->count == 16) {
+    return 15;
+  } else {
+    return dir->count++;
+  }
+}
+
+// This function also updates LRU
+inline static void CPACK_dir_insert(CPACK_dir_t *dir, uint32_t data) {
+  int index = CPACK_dir_get_free_entry_index(dir);
+  dir->data[index] = data;
+  CPACK_dir_update_LRU(dir, index);
+  return;
+}
+
+// Search pattern match of the word; output stores the output, return value is # of bits in the output
+int CPACK_search(CPACK_dir_t *dir, uint32_t word, uint64_t *output);
+
+int CPACK_comp(void *out_buf, void *_in_buf);
+void CPACK_decomp(void *out_buf, void *in_buf);
+int CPACK_get_comp_size_bits(void *_in_buf); // Dry run only, no output buffer
+
+void CPACK_print_compressed(void *in_buf);
+
 //* MESI_t - Abstract coherence controller, decoupled from cache implementation
 
 // Maximum number of cores supported by this stucture
@@ -603,6 +650,7 @@ typedef struct ocache_stat_snapshot_struct_t {
   uint64_t sb_2_2_count;             // 2 * 2 sb count
   uint64_t no_shape_line_count;      // no shape line count
   uint64_t size_histogram[8];        // Same as the histogram in ocache
+  uint64_t sb_logical_line_count_dist[4]; // index i is number of SBs that have i logical lines (i = [1, 4])
   struct ocache_stat_snapshot_struct_t *next;
 } ocache_stat_snapshot_t;
 
@@ -672,6 +720,13 @@ typedef struct ocache_struct_t {
   uint64_t FPC_before_size_sum;      // Size sum before compression, only for successful lines
   uint64_t FPC_after_size_sum;       // Size sum after compression, only for successful lines
   uint64_t FPC_size_counts[8];       // Size distribution of FPC
+  // CPACK-specific stats. All fields have the same meaning as FPC
+  uint64_t CPACK_success_count;        
+  uint64_t CPACK_fail_count;         
+  uint64_t CPACK_uncomp_size_sum;
+  uint64_t CPACK_before_size_sum;
+  uint64_t CPACK_after_size_sum;
+  uint64_t CPACK_size_counts[8];
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -681,6 +736,7 @@ typedef struct ocache_struct_t {
   uint64_t sb_1_4_count;             // 1 * 4 sb count
   uint64_t sb_2_2_count;             // 2 * 2 sb count
   uint64_t no_shape_line_count;      // no shape line count
+  uint64_t sb_logical_line_count_dist[4];  // Number of SBs that have particular number of lines
   uint64_t size_histogram[8];        // 8-byte interval; Only valid lines; First interval is [1, 8], not [0, 7]
   uint8_t stat_end[0];          // Marks end address of stat region
   // Always inline this at the end to save one pointer redirection
@@ -754,6 +810,7 @@ inline static void ocache_lookup_probe(
 // Get compressed size call backs
 int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 
 void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
@@ -1692,8 +1749,10 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 // We cannot use 2DOC as identifier since it begins with a number
 
 // Maximum number of bytes of a memory operation
-#define MAIN_MEM_OP_MAX_SIZE     256
-#define MAIN_RESULT_DIR_SIZE     256
+#define MAIN_MEM_OP_MAX_SIZE        256
+#define MAIN_RESULT_DIR_SIZE        256
+#define MAIN_RESULT_SUFFIX_MAX_SIZE 64
+#define MAIN_APP_NAME_MAX_SIZE      32
 
 // Memory operation
 #define MAIN_READ             0
@@ -1751,6 +1810,9 @@ typedef struct {
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
   char *cwd;           // Current working directory; has ownership
   char *result_dir;    // Stores result directory name, relative path (only the dir name), has ownership
+  char *result_suffix; // Suffix of result directory, for better recognizability; Optional, NULL if invalid
+  // This could be set by either conf file key main.app_name, or by main_set_app_name()
+  char *app_name;      // Name of the application, will be reflected in the result directory name; Optional
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t begin_time;
   uint64_t end_time;
@@ -1775,6 +1837,10 @@ void main_free(main_t *main);
 // Called before and after the simulation respectively
 void main_sim_begin(main_t *main);
 void main_sim_end(main_t *main);
+
+// Generate result directory name given a buffer; Updates the buffer in-place
+void main_gen_result_dir_name(main_t *main, char *buf);
+void main_set_app_name(main_t *main, const char *app_name);
 
 // Get current memory op (must be valid); Bound check is performed
 inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
