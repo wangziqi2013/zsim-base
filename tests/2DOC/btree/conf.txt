@@ -7,15 +7,9 @@
 #%include tests/2DOC/cc_simple_BDI_4_1_conf.txt
 
 
-%include tests/2DOC/cc_simple_BDI_third_party_1_4_conf.txt
-
-
 #%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
 
 #%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
-
-
-#%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
 
 
 #%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
@@ -41,6 +35,8 @@
 
 #%include tests/2DOC/cc_scache_FPC_conf.txt
 
+%include tests/2DOC/cc_scache_CPACK_conf.txt
+
 #%include tests/2DOC/cc_scache_MBD_conf.txt
 
 
@@ -53,8 +49,13 @@ dram.read_latency = 300
 dram.write_latency = 300
 
 main.max_inst_count = 500M
-main.start_inst_count = 300M
-main.logging = 0
+main.start_inst_count = 100M
 
 # Automatically convert 4 consecutive blocks into 4 vertical ones
 main.addr_1d_to_2d_type = None
+
+# This is read by btree workload
+workload.btree.threads = 1
+workload.btree.ops = 10000000
+workload.btree.inserts = 50
+workload.btree.reads = 50

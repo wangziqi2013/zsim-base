@@ -10,16 +10,14 @@ cc.simple.l2.latency = 8
 
 # 1MB
 cc.simple.llc.size = 1048576
-# 2MB
-#cc.simple.llc.size = 2097152
 # 4MB
 #l3.size = 4194304 
 cc.simple.llc.physical_way_count = 16
 cc.simple.llc.latency = 30
-cc.simple.llc.algorithm = None
+cc.simple.llc.algorithm = MBDv4
 
 cc.simple.core_count = 1
 
-cc.simple.default_shape = None
+cc.simple.default_shape = 1_4
 
-main.result_suffix = simple_uncomp
+main.result_suffix = simple_MBDv4_1_4
