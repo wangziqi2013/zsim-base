@@ -46,7 +46,7 @@ void assert_uint64_power2(uint64_t num, const char *name) {
 
 char *strclone(const char *s) {
   int len = strlen(s);
-  char *ret = (char *)malloc(len);
+  char *ret = (char *)malloc(len + 1);
   SYSEXPECT(ret != NULL);
   strcpy(ret, s);
   return ret;

@@ -1,5 +1,6 @@
 
 #include "2DOC.h"
+#include "third_party/compression.h"
 
 //* BDI
 
@@ -16,8 +17,7 @@ BDI_param_t BDI_types[8] = {
 
 // String names of BDI types; indexed using runtime type
 const char *BDI_names[8] = {
-  NULL, NULL, // First two are not BDI
-  "8-1", "8-2", "8-4", "4-1", "4-2", "2-1",
+  "ZERO", "DUP", "8-1", "8-2", "8-4", "4-1", "4-2", "2-1",
 };
 
 int BDI_comp_order[6] = {
@@ -280,8 +280,6 @@ void BDI_print_compressed(void *in_buf, BDI_param_t *param) {
     small_value_bitmap >>= 1;
   }
   printf("\n--------------\n");
-  //_mm512_sub_epi16();
-  //_mm512_load_epi32();
   return;
 }
 
@@ -887,6 +885,7 @@ void CPACK_print_compressed(void *in_buf) {
   }
   return;
 }
+
 //* MBD
 
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
@@ -911,40 +910,40 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
 #ifdef MBD_COLLECT_STAT 
       dict->match_count++;
 #endif
-      return 5;
+      return 2 + MBD_DICT_INDEX_BITS;
     }
     uint32_t delta = word - data;
     uint32_t masked_delta;
     masked_delta = delta & ~0x7U;
     if(masked_delta == 0 || masked_delta == ~0x7U) {
-      if(min_bits > 11) {
+      if(min_bits > 8 + MBD_DICT_INDEX_BITS) {
         // 4-bit delta, code 4'0011 + 3-bit index + 4-bit delta
-        *output = ((delta & 0xF) << 7) | ((uint64_t)i << 4) | 0x3UL;
-        min_bits = 11;
+        *output = ((delta & 0xF) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x3UL;
+        min_bits = 8 + MBD_DICT_INDEX_BITS;
       }
     } else {
       masked_delta = delta & ~0x7FU;
       if(masked_delta == 0 || masked_delta == ~0x7FU) {
-        if(min_bits > 15) {
+        if(min_bits > 12 + MBD_DICT_INDEX_BITS) {
           // 8-bit delta, code 4'0111 + 3-bit index + 8-bit delta
-          *output = ((delta & 0xFFU) << 7) | ((uint64_t)i << 4) | 0x7UL;
-          min_bits = 15;
+          *output = ((delta & 0xFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x7UL;
+          min_bits = 12 + MBD_DICT_INDEX_BITS;
         }
       } else {
         masked_delta = delta & ~0x7FFU;
         if(masked_delta == 0 || masked_delta == ~0x7FFU) {
-          if(min_bits > 19) {
+          if(min_bits > 16 + MBD_DICT_INDEX_BITS) {
             // 12-bit delta, code 4'1011 + 3-bit index + 12-bit delta
-            *output = ((delta & 0xFFFU) << 7) | ((uint64_t)i << 4) | 0xBUL;
-            min_bits = 19;
+            *output = ((delta & 0xFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xBUL;
+            min_bits = 16 + MBD_DICT_INDEX_BITS;
           }
         } else {
           masked_delta = delta & ~0x7FFFU;
           if(masked_delta == 0 || masked_delta == ~0x7FFFU) {
-            if(min_bits > 23) {
+            if(min_bits > 20 + MBD_DICT_INDEX_BITS) {
               // 16-bit delta, code 4'1111 + 3-bit index + 16-bit delta
-              *output = ((delta & 0xFFFFU) << 7) | ((uint64_t)i << 4) | 0xFUL;
-              min_bits = 23;
+              *output = ((delta & 0xFFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xFUL;
+              min_bits = 20 + MBD_DICT_INDEX_BITS;
             }
           }
         }
@@ -954,10 +953,10 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
   if(min_bits != 32) {
 #ifdef MBD_COLLECT_STAT 
     switch(min_bits) {
-      case 11: dict->delta_size_dist[0]++; break;
-      case 15: dict->delta_size_dist[1]++; break;
-      case 19: dict->delta_size_dist[2]++; break;
-      case 23: dict->delta_size_dist[3]++; break;
+      case 8 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[0]++; break;
+      case 12 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[1]++; break;
+      case 16 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[2]++; break;
+      case 20 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[3]++; break;
       default: assert(0); break;
     }
 #endif
@@ -973,24 +972,22 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
 }
 
 // This function processes a block consisting of 32-bit words. Input size must be aligned
-int _MBD_comp(void *out_buf, void *_in_buf, int size) {
+int __MBD_comp(void *out_buf, void *_in_buf, int size, MBD_dict_t *dict) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
-  MBD_dict_t dict;
   assert(size > 0 && size % 4 == 0);
-  MBD_dict_invalidate(&dict);
   int count = size >> 2;
   for(int i = 0;i < count;i++) {
     uint64_t output;
     // Find a match
     uint32_t word = *in_buf;
-    int ret = MBD_search(&dict, word, &output);
+    int ret = MBD_search(dict, word, &output);
     //printf("ret %d\n", ret);
     FPC_pack_bits_bmi(out_buf, bits, &output, ret);
     bits += ret;
     // Return value 2 means that it is zero
     if(ret != 2) {
-      MBD_dict_insert(&dict, word);
+      MBD_dict_insert(dict, word);
     }
     //for(int i = 0;i < dict.count;i++) printf("0x%X, ", dict.data[i]);
     //putchar('\n');
@@ -1015,33 +1012,33 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
     FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; break;
-      case 1: bits += 5; word = dict.data[(int)(output >> 2) & 0x7]; break;
+      case 1: bits += (2 + MBD_DICT_INDEX_BITS); word = dict.data[(int)(output >> 2) & (MBD_DICT_COUNT - 1)]; break;
       case 2: bits += 34; word = (uint32_t)(output >> 2); break;
       default: {
         switch((int)output & 0xF) {
           case 0x3: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFU;
             word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
-            bits += 11;
+            bits += (8 + MBD_DICT_INDEX_BITS);
           } break;
           case 0x7: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFU;
             word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
-            bits += 15;
+            bits += (12 + MBD_DICT_INDEX_BITS);
           } break;
           case 0xB: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFU;
             word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
-            bits += 19;
+            bits += (16 + MBD_DICT_INDEX_BITS);
           } break;
           case 0xF: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFFU;
             word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
-            bits += 23;
+            bits += (20 + MBD_DICT_INDEX_BITS);
           } break;
           default: {
             error_exit("Undefined case during CPACK decompression\n");
@@ -1059,25 +1056,24 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
   return;
 }
 
-
 // This function processes a block consisting of 32-bit words. Input size must be aligned
-int _MBD_get_comp_size_bits(void *_in_buf, int size) {
+// This function allows passing a customized dictionary object, which can be used as a pre-filled
+// dict or for collecting stats
+int __MBD_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
-  MBD_dict_t dict;
   assert(size > 0 && size % 4 == 0);
-  MBD_dict_invalidate(&dict);
   int count = size >> 2;
   for(int i = 0;i < count;i++) {
     uint64_t output;
     // Find a match
     uint32_t word = *in_buf;
-    int ret = MBD_search(&dict, word, &output);
+    int ret = MBD_search(dict, word, &output);
     (void)output;
     bits += ret;
     // Return value 2 means that it is zero
     if(ret != 2) {
-      MBD_dict_insert(&dict, word);
+      MBD_dict_insert(dict, word);
     }
     in_buf++;
   }
@@ -1100,36 +1096,36 @@ void _MBD_print_compressed(void *in_buf, int size) {
     FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
-      case 1: bits += 5; word = dict.data[(int)(output >> 2) & 0x7]; code = 1; break;
+      case 1: bits += (2 + MBD_DICT_COUNT); word = dict.data[(int)(output >> 2) & (MBD_DICT_COUNT - 1)]; code = 1; break;
       case 2: bits += 34; word = (uint32_t)(output >> 2); code = 2; break;
       default: {
         switch((int)output & 0xF) {
           case 0x3: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFU;
             word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
-            bits += 11;
+            bits += (8 + MBD_DICT_COUNT);
             code = 0x3; 
           } break;
           case 0x7: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFU;
             word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
-            bits += 15;
+            bits += (12 + MBD_DICT_COUNT);
             code = 0x7; 
           } break;
           case 0xB: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFU;
             word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
-            bits += 19;
+            bits += (16 + MBD_DICT_COUNT);
             code = 0xB; 
           } break;
           case 0xF: {
-            int index = ((int)output >> 4) & 0x7;
-            uint32_t delta = (uint32_t)(output >> 7) & 0xFFFFU;
+            int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
+            uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFFU;
             word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
-            bits += 23;
+            bits += (20 + MBD_DICT_COUNT);
             code = 0xF; 
           } break;
           default: {
@@ -1517,6 +1513,10 @@ const char *ocache_shape_names[4] = {
   "None", "4_1", "1_4", "2_2",
 };
 
+const char *ocache_MBD_type_names[3] = {
+  "MBDv0", "MBDv2", "MBDv4",
+};
+
 ocache_t *ocache_init(int size, int way_count) {
   // First allocate the cache control part, and then slots using realloc
   ocache_t *ocache = (ocache_t *)malloc(sizeof(ocache_t));
@@ -1609,13 +1609,10 @@ void ocache_init_param(ocache_t *ocache, int size, int way_count) {
 }
 
 void ocache_set_name(ocache_t *ocache, const char *name) {
-  int len = strlen(name);
   if(ocache->name != NULL) {
     error_exit("Cache \"%s\" has already been named\n", ocache->name);
   }
-  ocache->name = (char *)malloc(len + 1);
-  SYSEXPECT(ocache->name != NULL);
-  strcpy(ocache->name, name);
+  ocache->name = strclone(name);
   return;
 }
 
@@ -1639,12 +1636,23 @@ void ocache_set_dmap(ocache_t *ocache, dmap_t *dmap) {
 void ocache_set_compression_type(ocache_t *ocache, const char *name) {
   if(streq(name, "BDI") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_cb);
+  } else if(streq(name, "BDI_third_party") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_third_party_cb);
   } else if(streq(name, "FPC") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_cb);
+  } else if(streq(name, "FPC_third_party") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_third_party_cb);
   } else if(streq(name, "CPACK") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_CPACK_cb);
-  } else if(streq(name, "MBD") == 1) {
+  } else if(streq(name, "MBD") == 1 || streq(name, "MBDv0") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->MBD_type = OCACHE_MBD_V0;
+  } else if(streq(name, "MBDv2") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->MBD_type = OCACHE_MBD_V2;
+  } else if(streq(name, "MBDv4") == 1) {
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->MBD_type = OCACHE_MBD_V4;
   } else if(streq(name, "None") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
   } else {
@@ -2057,6 +2065,30 @@ int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   return FPC_bytes;
 }
 
+int ocache_get_compressed_size_FPC_third_party_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  assert(ocache->dmap != NULL); (void)shape;
+  ocache->comp_attempt_count++;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *entry = dmap_find(ocache->dmap, oid, addr);
+  if(entry == NULL) {
+    error_exit("Entry for FPC compression is not found\n");
+  }
+  // No metadata to pass for FPC
+  int FPC_bytes = GeneralCompress(entry->data, COMPRESSION_FPC, NULL);
+  if(FPC_bytes >= (int)UTIL_CACHE_LINE_SIZE) {
+    ocache->FPC_fail_count++;
+    ocache->FPC_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  ocache->FPC_success_count++;
+  ocache->FPC_before_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->FPC_after_size_sum += FPC_bytes;
+  assert(FPC_bytes > 0 && FPC_bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  ocache->FPC_size_counts[(FPC_bytes - 1) / 8]++;
+  return FPC_bytes;
+}
+
 int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
   assert(ocache->dmap != NULL); (void)shape;
   ocache->comp_attempt_count++;
@@ -2089,7 +2121,38 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   if(entry == NULL) {
     error_exit("Entry for MBD compression is not found\n");
   }
-  int bits = MBD_get_comp_size_bits(entry->data);
+  // We use our own dictionary object for collecting stats
+  MBD_dict_t dict;
+  MBD_dict_invalidate(&dict);
+  uint64_t base_addr = addr;
+  if(ocache->MBD_type == OCACHE_MBD_V4) {
+    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
+  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
+    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+  }
+  // For MBDv0 this is never executed
+  if(base_addr != addr) {
+    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
+    if(base_entry != NULL) {
+      __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict);
+      if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
+        ocache->MBD_insert_base_is_missing++;
+      } else {
+        ocache->MBD_insert_base_is_present++;
+      }
+    }
+  } else {
+    ocache->MBD_insert_base_is_present++;
+  }
+  int bits = __MBD_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict);
+  // Update stats
+  ocache->MBD_zero_count += dict.zero_count;
+  ocache->MBD_uncomp_count += dict.uncomp_count;
+  ocache->MBD_match_count += dict.match_count;
+  ocache->MBD_delta_size_dist[0] += dict.delta_size_dist[0];
+  ocache->MBD_delta_size_dist[1] += dict.delta_size_dist[1];
+  ocache->MBD_delta_size_dist[2] += dict.delta_size_dist[2];
+  ocache->MBD_delta_size_dist[3] += dict.delta_size_dist[3];
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     ocache->MBD_fail_count++;
     ocache->MBD_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
@@ -2103,6 +2166,33 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
   ocache->MBD_size_counts[(bytes - 1) / 8]++;
   return bytes;
+}
+
+// This function is called by cc_simple_access() when an access hits an LLC line
+// This function checks whether the base line is present in the LLC
+void ocache_llc_read_hit_MBD(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  uint64_t base_addr = addr;
+  if(ocache->MBD_type == OCACHE_MBD_V4) {
+    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
+  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
+    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+  }
+  // For MBDv0 this is never executed
+  if(base_addr != addr) {
+    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
+    if(base_entry != NULL) {
+      if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
+        ocache->MBD_read_base_is_missing++;
+      } else {
+        ocache->MBD_read_base_is_present++;
+      }
+    }
+  } else {
+    // Just accessing the base itself
+    ocache->MBD_read_base_is_present++;
+  }
+  (void)shape;
+  return;
 }
 
 // This function implements vertical compression policy
@@ -2142,7 +2232,7 @@ int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->BDI_compress_type_counts[in_type]++;
   // Update zero line stats. We do not treat zero lines specially
   if(all_zero == 1) {
-    ocache->all_zero_count++;
+    ocache->BDI_compress_type_counts[BDI_ZERO]++;
   }
   BDI_param_t *param = &BDI_types[in_type];
   ocache->BDI_success_count++;
@@ -2198,6 +2288,31 @@ int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->vertical_success_count++;
   //printf("Success\n");
   return vertical_size;
+}
+
+int ocache_get_compressed_size_BDI_third_party_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  assert(ocache->dmap != NULL);
+  (void)shape;
+  ocache->comp_attempt_count++;
+  ocache->comp_attempt_size_sum += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *dmap_entry = dmap_find(ocache->dmap, oid, addr);
+  assert(dmap_entry != NULL);
+  int type;
+  // type field is COMPRESSION_FAIL, COMPRESSION_ZERO, COMPRESSION_DUP or COMPRESSION_ type
+  unsigned int comp_size = GeneralCompress(dmap_entry->data, COMPRESSION_BDI, &type);
+  if(type == COMPRESSION_FAIL) {
+    assert(comp_size == UTIL_CACHE_LINE_SIZE);
+    ocache->BDI_failed_count++;
+    ocache->BDI_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
+    //printf("Uncompressable\n");
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  // This is compatible with the type above (array size is 8)
+  ocache->BDI_compress_type_counts[type]++;
+  ocache->BDI_success_count++;
+  ocache->BDI_before_size_sum += UTIL_CACHE_LINE_SIZE;
+  ocache->BDI_after_size_sum += comp_size;
+  return comp_size;
 }
 
 // Helper function called by ocache_insert() 
@@ -2892,12 +3007,16 @@ void ocache_conf_print(ocache_t *ocache) {
   printf("Algorithm: ");
   if(ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_cb) {
     printf("BDI\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_third_party_cb) {
+    printf("BDI third party\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_FPC_cb) {
     printf("FPC\n");
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_FPC_third_party_cb) {
+    printf("FPC third party\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_CPACK_cb) {
     printf("CPACK\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_MBD_cb) {
-    printf("MBD\n");
+    printf("MBD (type %s)\n", ocache_MBD_type_names[ocache->MBD_type]);
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
   } else {
@@ -2911,7 +3030,8 @@ void ocache_conf_print(ocache_t *ocache) {
 void ocache_stat_print(ocache_t *ocache) {
   printf("---------- ocache_t stat ----------\n");
   // Vertical compression stats, only printed for LLC
-  if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb) {
+  if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb || 
+     ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_third_party_cb) {
     printf("Total attempted %lu BDI success %lu (failed %lu, rate %.2lf%%) not base %lu base found %lu"
            " type match %lu vertical success %lu (rate from BDI %.2lf%%, overall %.2lf%%)\n",
       ocache->comp_attempt_count, ocache->BDI_success_count, ocache->BDI_failed_count,
@@ -2952,20 +3072,17 @@ void ocache_stat_print(ocache_t *ocache) {
         (double)ocache->comp_attempt_size_sum, 
       (double)ocache->comp_attempt_size_sum / 
         (double)(ocache->BDI_uncomp_size_sum + ocache->vertical_uncomp_size_sum + ocache->vertical_after_size_sum));
-    //printf("BDI types [8_4] %lu [8_2] %lu [8_1] %lu [4_2] %lu [4_1] %lu [2_1] %lu [ZERO] %lu\n",
-    //  ocache->BDI_8_4_count, ocache->BDI_8_2_count, ocache->BDI_8_1_count, 
-    //  ocache->BDI_4_2_count, ocache->BDI_4_1_count, ocache->BDI_2_1_count,
-    //  ocache->all_zero_count);
     printf("BDI types");
-    for(int i = BDI_TYPE_BEGIN;i < BDI_TYPE_END;i++) {
+    for(int i = 0;i < BDI_TYPE_END;i++) {
       printf(" [%s] %lu", BDI_names[i], ocache->BDI_compress_type_counts[i]);
     }
-    printf(" [ZERO] %lu\n", ocache->all_zero_count);
+    putchar('\n');
     assert(ocache->BDI_compress_type_counts[0] == 0 && ocache->BDI_compress_type_counts[1] == 0);
     // These two constitute all cases
     assert(ocache->BDI_success_count + ocache->BDI_failed_count == ocache->comp_attempt_count);
     assert(ocache->vertical_success_count + ocache->vertical_uncomp_count == ocache->BDI_success_count);
-  } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_FPC_cb) {
+  } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_FPC_cb || 
+            ocache->get_compressed_size_cb == &ocache_get_compressed_size_FPC_third_party_cb) {
     printf("FPC attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
       ocache->comp_attempt_count, ocache->FPC_success_count, ocache->FPC_fail_count,
       100.0 * ocache->FPC_success_count / (double)ocache->comp_attempt_count);
@@ -3000,6 +3117,8 @@ void ocache_stat_print(ocache_t *ocache) {
     }
     putchar('\n');
   } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_MBD_cb) {
+    printf("MBD dict entries %d bits %d type %s\n", 
+      MBD_DICT_COUNT, MBD_DICT_INDEX_BITS, ocache_MBD_type_names[ocache->MBD_type]);
     printf("MBD attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
       ocache->comp_attempt_count, ocache->MBD_success_count, ocache->MBD_fail_count,
       100.0 * ocache->MBD_success_count / (double)ocache->comp_attempt_count);
@@ -3011,11 +3130,23 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum,
       100.0 * (ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum));
+    printf("MBD insert base present %lu missing %lu (base present percentage %.2lf%%)\n",
+      ocache->MBD_insert_base_is_present, ocache->MBD_insert_base_is_missing,
+      100.0 * ocache->MBD_insert_base_is_present / 
+        (double)(ocache->MBD_insert_base_is_present + ocache->MBD_insert_base_is_missing));
+    printf("MBD read base present %lu missing %lu (base present percentage %.2lf%%)\n",
+    ocache->MBD_read_base_is_present, ocache->MBD_read_base_is_missing,
+    100.0 * ocache->MBD_read_base_is_present / 
+      (double)(ocache->MBD_read_base_is_present + ocache->MBD_read_base_is_missing));
     printf("Size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->MBD_size_counts[i]);
     }
     putchar('\n');
+    printf("Per-word stats [ZERO] %lu [MATCH] %lu [UNCOMP] %lu [4-bit] %lu [8-bit] %lu [12-bit] %lu [16-bit] %lu\n",
+      ocache->MBD_zero_count, ocache->MBD_match_count, ocache->MBD_uncomp_count, 
+      ocache->MBD_delta_size_dist[0], ocache->MBD_delta_size_dist[1], 
+      ocache->MBD_delta_size_dist[2], ocache->MBD_delta_size_dist[3]);
   } else {
     printf("Unknown compression method (debugging?)\n");
   }
@@ -3218,6 +3349,29 @@ static int scache_get_compressed_size_CPACK_cb(scache_t *scache, uint64_t addr) 
   return bytes;
 }
 
+static int scache_get_compressed_size_MBD_cb(scache_t *scache, uint64_t addr) {
+  scache->MBD_attempt_count++;
+  scache->MBD_attempt_size += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *dmap_entry = dmap_find(scache->dmap, 0UL, addr);
+  if(dmap_entry == NULL) {
+    error_exit("Data to be compressed cannot be found on addr 0x%lX\n", addr);
+  }
+  int bits = MBD_get_comp_size_bits(dmap_entry->data);
+  if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    scache->MBD_fail_count++;
+    scache->MBD_uncomp_size += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int bytes = (bits + 7) / 8;
+  scache->MBD_success_count++;
+  scache->MBD_before_size += UTIL_CACHE_LINE_SIZE;
+  scache->MBD_after_size += bytes;
+  assert(bytes > 0 && bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  scache->MBD_size_counts[(bytes - 1) / 8]++;
+  return bytes;
+}
+
 // Trivial call back; No compression, always return full size cache line
 static int scache_get_compressed_size_None_cb(scache_t *scache, uint64_t addr) {
   (void)addr; (void)scache;
@@ -3236,6 +3390,8 @@ void scache_set_compression_type(scache_t *scache, const char *name) {
     scache->get_compressed_size_cb = scache_get_compressed_size_FPC_cb;
   } else if(streq(name, "CPACK") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_CPACK_cb;
+  } else if(streq(name, "MBD") == 1) {
+    scache->get_compressed_size_cb = scache_get_compressed_size_MBD_cb;
   } else if(streq(name, "None") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_None_cb;
   } else {
@@ -3562,6 +3718,8 @@ void scache_conf_print(scache_t *scache) {
     printf("FPC\n");
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_CPACK_cb) {
     printf("CPACK\n");
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_MBD_cb) {
+    printf("MBD\n");
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
     printf("None\n");
   } else if(scache->get_compressed_size_cb == NULL) {
@@ -3630,6 +3788,23 @@ void scache_stat_print(scache_t *scache) {
       printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->CPACK_size_counts[i]);
     }
     putchar('\n');
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_MBD_cb) { 
+    printf("MBD attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      scache->MBD_attempt_count, scache->MBD_success_count, scache->MBD_fail_count,
+      100.0 * scache->MBD_success_count / (double)scache->MBD_attempt_count);
+    printf("MBD success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->MBD_before_size, scache->MBD_after_size,
+      100.0 * scache->MBD_after_size / (double)scache->MBD_before_size,
+      (double)scache->MBD_before_size / (double)scache->MBD_after_size);
+    printf("MBD overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->MBD_attempt_size, scache->MBD_uncomp_size + scache->MBD_after_size,
+      100.0 * (scache->MBD_uncomp_size + scache->MBD_after_size) / (double)scache->MBD_attempt_size,
+      (double)scache->MBD_attempt_size / (double)(scache->MBD_uncomp_size + scache->MBD_after_size));
+    printf("Size classes ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->MBD_size_counts[i]);
+    }
+    putchar('\n');
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
     printf("Cache is not compressed\n");
   } else if(scache->get_compressed_size_cb == NULL) {
@@ -3642,6 +3817,11 @@ void scache_stat_print(scache_t *scache) {
     scache->read_count, scache->insert_count, scache->inv_count, scache->inv_success_count,
     scache->downgrade_count, scache->downgrade_success_count,
     scache->evict_line_count, (double)scache->evict_line_count / (double)scache->insert_count);
+  // Print line distribution, etc.
+  scache_refresh_stat(scache);
+  printf("Total line count %lu comp line count %lu comp size sum (unaligned) %lu (aligned) %lu\n",
+    scache->logical_line_count, scache->uncomp_logical_line_count,
+    scache->comp_line_size, scache->aligned_comp_line_size);
   return;
 }
 
@@ -5476,6 +5656,11 @@ uint64_t cc_simple_llc_insert_recursive(
       uint64_t evict_oid, evict_addr;
       ocache_gen_addr_in_sb(cc->shared_llc, insert_result.evict_entry.oid, insert_result.evict_entry.addr, 
         i, insert_result.evict_entry.shape, &evict_oid, &evict_addr);
+      // We only update it when optional dmap is present (for MBD)
+      dmap_entry_t *dmap_entry = dmap_find(cc->shared_llc->dmap, evict_oid, evict_addr);
+      if(dmap_entry != NULL) {
+        dmap_entry->MESI_entry.llc_state = MESI_STATE_I;
+      }
       // Whether LLC version is dirty
       int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, i);
       int evict_size = ocache_entry_get_size(&insert_result.evict_entry, i);
@@ -5599,12 +5784,12 @@ uint64_t cc_simple_access(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid,
       pmap_entry_t *pmap_entry = pmap_find(cc->commons.dmap, addr);
       //assert(pmap_entry != NULL);
       // If shape is defined, then use it. Otherwise use default shape
-      if(pmap_entry != NULL) {
-        shape = pmap_entry->shape;
-      } else {
-        shape = cc->default_shape;
-      }
+      shape = (pmap_entry != NULL) ? pmap_entry->shape : cc->default_shape;
       ocache_lookup_read(ocache, oid, addr, shape, &lookup_result);
+      // Update stat for ocache object (for MBD)
+      if(lookup_result.state != OCACHE_MISS) {
+        ocache_llc_read_hit_MBD(ocache, oid, addr, shape);
+      }
     }
     // Note that the state can either be HIT NORMAL or HIT COMPRESSED
     if(lookup_result.state != OCACHE_MISS) {
@@ -5646,6 +5831,11 @@ uint64_t cc_simple_access(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid,
     cc->commons.dram_read_cycle += (cycle - prev_cycle);
     if(cc->commons.dram_debug_cb != NULL) {
       cc->commons.dram_debug_cb(DRAM_READ, 0, cycle, oid, addr, UTIL_CACHE_LINE_SIZE);
+    }
+    // We only update it when optional dmap is present (for MBD)
+    dmap_entry_t *dmap_entry = dmap_find(cc->shared_llc->dmap, oid, addr);
+    if(dmap_entry != NULL) {
+      dmap_entry->MESI_entry.llc_state = MESI_STATE_S;
     }
   }
   hit_level--;
@@ -6294,28 +6484,56 @@ main_param_t *main_param_init(conf_t *conf) {
   memset(param, 0x00, sizeof(main_param_t));
   param->max_inst_count = conf_find_uint64_range(conf, "main.max_inst_count", 1, UINT64_MAX, CONF_RANGE | CONF_ABBR);
   param->start_inst_count = conf_find_uint64_range(conf, "main.start_inst_count", 0, UINT64_MAX, CONF_RANGE | CONF_ABBR);
-  param->logging = conf_find_bool_mandatory(conf, "main.logging");
-  assert(param->logging == 0 || param->logging == 1);
-  if(param->logging == 1) {
-    param->logging_filename = strclone(conf_find_str_mandatory(conf, "main.logging_filename"));
+  // Read result suffix, optional
+  char *result_suffix = NULL;
+  int result_suffix_found = conf_find_str(conf, "main.result_suffix", &result_suffix);
+  if(result_suffix_found == 1) {
+    if(strlen(result_suffix) > MAIN_RESULT_SUFFIX_MAX_SIZE) {
+      error_exit("Result suffix \"%s\" is too long (max %d)\n", result_suffix, MAIN_RESULT_SUFFIX_MAX_SIZE);
+    }
+    param->result_suffix = strclone(result_suffix);
   } else {
-    param->logging_filename = NULL;
+    param->result_suffix = NULL;
+  } 
+  char *app_name = NULL;
+  int app_name_found = conf_find_str(conf, "main.app_name", &app_name);
+  if(app_name_found == 1) {
+    if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
+      error_exit("App name \"%s\" is too long (max %d)\n", app_name, MAIN_APP_NAME_MAX_SIZE);
+    }
+    param->app_name = strclone(app_name);
+  } else {
+    param->app_name = NULL;
+  } 
+  // Read address translation type string, default to using the map (not performing any auto vertical rotation)
+  char *addr_1d_to_2d_type = NULL;
+  int addr_1d_to_2d_type_ret = conf_find_str(conf, "main.addr_1d_to_2d_type", &addr_1d_to_2d_type);
+  if(addr_1d_to_2d_type_ret == 1) {
+    param->addr_1d_to_2d_type = strclone(addr_1d_to_2d_type);
+  } else {
+    param->addr_1d_to_2d_type = NULL;
   }
   return param;
 }
 
 void main_param_free(main_param_t *param) {
-  if(param->logging_filename != NULL) {
-    free(param->logging_filename);
-  }
+  if(param->result_suffix != NULL) free(param->result_suffix);
+  if(param->app_name != NULL) free(param->app_name);
+  if(param->addr_1d_to_2d_type != NULL) free(param->addr_1d_to_2d_type);
   free(param);
   return;
 }
 
 void main_param_conf_print(main_param_t *param) {
-  printf("---------- main_t param ----------\n");
   printf("Inst count max %lu start %lu\n", param->max_inst_count, param->start_inst_count);
-  printf("Logging %d file %s\n", param->logging, param->logging ? param->logging_filename : "N/A");
+  if(param->result_suffix != NULL) printf("Result suffix: \"%s\"\n", param->result_suffix);
+  if(param->app_name != NULL) printf("App name: \"%s\"\n", param->app_name);
+  printf("Addr 1d-to-2d type: ");
+  if(param->addr_1d_to_2d_type != NULL) {
+    printf("\"%s\"\n", param->addr_1d_to_2d_type);
+  } else {
+    printf("Not using 1d-to-2d address mapping\n");
+  }
   return;
 }
 
@@ -6336,6 +6554,8 @@ void main_param_conf_print(main_param_t *param) {
 //   main.logging
 //   main.logging_filename
 //   main.result_suffix
+//   main.app_name
+//   main.addr_1d_to_2d_type ( = none / addr_map / 4_1)
 main_t *main_init_conf(conf_t *conf) {
   main_t *main = (main_t *)malloc(sizeof(main_t));
   SYSEXPECT(main != NULL);
@@ -6358,27 +6578,16 @@ main_t *main_init_conf(conf_t *conf) {
     error_exit("Field main->zsim_write_buffer is not properly aligned (alignment = %lu)\n",
       (uint64_t)&main->zsim_write_buffer % 64);
   }
-  // Read result suffix, optional
-  char *result_suffix = NULL;
-  int result_suffix_found = conf_find_str(conf, "main.result_suffix", &result_suffix);
-  if(result_suffix_found == 1) {
-    if(strlen(result_suffix) > MAIN_RESULT_SUFFIX_MAX_SIZE) {
-      error_exit("Result suffix \"%s\" is too long (max %d)\n", result_suffix, MAIN_RESULT_SUFFIX_MAX_SIZE);
-    }
-    main->result_suffix = strclone(result_suffix);
+  // Initialize address translation call back using the type string. The string is read by main's param init
+  if(main->param->addr_1d_to_2d_type == NULL || streq(main->param->addr_1d_to_2d_type, "None") == 1) {
+    main->addr_1d_to_2d_cb = main_1d_to_2d_None_cb;
+  } else if(streq(main->param->addr_1d_to_2d_type, "addr_map") == 1) {
+    main->addr_1d_to_2d_cb = main_1d_to_2d_cb;
+  } else if(streq(main->param->addr_1d_to_2d_type, "4_1") == 1) {
+    main->addr_1d_to_2d_cb = main_1d_to_2d_auto_vertical_4_1_cb;
   } else {
-    main->result_suffix = NULL;
-  } 
-  char *app_name = NULL;
-  int app_name_found = conf_find_str(conf, "main.app_name", &app_name);
-  if(app_name_found == 1) {
-    if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
-      error_exit("App name \"%s\" is too long (max %d)\n", app_name, MAIN_APP_NAME_MAX_SIZE);
-    }
-    main->app_name = strclone(app_name);
-  } else {
-    main->app_name = NULL;
-  } 
+    error_exit("Unknown 1d-to-2d addr translation type: \"%s\"\n", main->param->addr_1d_to_2d_type);
+  }
   return main;
 }
 
@@ -6388,11 +6597,7 @@ main_t *main_init(const char *conf_filename) {
   // This has been allocated in main_init_conf() 
   free(main->conf_filename);
   // Copy file name to the name buffer
-  int len = strlen(conf_filename);
-  main->conf_filename = (char *)malloc(len + 1);
-  SYSEXPECT(main->conf_filename != NULL);
-  strcpy(main->conf_filename, conf_filename);
-  main->cwd = main_get_cwd(main);
+  main->conf_filename = strclone(conf_filename);
   // Must be the last one to call
   main_sim_begin(main);
   return main;
@@ -6400,10 +6605,6 @@ main_t *main_init(const char *conf_filename) {
 
 void main_free(main_t *main) {
   // Free components
-  free(main->cwd);
-  free(main->result_dir);
-  free(main->result_suffix);
-  free(main->app_name);
   main_latency_list_free(main->latency_list);
   main_addr_map_free(main->addr_map);
   oc_free(main->oc);
@@ -6437,17 +6638,6 @@ void main_sim_begin(main_t *main) {
     // Delayed start in report_progress()
     main->started = 0;
   }
-  // Initialize log file
-  if(main->param->logging == 1) {
-    main->logging_fp = fopen(main->param->logging_filename, "wb");
-    SYSEXPECT(main->logging_fp != NULL);
-  } else {
-    main->logging_fp = NULL;
-  }
-  // Create directory for the result files
-  main->result_dir = (char *)malloc(MAIN_RESULT_DIR_SIZE);
-  SYSEXPECT(main->result_dir);
-  snprintf(main->result_dir, MAIN_RESULT_DIR_SIZE, "result_%lu", main->begin_time);
   return;
 }
 
@@ -6457,12 +6647,8 @@ void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
   main_stat_print(main);
-  // Close logging file pointer
-  if(main->logging_fp != NULL) {
-    fclose(main->logging_fp);
-  }
   // Save stat snapshots to text files
-  char save_dir[1024];
+  char save_dir[MAIN_RESULT_DIR_SIZE];
   main_gen_result_dir_name(main, save_dir);
   // Check whether the buf is overflown
   if(strlen(save_dir) > 1022) {
@@ -6489,48 +6675,25 @@ void main_sim_end(main_t *main) {
 // Format is: result_[time]_[app name]_[custom suffix], without the trailing "/"
 // This function does not check buffer size. Always assume it is large enough
 void main_gen_result_dir_name(main_t *main, char *buf) {
-  strcpy(buf, main->result_dir);
-  if(main->app_name != NULL) {
+  snprintf(buf, MAIN_RESULT_DIR_SIZE, "result_%lu", main->begin_time);
+  if(main->param->app_name != NULL) {
     strcat(buf, "_");
-    strcat(buf, main->app_name);
+    strcat(buf, main->param->app_name);
   }
-  if(main->result_suffix != NULL) {
+  if(main->param->result_suffix != NULL) {
     strcat(buf, "_");
-    strcat(buf, main->result_suffix);
+    strcat(buf, main->param->result_suffix);
   }
   return;
 }
 
 void main_set_app_name(main_t *main, const char *app_name) {
-  if(main->app_name != NULL) {
-    error_exit("main's app_name is already set, value \"%s\"\n", main->app_name);
+  if(main->param->app_name != NULL) {
+    error_exit("main's app_name is already set, value \"%s\"\n", main->param->app_name);
   } else if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
     error_exit("app_name's length exceeds largest allowed\n");
   }
-  main->app_name = strclone(app_name);
-  return;
-}
-
-// Append log object and data to the opened log file
-// Must only be called when logging is enabled
-void main_append_log(main_t *main, uint64_t cycle, int op, uint64_t addr, int size, void *data) {
-  assert(main->logging_fp != NULL && main->param->logging == 1);
-  assert(op == MAIN_READ || op == MAIN_WRITE);
-  assert(size > 0 && size < MAIN_MEM_OP_MAX_SIZE); // Must not exceed maximum write size
-  main_request_t request;
-  request.op = op;
-  request.size = size;
-  request.cycle = cycle;
-  request.addr = addr;
-  int ret;
-  ret = fwrite(&request, 1, sizeof(main_request_t), main->logging_fp);
-  if(ret != (int)sizeof(main_request_t)) {
-    error_exit("Error writing main logging object (ret %d expect %d)\n", ret, (int)sizeof(main_request_t));
-  }
-  ret = fwrite(data, 1, size, main->logging_fp);
-  if(ret != size) {
-    error_exit("Error writing main logging data (ret %d expect %d)\n", ret, size);
-  }
+  main->param->app_name = strclone(app_name);
   return;
 }
 
@@ -6593,9 +6756,9 @@ void main_bb_sim_finish(main_t *main) {
   return;
 }
 
-// Translating from 1D to 2D
+// Translating from 1D to 2D. This is the main function called by every memory operation
 // If the 1D address is not registered in the addr map, then just return without translation with OID = 0
-void main_1d_to_2d(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d) {
+void main_1d_to_2d_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d) {
   main_addr_map_entry_t *addr_map_entry = main_addr_map_find(main->addr_map, addr_1d);
   if(addr_map_entry != NULL) {
     *addr_2d = addr_map_entry->addr_2d;
@@ -6605,6 +6768,23 @@ void main_1d_to_2d(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *a
     *addr_2d = addr_1d;
     *oid_2d = 0UL;
   }
+  return;
+}
+
+// Does nothing
+void main_1d_to_2d_None_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d) {
+  *oid_2d = 0;
+  *addr_2d = addr_1d;
+  (void)main;
+  return;
+}
+
+// Static mapping, each 4-line super block address will be rotated to the vertical shape, i.e., 
+// Addr 4k + 0, 4k + 1, 4k + 2, 4k + 3 will be transformed to 4k OID 0, 1, 2, 3 respectively
+void main_1d_to_2d_auto_vertical_4_1_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d) {
+  *oid_2d = (addr_1d & (0x3UL << UTIL_CACHE_LINE_BITS)) >> UTIL_CACHE_LINE_BITS;
+  *addr_2d = addr_1d & (~0x3UL << UTIL_CACHE_LINE_BITS);
+  (void)main;
   return;
 }
 
@@ -6627,7 +6807,7 @@ static void main_populate_dmap(main_t *main, uint64_t addr_1d_aligned, uint64_t 
 #endif
 
 // Calls main_read and main_write() after preparing for memory operations
-// Return OID and addr via argument
+// Return finish cycle of the operation
 uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   int index = main->mem_op_index;
   main->mem_op_index++;
@@ -6649,7 +6829,7 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   void *data = entry->data;
   uint64_t addr_2d, oid_2d;
   // First translate address
-  main_1d_to_2d(main, addr_1d_aligned, &oid_2d, &addr_2d);
+  main->addr_1d_to_2d_cb(main, addr_1d_aligned, &oid_2d, &addr_2d);
 #ifndef UNIT_TEST_NO_POPULATE_DMAP
   // Populate the dmap, if the 1D address is first time accessed (since the dmap has not been initialized)
   main_populate_dmap(main, addr_1d_aligned, oid_2d, addr_2d);
@@ -6696,10 +6876,10 @@ void main_update_2d_addr(main_t *main, uint64_t addr_1d, int size, uint64_t oid_
   return;
 }
 
-// Update dmap, bypassing cache herarchy
+// Update dmap, bypassing cache hierarchy
 void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data) {
   uint64_t addr_2d, oid_2d;
-  main_1d_to_2d(main, addr_1d, &oid_2d, &addr_2d);
+  main->addr_1d_to_2d_cb(main, addr_1d, &oid_2d, &addr_2d);
   dmap_write(oc_get_dmap(main->oc), oid_2d, addr_2d, size, data);
   return;
 }
@@ -6748,12 +6928,9 @@ void main_save_conf_stat(main_t *main, char *prefix) {
 }
 
 void main_conf_print(main_t *main) {
-  main_param_conf_print(main->param);
   printf("---------- main_t conf ----------\n");
-  // Read from conf file
+  // Prints out all variables read from conf file
   main_param_conf_print(main->param);
-  printf("CWD: \"%s\"\n", main->cwd); // Current working directory
-  printf("Result suffix: \"%s\"\n", main->result_suffix);
   printf("conf file name \"%s\"\n", main->conf_filename);
   printf("oc:\n");
   oc_conf_print(main->oc);

@@ -66,8 +66,11 @@ extern int BDI_comp_order[6];     // Order of types we try for compression
 #define BDI_TYPE_INVALID   -1  // Could not compress; Returned by BDI_comp() and BDI_decomp()
 #define BDI_TYPE_NOT_FOUND -2  // Could not be found; Returned by dmap_find_compressed()   
 
+// These two are currently not used
+#define BDI_ZERO        0
+#define BDI_DUP         1
 // Index the BDI_types array
-#define BDI_TYPE_BEGIN 2
+#define BDI_TYPE_BEGIN  2
 #define BDI_8_1         2
 #define BDI_8_2         3
 #define BDI_8_4         4
@@ -189,7 +192,9 @@ void CPACK_print_compressed(void *in_buf);
 
 //* MBD - Experimental Multi-Based Delta compression
 
-#define MBD_DICT_COUNT        8
+#define MBD_DICT_COUNT        16
+#define MBD_DICT_INDEX_BITS   4
+
 #define MBD_RESERVED_COUNT    1
 
 #define MBD_COLLECT_STAT      1
@@ -200,10 +205,12 @@ typedef struct {
   uint32_t data[MBD_DICT_COUNT];
 #ifdef MBD_COLLECT_STAT 
   // Statistics about a compression instance
+  uint8_t stat_begin[0];
   uint32_t delta_size_dist[4]; // 4, 8, 12, 16 bits
   uint32_t zero_count;
   uint32_t uncomp_count;
   uint32_t match_count;
+  uint8_t stat_end[0];
 #endif
 } MBD_dict_t;
 
@@ -213,7 +220,7 @@ inline static void MBD_dict_invalidate(MBD_dict_t *dict) {
   dict->next_slot_index = 1;
   dict->data[0] = 0;
 #ifdef MBD_COLLECT_STAT 
-  memset(dict->delta_size_dist, 0x00, sizeof(dict->delta_size_dist));
+  memset(dict->stat_begin, 0x00, dict->stat_end - dict->stat_begin);
 #endif
   return;
 }
@@ -239,10 +246,20 @@ inline static void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output);
 
 // Size is the number of bytes in the input stream, which must be a multiple of 4 (32 bit)
-int _MBD_comp(void *out_buf, void *_in_buf, int size);
+int __MBD_comp(void *out_buf, void *_in_buf, int size, MBD_dict_t *dict);
+inline static int _MBD_comp(void *out_buf, void *_in_buf, int size) {
+  MBD_dict_t dict;
+  MBD_dict_invalidate(&dict);
+  return __MBD_comp(out_buf, _in_buf, size, &dict);
+}
 void _MBD_decomp(void *_out_buf, void *in_buf, int size);
 void _MBD_print_compressed(void *in_buf, int size);
-int _MBD_get_comp_size_bits(void *_in_buf, int size);
+int __MBD_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict);
+inline static int _MBD_get_comp_size_bits(void *_in_buf, int size) {
+  MBD_dict_t dict;
+  MBD_dict_invalidate(&dict);
+  return __MBD_get_comp_size_bits(_in_buf, size, &dict);
+}
 
 inline static int MBD_comp(void *out_buf, void *_in_buf) { 
   return _MBD_comp(out_buf, _in_buf, UTIL_CACHE_LINE_SIZE); 
@@ -677,6 +694,13 @@ inline static void ocache_entry_copy(ocache_entry_t *dest, ocache_entry_t *src) 
 // The entry to be evicted is copied to the evict_entry of the result
 #define OCACHE_EVICT                     4
 
+// MBD compression vertical types
+#define OCACHE_MBD_V0                    0
+#define OCACHE_MBD_V2                    1
+#define OCACHE_MBD_V4                    2
+
+extern const char *ocache_MBD_type_names[3];
+
 // This represents a line in the ocache
 typedef struct {
   int state;                    // Result of the lookup
@@ -742,6 +766,7 @@ typedef struct ocache_struct_t {
   int (*get_compressed_size_cb)(struct ocache_struct_t *ocache, uint64_t oid, uint64_t addr, int shape);
   ocache_stat_snapshot_t *stat_snapshot_head; // Head of the snapshot linked list
   ocache_stat_snapshot_t *stat_snapshot_tail; // Tail of the snapshot linked list
+  int MBD_type;              // OCACHE_MBD_V0, _V2, _V4
   // Statistics
   uint8_t stat_begin[0];             // Makes the begin address of stat region
   // General stat
@@ -761,7 +786,6 @@ typedef struct ocache_struct_t {
   uint64_t BDI_failed_count;         // Lines that cannot be compressed by any of the BDI type
   uint64_t BDI_before_size_sum;
   uint64_t BDI_after_size_sum;
-  uint64_t all_zero_count;           // Whether the line is all-zero
   // Size and counts at each BDI and vertical stage
   uint64_t BDI_uncomp_size_sum;      // BDI uncompressable lines (corresponds to BDI_failed_count)
   uint64_t vertical_uncomp_size_sum; // BDI compressable but vertical uncompressable lines
@@ -789,18 +813,26 @@ typedef struct ocache_struct_t {
   uint64_t FPC_size_counts[8];       // Size distribution of FPC
   // CPACK-specific stats. All fields have the same meaning as FPC
   uint64_t CPACK_success_count;        
-  uint64_t CPACK_fail_count;         
+  uint64_t CPACK_fail_count;
   uint64_t CPACK_uncomp_size_sum;
   uint64_t CPACK_before_size_sum;
   uint64_t CPACK_after_size_sum;
   uint64_t CPACK_size_counts[8];
   // MBD-specific stats
-  uint64_t MBD_success_count;        
-  uint64_t MBD_fail_count;         
+  uint64_t MBD_success_count;
+  uint64_t MBD_fail_count;
   uint64_t MBD_uncomp_size_sum;
   uint64_t MBD_before_size_sum;
   uint64_t MBD_after_size_sum;
   uint64_t MBD_size_counts[8];
+  uint64_t MBD_delta_size_dist[4]; // 4, 8, 12, 16 bits
+  uint64_t MBD_zero_count;
+  uint64_t MBD_uncomp_count;
+  uint64_t MBD_match_count;
+  uint64_t MBD_insert_base_is_present;  // Number of times base is present
+  uint64_t MBD_insert_base_is_missing;  // Number of times base is missing
+  uint64_t MBD_read_base_is_present;    // This is set by cc_simple
+  uint64_t MBD_read_base_is_missing;    // This is set by cc_simple
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -881,9 +913,14 @@ inline static void ocache_lookup_probe(
   _ocache_lookup(ocache, oid, addr, shape, 0, 0, result);
 }
 
+// This is to update stats when read hits a MBD line
+void ocache_llc_read_hit_MBD(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+
 // Get compressed size call backs
 int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_BDI_third_party_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_compressed_size_FPC_third_party_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
@@ -1077,6 +1114,15 @@ typedef struct scache_struct_t {
   uint64_t CPACK_before_size;
   uint64_t CPACK_after_size;
   uint64_t CPACK_size_counts[8];
+  // Statistics - MBD
+  uint64_t MBD_attempt_count;
+  uint64_t MBD_success_count;
+  uint64_t MBD_fail_count;
+  uint64_t MBD_attempt_size;
+  uint64_t MBD_uncomp_size;
+  uint64_t MBD_before_size;
+  uint64_t MBD_after_size;
+  uint64_t MBD_size_counts[8];
   // Statistics - General
   uint64_t uncompressed_count;  // Not compressed
   uint64_t read_count;          // Reads, not including internal lookups
@@ -1845,24 +1891,17 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 typedef struct {
   uint64_t max_inst_count;    // Max number of instructions
   uint64_t start_inst_count;  // Starting instructions, default zero
-  int logging;                // Whether logging is enabled
-  char *logging_filename;     // Only read if logging is set to 1; Ignored otherwise
+  char *result_suffix;        // Suffix of result directory, for better recognizability; Optional, NULL if invalid
+  // This could be set by either conf file key main.app_name, or by main_set_app_name()
+  char *app_name;             // Name of the application, will be reflected in the result directory name; Optional
+  // If set, 4 adjacent blocks are rotated to the same addr and OID 0, 1, 2, 3; Only valid for 4_1 shape
+  char *addr_1d_to_2d_type; // Address translation type string; Set by main.addr_1d_to_2d_type
 } main_param_t;
 
 main_param_t *main_param_init(conf_t *conf);
 void main_param_free(main_param_t *param);
 
 void main_param_conf_print(main_param_t *param);
-
-// This struct contains requests
-// The actual size of this struct is (sizeof(main_request_t) + reqiest->size)
-typedef struct {
-  int16_t op;          // MAIN_READ / MAIN_WRITE
-  int16_t size;        // In bytes
-  uint64_t cycle;      // The cycle it is called
-  uint64_t addr;       // The addr it is called on (1D address)
-  uint8_t data[0]; // Caller should allocate this part of the storage
-} main_request_t;
 
 // zsim configuration passed from simulator to main, which will be printed out for stat
 typedef struct main_zsim_conf_struct_t {
@@ -1875,7 +1914,7 @@ main_zsim_info_t *main_zsim_info_init(const char *key, const char *value);
 void main_zsim_info_free(main_zsim_info_t *info);
 
 // Main class of the design; Test driver and controller
-typedef struct {
+typedef struct main_struct_t {
   // This string has ownership
   char *conf_filename;
   conf_t *conf;        // Global conf, has ownership
@@ -1892,16 +1931,12 @@ typedef struct {
   int progress;        // 0 - 100
   int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
-  char *cwd;           // Current working directory; has ownership
-  char *result_dir;    // Stores result directory name, relative path (only the dir name), has ownership
-  char *result_suffix; // Suffix of result directory, for better recognizability; Optional, NULL if invalid
-  // This could be set by either conf file key main.app_name, or by main_set_app_name()
-  char *app_name;      // Name of the application, will be reflected in the result directory name; Optional
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t begin_time;
   uint64_t end_time;
-  // Logging related
-  FILE *logging_fp;
+  
+  // 1d-to-2d address translation call back; Set by auto_vertical_ flags. Default to using the addr map
+  void (*addr_1d_to_2d_cb)(struct main_struct_t *, uint64_t, uint64_t *, uint64_t *);
   // zsim write buffer, used to redirect writes
   // Must be aligned such that certain instructions will not incur alignment errors
   uint8_t zsim_write_buffer[MAIN_MEM_OP_MAX_SIZE * 2] __attribute__((aligned(64)));
@@ -1933,9 +1968,6 @@ inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
 
 // Main interface functions
 
-// Append a log entry; Assumes logging is enabled
-void main_append_log(main_t *main, uint64_t cycle, int op, uint64_t addr, int size, void *data);
-
 // Call this to update progress, and simulator may terminate simulation if the end condition is met
 void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle);
 
@@ -1952,7 +1984,9 @@ inline static void main_bb_write(main_t *main, uint64_t addr, int size, void *da
 void main_bb_sim_finish(main_t *main);
 
 // Translate 1D to 2D address using the address map
-void main_1d_to_2d(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
+void main_1d_to_2d_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
+void main_1d_to_2d_None_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
+void main_1d_to_2d_auto_vertical_4_1_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
 
 // The following is called during processor simulation, which takes argument from the internal latency 
 // list, rather than from external.
