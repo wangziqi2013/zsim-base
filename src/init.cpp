@@ -447,12 +447,6 @@ static void InitSystem(Config& config) {
     // Report main conf file name
     const char *main_conf_filename = config.get<const char *>("sim.main_conf", "");
     main_add_info(zinfo->main, "sim.main_conf", main_conf_filename);
-    // Set main.app_name which will be reflected on result dir name
-    const char *main_app_name = config.get<const char *>("main.app_name", "");
-    if(strlen(main_app_name) > 0) {
-        main_set_app_name(zinfo->main, main_app_name);
-        main_add_info(zinfo->main, "main.app_name", main_app_name);
-    }
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
