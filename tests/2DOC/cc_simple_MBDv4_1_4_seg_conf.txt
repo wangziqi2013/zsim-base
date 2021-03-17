@@ -16,8 +16,11 @@ cc.simple.llc.physical_way_count = 16
 cc.simple.llc.latency = 30
 cc.simple.llc.algorithm = MBDv4
 
+# Segmented cache data store
+cc.simple.llc.insert_type = seg
+
 # Base cache, 64-set, 8-way, 512 lines in total, 32KB storage
-cc.simple.llc.bcache.line_count = 2048
+cc.simple.llc.bcache.line_count = 4096
 cc.simple.llc.bcache.way_count = 16
 cc.simple.llc.bcache.shape = 1_4
 
@@ -25,4 +28,4 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
 
-main.result_suffix = simple_MBDv4_1_4
+main.result_suffix = simple_MBDv4_1_4_seg

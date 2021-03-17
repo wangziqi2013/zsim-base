@@ -15,10 +15,10 @@
 #%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
 
 
-#%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
-
-
 #%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
+
+
+%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
 
 
 #%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
@@ -33,7 +33,7 @@
 #%include tests/2DOC/cc_simple_MBDv4_1_4_conf.txt
 
 
-%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+#%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
 
 
 #%include tests/2DOC/cc_simple_MBD_2_2_conf.txt
@@ -60,8 +60,8 @@ dram.read_latency = 300
 dram.write_latency = 300
 
 main.max_inst_count = 500M
-# We rely on the workload itself to trigger start
+# Rely on the workload to report
 main.start_inst_count = 99999999M
 
-main.app_name = lbm_r
+main.app_name = omnetpp_r
 main.result_dir_has_timestamp = 0

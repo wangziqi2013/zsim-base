@@ -7,7 +7,7 @@
 #%include tests/2DOC/cc_simple_BDI_4_1_conf.txt
 
 
-%include tests/2DOC/cc_simple_BDI_third_party_1_4_conf.txt
+#%include tests/2DOC/cc_simple_BDI_third_party_1_4_conf.txt
 
 
 #%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
@@ -16,6 +16,9 @@
 
 
 #%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
+
+
+%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
 
 
 #%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
@@ -28,6 +31,10 @@
 #%include tests/2DOC/cc_simple_MBDv2_1_4_conf.txt
 
 #%include tests/2DOC/cc_simple_MBDv4_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+
 
 #%include tests/2DOC/cc_simple_MBD_2_2_conf.txt
 
@@ -58,3 +65,6 @@ main.logging = 0
 
 # Automatically convert 4 consecutive blocks into 4 vertical ones
 main.addr_1d_to_2d_type = None
+
+main.app_name = mcf_r
+main.result_dir_has_timestamp = 0
