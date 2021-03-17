@@ -147,6 +147,7 @@ VOID HandleMagicOp_update_shape(THREADID tid, ADDRINT addr, ADDRINT size, ADDRIN
 VOID HandleMagicOp_update_2d_addr(THREADID tid, ADDRINT addr_1d, ADDRINT size, ADDRINT oid_2d, ADDRINT addr_2d);
 VOID HandleMagicOp_update_data(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT data);
 VOID HandleMagicOp_zsim_debug_print_all(THREADID tid);
+VOID HandleMagicOp_zsim_start_sim(THREADID tid);
 
 VOID FakeCPUIDPre(THREADID tid, REG eax, REG ecx);
 VOID FakeCPUIDPost(THREADID tid, ADDRINT* eax, ADDRINT* ebx, ADDRINT* ecx, ADDRINT* edx); //REG* eax, REG* ebx, REG* ecx, REG* edx);
@@ -664,6 +665,10 @@ VOID Instruction(INS ins) {
                 IARG_END);
         } else if(INS_OperandReg(ins, 0) == REG_R12 && INS_OperandReg(ins, 1) == REG_R12) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_zsim_debug_print_all, 
+                IARG_THREAD_ID, 
+                IARG_END);
+        } else if(INS_OperandReg(ins, 0) == REG_R11 && INS_OperandReg(ins, 1) == REG_R11) {
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_zsim_start_sim, 
                 IARG_THREAD_ID, 
                 IARG_END);
         }
@@ -1315,6 +1320,12 @@ VOID HandleMagicOp_update_data(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT
 
 VOID HandleMagicOp_zsim_debug_print_all(THREADID tid) {
     main_zsim_debug_print_all(zinfo->main);
+    return;
+}
+
+// This magic operation starts the simulation, if not already
+VOID HandleMagicOp_zsim_start_sim(THREADID tid) {
+    main_zsim_start_sim(zinfo->main);
     return;
 }
 

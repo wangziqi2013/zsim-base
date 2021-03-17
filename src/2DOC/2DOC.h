@@ -1,10 +1,12 @@
 
 #include "util.h"
+#include "2DOC_magic_ops.h"
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #include <immintrin.h>
 
 // Forward declaration
+struct ocache_struct_t;
 struct cc_struct_t;
 
 // Compression algorithm interface
@@ -195,14 +197,23 @@ void CPACK_print_compressed(void *in_buf);
 #define MBD_DICT_COUNT        16
 #define MBD_DICT_INDEX_BITS   4
 
-#define MBD_RESERVED_COUNT    1
-
+// Whether dict uses LRU
+//#define MBD_DICT_LRU          1
 #define MBD_COLLECT_STAT      1
+
+#define MBD_RESERVED_COUNT    1
 
 typedef struct {
   int count;
   int next_slot_index;
   uint32_t data[MBD_DICT_COUNT];
+#ifdef MBD_DICT_LRU
+  // Doubly linked list pointers
+  int next[MBD_DICT_COUNT];
+  int prev[MBD_DICT_COUNT];
+  int head_index; // MRU index
+  int tail_index; // LRU index
+#endif
 #ifdef MBD_COLLECT_STAT 
   // Statistics about a compression instance
   uint8_t stat_begin[0];
@@ -210,6 +221,8 @@ typedef struct {
   uint32_t zero_count;
   uint32_t uncomp_count;
   uint32_t match_count;
+  uint32_t insert_count;     // Number of dict inserts
+  uint32_t insert_dup_count; // Whether insert pushes a value that already exists
   uint8_t stat_end[0];
 #endif
 } MBD_dict_t;
@@ -219,28 +232,21 @@ inline static void MBD_dict_invalidate(MBD_dict_t *dict) {
   dict->count = 1;
   dict->next_slot_index = 1;
   dict->data[0] = 0;
+#ifdef MBD_DICT_LRU
+  // Point to the first slot
+  dict->head_index = dict->tail_index = 0;
+  // Initialize linked list for first slot (onnly element)
+  dict->next[0] = dict->prev[0] = -1;
+#endif
 #ifdef MBD_COLLECT_STAT 
   memset(dict->stat_begin, 0x00, dict->stat_end - dict->stat_begin);
 #endif
   return;
 }
 
-inline static int MBD_dict_get_free_entry_index(MBD_dict_t *dict) {
-  if(dict->next_slot_index == MBD_DICT_COUNT) {
-    dict->next_slot_index = 1;
-  }
-  return dict->next_slot_index++;
-}
-
-// This function also updates LRU
-inline static void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
-  int index = MBD_dict_get_free_entry_index(dict);
-  dict->data[index] = data;
-  if(dict->count != MBD_DICT_COUNT) {
-    dict->count++;
-  }
-  return;
-}
+// Move index to LRU; Called on compression and decompression when an entry is hit for comp / used for decomp
+void MBD_update_LRU(MBD_dict_t *dict, int index);
+void MBD_dict_insert(MBD_dict_t *dict, uint32_t data);
 
 // Same intf as CPACK, but performs min-delta search
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output);
@@ -516,6 +522,54 @@ void pmap_print(pmap_t *pmap);
 void dmap_conf_print(dmap_t *dmap);
 void dmap_stat_print(dmap_t *dmap);
 
+//* bcache_t - Base logical line cache
+
+typedef struct {
+  uint64_t oid;
+  uint64_t addr;
+  uint64_t lru;        // LRU = 0 means invalid
+} bcache_entry_t;
+
+typedef struct {
+  int set_count;
+  int way_count;
+  int line_count;
+  int set_bits;
+  int shape;
+  // Index gen
+  uint64_t oid_mask;
+  int oid_shift;
+  uint64_t addr_mask;
+  int addr_shift;
+  uint64_t lru_counter;
+  // Statistics
+  uint8_t stat_begin[0];
+  uint64_t read_count;
+  uint64_t read_hit_count;
+  uint64_t read_miss_count;
+  // The following are updated by refresh_stat()
+  uint64_t valid_line_count;
+  uint8_t stat_end[0];
+  bcache_entry_t data[0];
+} bcache_t;
+
+bcache_t *bcache_init(int line_count, int way_count, int shape);
+void bcache_free(bcache_t *bcache);
+
+inline static int bcache_gen_index(bcache_t *bcache, uint64_t oid, uint64_t addr) {
+  return (int)(((oid & bcache->oid_mask) >> bcache->oid_shift) ^ \
+               ((addr & bcache->addr_mask) >> bcache->addr_shift));
+}
+
+// Finds the entry pointer; Return NULL if miss
+// lru_entry returns the LRU entry on a miss
+bcache_entry_t *bcache_lookup(bcache_t *bcache, uint64_t oid, uint64_t addr, bcache_entry_t **lru_entry);
+// Returns 1 if hit
+int bcache_read(bcache_t *bcache, uint64_t oid, uint64_t addr);
+
+void bcache_conf_print(bcache_t *bcache);
+void bcache_stat_print(bcache_t *bcache);
+
 //* ocache_t - Overlay tagged cache
 
 // Number of logical lines per super block
@@ -538,7 +592,7 @@ extern const char *ocache_shape_names[4];
 #define OCACHE_LEVEL_L3                  2
 
 // Used for segmented ocache design
-#define OCACHE_DATA_ALIGNMENT            8
+#define OCACHE_DATA_ALIGNMENT            4
 
 // Physical slot definition
 typedef struct ocache_entry_struct_t {
@@ -562,6 +616,10 @@ inline static int ocache_entry_align_size(ocache_entry_t *entry, int size) {
   (void)entry;
   return (size + OCACHE_DATA_ALIGNMENT - 1) & ~(OCACHE_DATA_ALIGNMENT - 1);
 } 
+
+inline static int ocache_entry_get_total_aligned_size(ocache_entry_t *entry) {
+  return entry->total_aligned_size;
+}
 
 // Returns 1 if the index is dirty, 0 otherwise
 inline static int ocache_entry_is_dirty(ocache_entry_t *entry, int index) {
@@ -676,7 +734,7 @@ inline static void ocache_entry_inv_index(ocache_entry_t *entry, int index) {
   return;
 }
 
-inline static void ocache_entry_copy(ocache_entry_t *dest, ocache_entry_t *src) {
+inline static void ocache_entry_dup(ocache_entry_t *dest, ocache_entry_t *src) {
   memcpy(dest, src, sizeof(ocache_entry_t));
   return;
 }
@@ -699,6 +757,9 @@ inline static void ocache_entry_copy(ocache_entry_t *dest, ocache_entry_t *src) 
 #define OCACHE_MBD_V2                    1
 #define OCACHE_MBD_V4                    2
 
+// Maximum number of SBs evicted on an insert
+#define OCACHE_MAX_EVICT_ENTRY          16
+
 extern const char *ocache_MBD_type_names[3];
 
 // This represents a line in the ocache
@@ -713,10 +774,13 @@ typedef struct {
   // Following used by insertion and eviction
   ocache_entry_t *insert_entry; // Entry just inserted
   int insert_index;             // Index of the entry just inserted
-  ocache_entry_t evict_entry;   // The entry that will be evicted (consider this as an eviction buffer entry or MSHR)
-  int evict_index;              // Only used for inv() related function call
+  ocache_entry_t evict_entry;   // The entry that will be evicted on inv() calls; Not for insert-evict
+  int evict_index;              // Only used for inv() related function call; Does not apply for insert-evict
   ocache_entry_t *downgrade_entry; // Entry and index that get downgraded, if downgrade returns success; NULL if miss
   int downgrade_index;
+  // Insert-evict buffer
+  int insert_evict_count;       // Number of SB entries evicted by an insert
+  ocache_entry_t insert_evict_entries[OCACHE_MAX_EVICT_ENTRY]; // Entries evicted on inserts, if any
   // This is used for segmented ocache
   int total_aligned_size;       // Total aligned size of valid lines in the set; Only valid if lookup scans all
 } ocache_op_result_t;
@@ -748,6 +812,9 @@ typedef struct ocache_stat_snapshot_struct_t {
 ocache_stat_snapshot_t *ocache_stat_snapshot_init();
 void ocache_stat_snapshot_free(ocache_stat_snapshot_t *snapshot);
 
+typedef void (*ocache_insert_cb_t)(
+  struct ocache_struct_t *ocache, uint64_t oid, uint64_t addr, int shape, int dirty, ocache_op_result_t *result);
+
 typedef struct ocache_struct_t {
   char *name;                // Optional name of the cache object, NULL by default
   int level;                 // Level of the cache (L1 - 0, L2 - 1, L3 - 2)
@@ -756,10 +823,13 @@ typedef struct ocache_struct_t {
   int line_count;            // Total number of cache lines (physical slots)
   int size;                  // total_count * UTIL_CACHE_LINE_SIZE
   int set_bits;              // Number of bits to represent the set
+  int set_size;              // Number of bytes of storage in a set; Used by segmented insert
   // Shape related
   int use_shape;             // Use shape argumnent, otherwise always use OCACHE_SHAPE_NONE
   ocache_index_t indices[OCACHE_SHAPE_COUNT]; // Index masking and shift
   uint64_t lru_counter;      // Use this to implement LRU
+  // Insert call back function; Select SB-based data store or segmented data store by assigning this function
+  ocache_insert_cb_t insert_cb;
   // dmap_t object for compression
   dmap_t *dmap;              // Used if the cache is compressed, otherwise NULL
   // Call back for compression; Can be hooked with a different function
@@ -767,6 +837,7 @@ typedef struct ocache_struct_t {
   ocache_stat_snapshot_t *stat_snapshot_head; // Head of the snapshot linked list
   ocache_stat_snapshot_t *stat_snapshot_tail; // Tail of the snapshot linked list
   int MBD_type;              // OCACHE_MBD_V0, _V2, _V4
+  bcache_t *bcache;          // Base cache, used to reduce requests to DRAM for base blocks
   // Statistics
   uint8_t stat_begin[0];             // Makes the begin address of stat region
   // General stat
@@ -804,6 +875,7 @@ typedef struct ocache_struct_t {
     // Indexed using run-time type
     uint64_t BDI_compress_type_counts[8];
   };
+  uint64_t BDI_size_counts[8];       // Compressed size distribution
   // FPC-specific stats
   uint64_t FPC_success_count;        // Number of requests that are smaller after FPC
   uint64_t FPC_fail_count;           // Number of requests that failed FPC
@@ -829,10 +901,16 @@ typedef struct ocache_struct_t {
   uint64_t MBD_zero_count;
   uint64_t MBD_uncomp_count;
   uint64_t MBD_match_count;
+  uint64_t MBD_dict_insert_count;       // Number of dict inserts
+  uint64_t MBD_dict_insert_dup_count;   // Number of dict insert duplicated values
   uint64_t MBD_insert_base_is_present;  // Number of times base is present
   uint64_t MBD_insert_base_is_missing;  // Number of times base is missing
+  uint64_t MBD_insert_bcache_hit;
+  uint64_t MBD_insert_bcache_miss;
   uint64_t MBD_read_base_is_present;    // This is set by cc_simple
   uint64_t MBD_read_base_is_missing;    // This is set by cc_simple
+  uint64_t MBD_read_bcache_hit;
+  uint64_t MBD_read_bcache_miss;
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -861,8 +939,14 @@ inline static void ocache_set_get_compressed_size_cb(
   ocache->get_compressed_size_cb = cb;
   return;
 }
+inline static void ocache_set_insert_cb(ocache_t *ocache, ocache_insert_cb_t cb) {
+  ocache->insert_cb = cb;
+  return;
+}
+void ocache_set_insert_type(ocache_t *ocache, const char *name);
 // "BDI", "None"
 void ocache_set_compression_type(ocache_t *ocache, const char *name);
+void ocache_init_bcache(ocache_t *ocache, int line_count, int way_count, const char *shape_str);
 
 uint64_t ocache_gen_addr(ocache_t *ocache, uint64_t tag, uint64_t set_id, int shape);
 uint64_t ocache_gen_addr_with_oid(ocache_t *ocache, uint64_t oid, uint64_t tag, uint64_t set_id, int shape);
@@ -925,8 +1009,19 @@ int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t
 int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 int ocache_get_compressed_size_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 
-void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
-                   int shape, int dirty, ocache_op_result_t *insert_result);
+inline static void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *insert_result) {
+  ocache->insert_cb(ocache, oid, addr, shape, dirty, insert_result);
+  return;
+}
+
+// Super-block based sector cache insert
+void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *insert_result);
+// Segment cache insert
+void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *insert_result);
+
 void ocache_after_insert_adjust(
   ocache_t *ocache, ocache_op_result_t *insert_result, ocache_op_result_t *lookup_result);
 void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result);
@@ -999,6 +1094,12 @@ inline static int ocache_get_entry_set_index(ocache_t *ocache, ocache_entry_t *e
 inline static int ocache_get_entry_way_index(ocache_t *ocache, ocache_entry_t *entry) {
   return ocache_get_entry_index(ocache, entry) % ocache->way_count;
 }
+
+// Used for debugging
+int ocache_is_line_invalid(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_is_line_dirty(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_line_size(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+int ocache_get_valid_tag_count(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
 
 void ocache_set_print(ocache_t *ocache, int set);
 void ocache_conf_print(ocache_t *ocache);
@@ -1934,7 +2035,7 @@ typedef struct main_struct_t {
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t begin_time;
   uint64_t end_time;
-  
+  //
   // 1d-to-2d address translation call back; Set by auto_vertical_ flags. Default to using the addr map
   void (*addr_1d_to_2d_cb)(struct main_struct_t *, uint64_t, uint64_t *, uint64_t *);
   // zsim write buffer, used to redirect writes
@@ -2013,85 +2114,12 @@ void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data);
 // zsim debug print
 void main_zsim_debug_print_all(main_t *main);
 
+// Start simulation, called within zsim, maybe triggered by a magic op (see magic_op header file)
+void main_zsim_start_sim(main_t *main);
+
 // Saves conf and stat to seperate files on the disk. The prefix serves the same purpose as the oc save function
 void main_save_conf_stat(main_t *main, char *prefix);
 
 // Not called by programmer, when sim begins and ends they will be called
 void main_conf_print(main_t *main);
 void main_stat_print(main_t *main);
-
-//* zsim - zsim related functions, called by application to communicate with the simulator
-
-// R15 addr; R14 size; R13 shape
-// XCHG R15, R15
-//void zsim_update_shape(uint64_t _addr, int _size, int _shape);
-inline static void zsim_update_shape(uint64_t addr, int size, int shape) {
-  // Write addr into R15
-  __asm__ __volatile__("mov %0, %%r15\n\t"
-                     : /* no output */
-                     : "a"(addr)
-                     : "%r15");
-  __asm__ __volatile__("mov %0, %%r14\n\t"
-                     : /* no output */
-                     : "a"((uint64_t)size)
-                     : "%r14");
-  __asm__ __volatile__("mov %0, %%r13\n\t"
-                     : /* no output */
-                     : "a"((uint64_t)shape)
-                     : "%r13");
-  // XCHG R15, R15
-  asm(".byte 0x4F, 0x87, 0xFF");
-  return;
-}
-
-// R15 addr_1d; R14 size; R13 oid_2d; R12 addr_2d
-// XCHG R14, R14
-inline static void zsim_update_2d_addr(uint64_t addr_1d, int size, uint64_t oid_2d, uint64_t addr_2d) {
-  // Write addr into R15
-  __asm__ __volatile__("mov %0, %%r15\n\t"
-                     : /* no output */
-                     : "a"(addr_1d)
-                     : "%r15");
-  __asm__ __volatile__("mov %0, %%r14\n\t"
-                     : /* no output */
-                     : "a"((uint64_t)size)
-                     : "%r14");
-  __asm__ __volatile__("mov %0, %%r13\n\t"
-                     : /* no output */
-                     : "a"(oid_2d)
-                     : "%r13");
-  __asm__ __volatile__("mov %0, %%r12\n\t"
-                     : /* no output */
-                     : "a"(addr_2d)
-                     : "%r12");
-  // XCHG R14, R14
-  asm(".byte 0x4D, 0x87, 0xF6");
-  return;
-}
-
-// R15 addr_1d; R14 size; R13 oid_2d; R12 data (virtual address)
-// XCHG R13, R13
-inline static void zsim_update_data(uint64_t addr_1d, int size, void *data) {
-  // Write addr into R15
-  __asm__ __volatile__("mov %0, %%r15\n\t"
-                     : /* no output */
-                     : "a"(addr_1d)
-                     : "%r15");
-  __asm__ __volatile__("mov %0, %%r14\n\t"
-                     : /* no output */
-                     : "a"((uint64_t)size)
-                     : "%r14");
-  __asm__ __volatile__("mov %0, %%r13\n\t"
-                     : /* no output */
-                     : "a"(data)
-                     : "%r13");
-  // XCHG R13, R13
-  asm(".byte 0x4D, 0x87, 0xED");
-  return;
-}
-
-// XCHG R12, R12
-inline static void zsim_debug_print_all() {
-  asm(".byte 0x4D, 0x87, 0xE4");
-  return;
-}

@@ -888,6 +888,111 @@ void CPACK_print_compressed(void *in_buf) {
 
 //* MBD
 
+#ifdef MBD_DICT_LRU
+
+// Move index to LRU; Called on compression and decompression when an entry is hit for comp / used for decomp
+void MBD_update_LRU(MBD_dict_t *dict, int index) {
+  assert(index >= 0 && index < dict->count);
+  if(dict->head_index == index) {
+    return;
+  } else if(dict->tail_index == index) {
+    assert(dict->next[index] == -1);
+    int prev_index = dict->prev[index];
+    assert(dict->next[prev_index] == index);
+    // Remove from LRU
+    dict->next[prev_index] = -1;
+    dict->tail_index = prev_index;
+  } else {
+    // index has successor and predecessor
+    int prev_index = dict->prev[index];
+    int next_index = dict->next[index];
+    dict->next[prev_index] = next_index;
+    dict->prev[next_index] = prev_index;
+  }
+  // Insert into MRU
+  dict->prev[dict->head_index] = index;
+  dict->next[index] = dict->head_index;
+  dict->prev[index] = -1;
+  dict->head_index = index;
+  return;
+}
+
+void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
+  // If there is already one, then just promote it to LRU
+  for(int i = 0;i < dict->count;i++) {
+    if(dict->data[i] == data) {
+      dict->insert_dup_count++;
+      MBD_update_LRU(dict, i);
+      return;
+    }
+  }
+  dict->insert_count++;
+  if(dict->count < MBD_DICT_COUNT) {
+    // Allocate index as dict->count and move it to MRU
+    int index = dict->count;
+    dict->count++;
+    dict->data[index] = data;
+    assert(dict->prev[dict->head_index] == -1);
+    assert(dict->next[dict->tail_index] == -1);
+    dict->prev[dict->head_index] = index;
+    dict->next[index] = dict->head_index;
+    dict->prev[index] = -1;
+    dict->head_index = index;
+  } else {
+    assert(dict->count == MBD_DICT_COUNT);
+    // Evict LRU and move it to MRU
+    int index = dict->tail_index;
+    assert(index != -1);
+    assert(dict->next[index] == -1);
+    assert(dict->prev[index] != -1);
+    // Evict and overwrite data
+    dict->data[index] = data;
+    int prev_index = dict->prev[index];
+    assert(dict->next[prev_index] == index);
+    // Remove from LRU
+    dict->next[prev_index] = -1;
+    dict->tail_index = prev_index;
+    // Insert into MRU
+    dict->prev[dict->head_index] = index;
+    dict->next[index] = dict->head_index;
+    dict->prev[index] = -1;
+    dict->head_index = index;
+  }
+  return;
+}
+
+#else 
+
+// Just a dummy function that does nothing
+void MBD_update_LRU(MBD_dict_t *dict, int index) {
+  (void)dict; (void)index;
+  return;
+}
+
+void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
+  // Do not insert duplicated values; Start searching from index 1
+#ifdef MBD_COLLECT_STAT 
+  dict->insert_count++;
+  for(int i = 1;i < dict->count;i++) {
+    if(dict->data[i] == data) {
+      dict->insert_dup_count++;
+      break;
+    }
+  }
+#endif
+  if(dict->next_slot_index == MBD_DICT_COUNT) {
+    dict->next_slot_index = 1; // Does not overwrite zero
+  }
+  int index = dict->next_slot_index++;
+  dict->data[index] = data;
+  if(dict->count != MBD_DICT_COUNT) {
+    dict->count++;
+  }
+  return;
+}
+
+#endif
+
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
   if(word == 0) {
     // All zero, code 2'b00
@@ -900,6 +1005,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
   assert(dict->count >= 1 && dict->count <= MBD_DICT_COUNT);
   // Generate the best result
   int min_bits = 32;
+  int min_index = -1;
   for(int i = 0;i < dict->count;i++) {
     uint32_t data = dict->data[i];
     if(data == word) {
@@ -910,6 +1016,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
 #ifdef MBD_COLLECT_STAT 
       dict->match_count++;
 #endif
+      MBD_update_LRU(dict, i);
       return 2 + MBD_DICT_INDEX_BITS;
     }
     uint32_t delta = word - data;
@@ -920,6 +1027,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
         // 4-bit delta, code 4'0011 + 3-bit index + 4-bit delta
         *output = ((delta & 0xF) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x3UL;
         min_bits = 8 + MBD_DICT_INDEX_BITS;
+        min_index = i;
       }
     } else {
       masked_delta = delta & ~0x7FU;
@@ -928,6 +1036,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
           // 8-bit delta, code 4'0111 + 3-bit index + 8-bit delta
           *output = ((delta & 0xFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x7UL;
           min_bits = 12 + MBD_DICT_INDEX_BITS;
+          min_index = i;
         }
       } else {
         masked_delta = delta & ~0x7FFU;
@@ -936,6 +1045,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
             // 12-bit delta, code 4'1011 + 3-bit index + 12-bit delta
             *output = ((delta & 0xFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xBUL;
             min_bits = 16 + MBD_DICT_INDEX_BITS;
+            min_index = i;
           }
         } else {
           masked_delta = delta & ~0x7FFFU;
@@ -944,6 +1054,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
               // 16-bit delta, code 4'1111 + 3-bit index + 16-bit delta
               *output = ((delta & 0xFFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xFUL;
               min_bits = 20 + MBD_DICT_INDEX_BITS;
+              min_index = i;
             }
           }
         }
@@ -960,6 +1071,7 @@ int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
       default: assert(0); break;
     }
 #endif
+    MBD_update_LRU(dict, min_index);
     return min_bits;
   }
   // Uncompressable, code 2'b10 + 4 byte
@@ -1012,7 +1124,12 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
     FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; break;
-      case 1: bits += (2 + MBD_DICT_INDEX_BITS); word = dict.data[(int)(output >> 2) & (MBD_DICT_COUNT - 1)]; break;
+      case 1: {
+        int index = ((int)output >> 2) & (MBD_DICT_COUNT - 1); 
+        word = dict.data[index];
+        bits += (2 + MBD_DICT_INDEX_BITS);
+        MBD_update_LRU(&dict, index);
+      } break;
       case 2: bits += 34; word = (uint32_t)(output >> 2); break;
       default: {
         switch((int)output & 0xF) {
@@ -1021,24 +1138,28 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFU;
             word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
             bits += (8 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
           } break;
           case 0x7: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFU;
             word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
             bits += (12 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
           } break;
           case 0xB: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFU;
             word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
             bits += (16 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
           } break;
           case 0xF: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFFU;
             word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
             bits += (20 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
           } break;
           default: {
             error_exit("Undefined case during CPACK decompression\n");
@@ -1096,7 +1217,13 @@ void _MBD_print_compressed(void *in_buf, int size) {
     FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
-      case 1: bits += (2 + MBD_DICT_COUNT); word = dict.data[(int)(output >> 2) & (MBD_DICT_COUNT - 1)]; code = 1; break;
+      case 1: {
+        int index = (int)(output >> 2) & (MBD_DICT_COUNT - 1);
+        word = dict.data[index]; 
+        bits += (2 + MBD_DICT_INDEX_BITS);
+        MBD_update_LRU(&dict, index);
+        code = 1; 
+      } break;
       case 2: bits += 34; word = (uint32_t)(output >> 2); code = 2; break;
       default: {
         switch((int)output & 0xF) {
@@ -1104,28 +1231,32 @@ void _MBD_print_compressed(void *in_buf, int size) {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFU;
             word = dict.data[index] + ((delta & 0x8) ? (delta | ~0xFU) : delta);
-            bits += (8 + MBD_DICT_COUNT);
+            bits += (8 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
             code = 0x3; 
           } break;
           case 0x7: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFU;
             word = dict.data[index] + ((delta & 0x80) ? (delta | ~0xFFU) : delta);
-            bits += (12 + MBD_DICT_COUNT);
+            bits += (12 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
             code = 0x7; 
           } break;
           case 0xB: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFU;
             word = dict.data[index] + ((delta & 0x800) ? (delta | ~0xFFFU) : delta);
-            bits += (16 + MBD_DICT_COUNT);
+            bits += (16 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
             code = 0xB; 
           } break;
           case 0xF: {
             int index = ((int)output >> 4) & (MBD_DICT_COUNT - 1); 
             uint32_t delta = (uint32_t)(output >> (4 + MBD_DICT_INDEX_BITS)) & 0xFFFFU;
             word = dict.data[index] + ((delta & 0x8000) ? (delta | ~0xFFFFU) : delta);
-            bits += (20 + MBD_DICT_COUNT);
+            bits += (20 + MBD_DICT_INDEX_BITS);
+            MBD_update_LRU(&dict, index);
             code = 0xF; 
           } break;
           default: {
@@ -1493,6 +1624,131 @@ void dmap_stat_print(dmap_t *dmap) {
   return;
 }
 
+//* bcache_t
+
+bcache_t *bcache_init(int line_count, int way_count, int shape) {
+  int sz = sizeof(bcache_t) + sizeof(bcache_entry_t) * line_count;
+  bcache_t *bcache = (bcache_t *)malloc(sz);
+  SYSEXPECT(bcache != NULL);
+  memset(bcache, 0x00, sz);
+  for(int i = 0;i < line_count;i++) {
+    bcache->data[i].lru = 0UL;
+  }
+  bcache->line_count = line_count;
+  bcache->way_count = way_count;
+  bcache->set_count = line_count / way_count;
+  assert(shape >= OCACHE_SHAPE_BEGIN && shape < OCACHE_SHAPE_END);
+  bcache->shape = shape;
+  if(shape == OCACHE_SHAPE_NONE) {
+    error_exit("OCACHE_SHAPE_NONE does not need the bcache\n");
+  } else if(popcount_int32(bcache->set_count) != 1) {
+    error_exit("Set count must be a power of two (see %d)\n", bcache->set_count);
+  }
+  bcache->set_bits = popcount_int32(bcache->set_count - 1);
+  // Mask first, shift second
+  if(shape == OCACHE_SHAPE_4_1) {
+    // OID must be multiple of four, so rshift two bits
+    bcache->oid_shift = 2;
+    bcache->oid_mask = ((0x1UL << bcache->set_bits) - 1) << 2;
+    bcache->addr_shift = 0;
+    bcache->addr_mask = ((0x1UL << bcache->set_bits) - 1) << UTIL_CACHE_LINE_BITS;
+  } else if(shape == OCACHE_SHAPE_2_2) {
+    bcache->oid_shift = 1;
+    bcache->oid_mask = ((0x1UL << bcache->set_bits) - 1) << 1;
+    bcache->addr_shift = UTIL_CACHE_LINE_BITS;
+    bcache->addr_mask = ((0x1UL << bcache->set_bits) - 1) << (UTIL_CACHE_LINE_BITS + 1);
+  } else if(shape == OCACHE_SHAPE_1_4) {
+    // This is special case; addresses are 4-block aligned
+    bcache->oid_shift = 0;
+    bcache->oid_mask = ((0x1UL << bcache->set_bits) - 1);
+    bcache->addr_shift = UTIL_CACHE_LINE_BITS + 2;
+    bcache->addr_mask = ((0x1UL << bcache->set_bits) - 1) << (UTIL_CACHE_LINE_BITS + 2);
+  } 
+  // LRU starts at 1, using 0 as invalid mark
+  bcache->lru_counter = 1UL;
+  return bcache;
+}
+
+void bcache_free(bcache_t *bcache) {
+  free(bcache);
+  return;
+}
+
+// This function does not update stat. This function updates LRU of the hit entry.
+// lru_entry is undefined on a hit; On a miss it points to the LRU entry
+bcache_entry_t *bcache_lookup(bcache_t *bcache, uint64_t oid, uint64_t addr, bcache_entry_t **lru_entry) {
+  int index = bcache_gen_index(bcache, oid, addr);
+  assert(index >= 0 && index < bcache->set_count);
+  uint64_t min_lru = -1UL;
+  bcache_entry_t *curr = bcache->data + index * bcache->way_count;
+  for(int i = 0;i < bcache->way_count;i++) {
+    // LRU being 0 means invalid
+    if(curr->lru != 0UL && curr->oid == oid && curr->addr == addr) {
+      curr->lru = bcache->lru_counter++; // Update LRU
+      return curr;
+    }
+    // This will also return invalid entry
+    if(curr->lru < min_lru) {
+      min_lru = curr->lru;
+      *lru_entry = curr; // Update LRU entry
+    }
+    curr++;
+  }
+  return NULL;
+}
+
+// Returns 1 if read hit, 0 if read miss
+int bcache_read(bcache_t *bcache, uint64_t oid, uint64_t addr) {
+  bcache->read_count++;
+  bcache_entry_t *lru_entry;
+  bcache_entry_t *entry = bcache_lookup(bcache, oid, addr, &lru_entry);
+  int hit = (entry != NULL);
+  if(hit == 0) {
+    // Read miss, silent eviction
+    lru_entry->lru = bcache->lru_counter++;
+    lru_entry->oid = oid;
+    lru_entry->addr = addr;
+    bcache->read_miss_count++;
+  } else {
+    assert(hit == 1);
+    bcache->read_hit_count++;
+  }
+  return hit;
+}
+
+void bcache_refresh_stat(bcache_t *bcache) {
+  bcache->valid_line_count = 0UL;
+  bcache_entry_t *curr = bcache->data;
+  for(int i = 0;i < bcache->line_count;i++) {
+    if(curr->lru != 0UL) {
+      bcache->valid_line_count++;
+    }
+    curr++;
+  }
+  return;
+}
+
+void bcache_conf_print(bcache_t *bcache) {
+  printf("---------- bcache_t conf ----------\n");
+  printf("Lines %d ways %d sets %d (size %d bytes, 64B entry) shape %d (%s) set bits %d\n", 
+    bcache->line_count, bcache->way_count, bcache->set_count, bcache->line_count * 64,
+    bcache->shape, 
+    ocache_shape_names[bcache->shape], bcache->set_bits);
+  printf("OID mask 0x%lX shift %d ADDR mask 0x%lX shift %d\n",
+    bcache->oid_mask, bcache->oid_shift, bcache->addr_mask, bcache->addr_shift);
+  return;
+}
+
+void bcache_stat_print(bcache_t *bcache) {
+  printf("---------- bcache_t stat ----------\n");
+  printf("Reads %lu hit %lu miss %lu (hit rate %.2lf%%)\n",
+    bcache->read_count, bcache->read_hit_count, bcache->read_miss_count,
+    100.0 * (double)bcache->read_hit_count / (double)(bcache->read_miss_count + bcache->read_hit_count));
+  bcache_refresh_stat(bcache);
+  printf("Valid line count %lu\n", bcache->valid_line_count);
+  return;
+}
+
 //* ocache_stat_snapshot_t
 
 ocache_stat_snapshot_t *ocache_stat_snapshot_init() {
@@ -1536,6 +1792,8 @@ ocache_t *ocache_init(int size, int way_count) {
   ocache->level = OCACHE_LEVEL_NONE;
   // LRU entry has this zero, so normal entry should always have one
   ocache->lru_counter = 1UL;
+  // By default, ocache operates as a sector cache
+  ocache->insert_cb = &ocache_insert_sb_cb;
   return ocache;
 }
 
@@ -1565,6 +1823,7 @@ void ocache_init_param(ocache_t *ocache, int size, int way_count) {
   }
   ocache->size = size;
   ocache->way_count = way_count;
+  ocache->set_size = (int)UTIL_CACHE_LINE_SIZE * way_count; // Number of bytes in a set's storage
   if(size % UTIL_CACHE_LINE_SIZE != 0) {
     error_exit("Size must be a multiple of %d (see %lu)\n", size, UTIL_CACHE_LINE_SIZE);
   }
@@ -1631,9 +1890,24 @@ void ocache_set_dmap(ocache_t *ocache, dmap_t *dmap) {
   return;
 }
 
+void ocache_set_insert_type(ocache_t *ocache, const char *name) {
+  if(streq(name, "sb") == 1) {
+    ocache->insert_cb = ocache_insert_sb_cb;
+  } else if(streq(name, "seg") == 1) {
+    ocache->insert_cb = ocache_insert_seg_cb;
+  } else {
+    error_exit("Unknown ocache_t insert type: \"%s\"\n", name);
+  }
+  return;
+}
+
 // Sets the compression type with a string type name
 // Valid values are: "BDI", "None"
 void ocache_set_compression_type(ocache_t *ocache, const char *name) {
+  // Only allow setting it once
+  if(ocache->get_compressed_size_cb != NULL) {
+    error_exit("Compression type has already been set\n");
+  }
   if(streq(name, "BDI") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_cb);
   } else if(streq(name, "BDI_third_party") == 1) {
@@ -1658,6 +1932,31 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
   } else {
     error_exit("Unknown ocache compression type: \"%s\"\n", name);
   }
+  return;
+}
+
+void ocache_init_bcache(ocache_t *ocache, int line_count, int way_count, const char *shape_str) {
+  int shape;
+  if(line_count <= 0) {
+    error_exit("Invalid line_count for bcache (see %d)\n", line_count);
+  } else if(way_count <= 0) {
+    error_exit("Invalid way_count for bcache (see %d)\n", way_count);
+  } else if(line_count % way_count != 0) {
+    error_exit("Line count must be a multiple of way count (%d and %d)\n", line_count, way_count);
+  }
+  // Parse shape_str
+  if(streq(shape_str, "1_4") == 1) {
+    shape = OCACHE_SHAPE_1_4;
+  } else if(streq(shape_str, "4_1") == 1) {
+    shape = OCACHE_SHAPE_4_1;
+  } else if(streq(shape_str, "2_2") == 1) {
+    shape = OCACHE_SHAPE_2_2;
+  } else if(streq(shape_str, "None") == 1) {
+    shape = OCACHE_SHAPE_NONE;
+  } else {
+    error_exit("Invalid shape for bcache (see \"%s\")\n", shape_str);
+  }
+  ocache->bcache = bcache_init(line_count, way_count, shape);
   return;
 }
 
@@ -1833,7 +2132,7 @@ void ocache_get_sb_tag(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape,
   uint64_t *oid_base, uint64_t *addr_base, int *index) {
   (void)ocache;
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0UL);
-  assert(shape != OCACHE_SHAPE_NONE);
+  //assert(shape != OCACHE_SHAPE_NONE);
   addr >>= UTIL_CACHE_LINE_BITS; // Shift out offset bits to make it cache line index
   switch(shape) {
     case OCACHE_SHAPE_4_1: {
@@ -1852,6 +2151,12 @@ void ocache_get_sb_tag(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape,
       *addr_base = addr & ~0x1UL;
       *index = (int)((oid & 0x1UL) + ((addr & 0x1UL) << 1));
     } break;
+    case OCACHE_SHAPE_NONE: {
+      *oid_base = oid;
+      *addr_base = addr;
+      *index = 0;
+    } break;
+    default: assert(0); break;
   }
   assert(*index >= 0 && *index < 4);
   // Restore offset bits from the cache line index
@@ -1902,7 +2207,7 @@ uint64_t ocache_get_vertical_base_oid(ocache_t *ocache, uint64_t oid, int shape)
 // entry that gets "hit", so the semantics is unclear
 // The combination scan_all == 0 and update_lru == 0 is used for probing without side effects, e.g., debugging
 // The combination scan_all == 1 and update_lru == 0 is used for write probe
-// The combination scan_all == 0 and update_lru == 1 is used for regular lookup
+// The combination scan_all == 0 and update_lru == 1 is used for regular lookup / clean eviction
 void _ocache_lookup(
   ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, int update_lru, int scan_all, ocache_op_result_t *result) {
   assert(shape >= OCACHE_SHAPE_BEGIN && shape < OCACHE_SHAPE_END);
@@ -2012,7 +2317,9 @@ static void ocache_insert_helper_uncompressed(
       assert(lru_entry->lru > 0);
       insert_result->state = OCACHE_EVICT;   // Eviction
       // Copy LRU entry to the insert result
-      ocache_entry_copy(&insert_result->evict_entry, lru_entry);
+      ocache_entry_dup(&insert_result->insert_evict_entries[0], lru_entry);
+      // Always evict exactly one for sector cache
+      insert_result->insert_evict_count = 1;
     }
     // Must clear all states since the slot might contain a compressed line
     // This will also modify shape, oid and addr
@@ -2137,6 +2444,15 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
       __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict);
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
         ocache->MBD_insert_base_is_missing++;
+        // Access bcache if it is initialized
+        if(ocache->bcache != NULL) {
+          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
+          if(bcache_hit == 1) {
+            ocache->MBD_insert_bcache_hit++;
+          } else {
+            ocache->MBD_insert_bcache_miss++;
+          } 
+        }
       } else {
         ocache->MBD_insert_base_is_present++;
       }
@@ -2149,6 +2465,8 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->MBD_zero_count += dict.zero_count;
   ocache->MBD_uncomp_count += dict.uncomp_count;
   ocache->MBD_match_count += dict.match_count;
+  ocache->MBD_dict_insert_count += dict.insert_count;
+  ocache->MBD_dict_insert_dup_count += dict.insert_dup_count;
   ocache->MBD_delta_size_dist[0] += dict.delta_size_dist[0];
   ocache->MBD_delta_size_dist[1] += dict.delta_size_dist[1];
   ocache->MBD_delta_size_dist[2] += dict.delta_size_dist[2];
@@ -2183,6 +2501,14 @@ void ocache_llc_read_hit_MBD(ocache_t *ocache, uint64_t oid, uint64_t addr, int 
     if(base_entry != NULL) {
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
         ocache->MBD_read_base_is_missing++;
+        if(ocache->bcache != NULL) {
+          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
+          if(bcache_hit == 1) {
+            ocache->MBD_read_bcache_hit++;
+          } else {
+            ocache->MBD_read_bcache_miss++;
+          } 
+        }
       } else {
         ocache->MBD_read_base_is_present++;
       }
@@ -2241,6 +2567,8 @@ int ocache_get_compressed_size_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->BDI_before_size_sum += UTIL_CACHE_LINE_SIZE;
   // Size after BDI compression
   ocache->BDI_after_size_sum += param->compressed_size;
+  // Update size distribution
+  ocache->BDI_size_counts[(param->compressed_size - 1) / 8]++;
   assert(param != NULL);
   // This is the BDI compressed base cache line for vertical compression
   uint8_t base_buf[UTIL_CACHE_LINE_SIZE];
@@ -2312,6 +2640,7 @@ int ocache_get_compressed_size_BDI_third_party_cb(ocache_t *ocache, uint64_t oid
   ocache->BDI_success_count++;
   ocache->BDI_before_size_sum += UTIL_CACHE_LINE_SIZE;
   ocache->BDI_after_size_sum += comp_size;
+  ocache->BDI_size_counts[(comp_size - 1) / 8]++;
   return comp_size;
 }
 
@@ -2335,7 +2664,9 @@ static void ocache_insert_helper_compressed_miss_no_candid(
     assert(entry->lru > 0);
     insert_result->state = OCACHE_EVICT;
     // First copy the evicted entry to the insert result
-    ocache_entry_copy(&insert_result->evict_entry, entry);
+    ocache_entry_dup(&insert_result->insert_evict_entries[0], entry);
+    // Always evict exactly one entry for sector cache design
+    insert_result->insert_evict_count = 1;
   }
   // Clear everything
   ocache_entry_inv(entry);
@@ -2495,8 +2826,8 @@ static void ocache_insert_helper_compressed_hit(
 //   3.1 If still fit after compression, use the current hit super block
 //   3.2 If not fit, do 1.2
 // -----------------------------------------------------------------------------
-void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr, 
-                   int shape, int dirty, ocache_op_result_t *insert_result) {
+void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+                         int shape, int dirty, ocache_op_result_t *insert_result) {
   assert(shape >= OCACHE_SHAPE_BEGIN && shape < OCACHE_SHAPE_END);
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0);
   // Only for compressed caches do we allow a shape
@@ -2541,6 +2872,149 @@ void ocache_insert(ocache_t *ocache, uint64_t oid, uint64_t addr,
   );
   // Re-adjust lines in the SB entries
   ocache_after_insert_adjust(ocache, insert_result, &lookup_result);
+  return;
+}
+
+// Evict a given entry by copying it into the given result object and increment its insert_evict_count by one
+// This function will:
+//   (1) Update total_aligned_size
+//   (2) Update insert_evict_count
+//   (3) Update insert_evict_entries
+static void ocache_insert_helper_evict(ocache_t *ocache, ocache_entry_t *entry, ocache_op_result_t *result) {
+  result->total_aligned_size -= ocache_entry_get_total_aligned_size(entry);
+  assert(result->total_aligned_size >= 0);
+  ocache_entry_dup(result->insert_evict_entries + result->insert_evict_count, entry);
+  ocache_entry_inv(entry);
+  result->insert_evict_count++;
+  assert(result->insert_evict_count <= OCACHE_MAX_EVICT_ENTRY);
+  (void)ocache;
+  return;
+}
+
+static void ocache_insert_helper_evict_valid_lru(
+  ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, int aligned_comp_size, ocache_op_result_t *result) {
+  while(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
+    ocache_entry_t *valid_lru_entry = NULL;
+    uint64_t min_lru = -1UL;
+    ocache_entry_t *entry = ocache_get_set_begin(ocache, oid, addr, shape);
+    for(int i = 0;i < ocache->way_count;i++) {
+      if(ocache_entry_is_all_invalid(entry) == 0) {
+        assert(entry->lru != 0UL);
+        if(entry->lru < min_lru) {
+          min_lru = entry->lru;
+          valid_lru_entry = entry;
+        }
+      }
+      entry++;
+    } // for
+    assert(valid_lru_entry != NULL);
+    ocache_insert_helper_evict(ocache, valid_lru_entry, result);
+  } // while
+  assert(result->insert_evict_count > 0);
+  return;
+}
+
+// Segment cache insert
+// This function will:
+//   (1) Return the inserted entry and index in insert_entry and insert_index
+//   (2) Return the new total aligned size of the set in total_aligned_size
+//   (3) Return evicted entries in insert_evict_entries and insert_evict_count
+void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *result) {
+  // Do not update LRU & always scan all tags in the set, such that total_aligned_size is always valid
+  ocache_lookup_write(ocache, oid, addr, shape, result);
+  // Compressed size of the line
+  assert(ocache->get_compressed_size_cb != NULL);
+  int comp_size = ocache->get_compressed_size_cb(ocache, oid, addr, shape);
+  int aligned_comp_size = ocache_entry_align_size(NULL, comp_size);
+  uint64_t base_oid, base_addr;
+  int index;
+  ocache_get_sb_tag(ocache, oid, addr, shape, &base_oid, &base_addr, &index);
+  if(result->state != OCACHE_MISS) {
+    assert(result->state == OCACHE_HIT_NORMAL || result->state == OCACHE_HIT_COMPRESSED);
+    assert(result->cand_count == 1 || result->state == OCACHE_HIT_NORMAL);
+    result->insert_evict_count = 0;
+    result->state = OCACHE_SUCCESS;
+    ocache_entry_t *hit_entry = result->hit_entry;
+    int hit_index = result->hit_index;
+    assert(hit_entry != NULL);
+    assert(hit_index == index && hit_entry->oid == base_oid && hit_entry->addr == base_addr);
+    assert(hit_entry->shape == shape);
+    assert(result->hit_index == 0 || result->state == OCACHE_HIT_COMPRESSED);
+    int aligned_old_size = ocache_entry_align_size(NULL, ocache_entry_get_size(hit_entry, hit_index));
+    // Remember the dirty bit of the existing entry
+    dirty = dirty || ocache_entry_is_dirty(hit_entry, hit_index);
+    // Invalidate the entry, i.e., an insert hit is equivalent to removing and re-inserting it
+    ocache_entry_inv_index(hit_entry, hit_index);
+    // Need to update aligned size, which should be done before the invalidation
+    result->total_aligned_size -= aligned_old_size;
+    if(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
+      // This evict lines until the above condition is met, and copies entry into result
+      // result->total_aligned_size is also updated accordingly
+      ocache_insert_helper_evict_valid_lru(ocache, oid, addr, shape, aligned_comp_size, result);
+      result->state = OCACHE_EVICT;
+    }
+    // Then re-insert the hit_entry using the dirty bit (which could have be changed) and new size
+    // Note: We should set oid, addr, shape, since the hit block could just be evicted
+    hit_entry->oid = base_oid;
+    hit_entry->addr = base_addr;
+    hit_entry->shape = shape;
+    ocache_entry_set_valid(hit_entry, hit_index);
+    if(dirty == 1) {
+      ocache_entry_set_dirty(hit_entry, hit_index);
+    }
+    ocache_entry_set_size(hit_entry, hit_index, comp_size);
+    ocache_update_entry_lru(ocache, hit_entry);
+    result->total_aligned_size += aligned_comp_size;
+    result->insert_entry = hit_entry;
+    result->insert_index = hit_index;
+  } else {
+    result->insert_evict_count = 0;
+    result->state = OCACHE_SUCCESS;
+    ocache_entry_t *insert_entry = NULL;
+    if(result->cand_count > 0) {
+      // This is SB hit, always insert into the same SB
+      assert(result->cand_count == 1);
+      insert_entry = result->candidates[0];
+      assert(insert_entry->oid == base_oid && insert_entry->addr == base_addr);
+      assert(insert_entry->shape == shape);
+    } else {
+      // This is full miss, must claim the LRU entry and init to be the current base addr / shape
+      insert_entry = result->lru_entry;
+      // Claim a tag entry from LRU. If LRU entry is valid, evict it first; This will change total_aligned_size
+      if(ocache_entry_is_all_invalid(insert_entry) == 0) {
+        // This will update result->total_aligned_size
+        ocache_insert_helper_evict(ocache, insert_entry, result);
+        result->state = OCACHE_EVICT; // Eviction for tag
+      }
+      // LRU entry must be invalidated at this point
+      assert(insert_entry->lru == 0UL);
+      assert(ocache_entry_get_total_aligned_size(insert_entry) == 0);
+      // Install the new entry
+      insert_entry->oid = base_oid;
+      insert_entry->addr = base_addr;
+      insert_entry->shape = shape;
+    }
+    // If need more storage then evict more entries
+    if(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
+      // This will update lookup_result.total_aligned_size
+      ocache_insert_helper_evict_valid_lru(ocache, oid, addr, shape, aligned_comp_size, result);
+      result->state = OCACHE_EVICT; // Eviction for storage
+    }
+    // This is the size after insertion
+    result->total_aligned_size += aligned_comp_size;
+    assert(result->total_aligned_size <= ocache->set_size);
+    ocache_entry_set_valid(insert_entry, index);
+    if(dirty == 1) {
+      ocache_entry_set_dirty(insert_entry, index);
+    }
+    ocache_entry_set_size(insert_entry, index, comp_size);
+    // Update LRU
+    ocache_update_entry_lru(ocache, insert_entry);
+    // Pass insert entry and index info
+    result->insert_entry = insert_entry;
+    result->insert_index = index;
+  }
   return;
 }
 
@@ -2719,7 +3193,7 @@ void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache
   // Always copy and return evict if the query hits
   result->state = OCACHE_EVICT;
   result->evict_index = hit_index;
-  ocache_entry_copy(&result->evict_entry, hit_entry);
+  ocache_entry_dup(&result->evict_entry, hit_entry);
   // Only invalidate a single logical line
   ocache_entry_inv_index(hit_entry, hit_index);
   // If all lines are invalid, just invalidate the entire line (reset LRU, etc.)
@@ -2961,6 +3435,43 @@ int ocache_inv_all(ocache_t *ocache) {
   return count;
 }
 
+int ocache_is_line_invalid(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  ocache_op_result_t lookup_result;
+  _ocache_lookup(ocache, oid, addr, shape, 0, 0, &lookup_result);
+  return lookup_result.state == OCACHE_MISS;
+}
+
+// Reports error if the line is not found
+int ocache_is_line_dirty(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  ocache_op_result_t lookup_result;
+  _ocache_lookup(ocache, oid, addr, shape, 0, 0, &lookup_result);
+  if(lookup_result.state == OCACHE_MISS) {
+    error_exit("The line is not present in the cache\n");
+  }
+  return ocache_entry_is_dirty(lookup_result.hit_entry, lookup_result.hit_index);
+}
+
+int ocache_get_line_size(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  ocache_op_result_t lookup_result;
+  _ocache_lookup(ocache, oid, addr, shape, 0, 0, &lookup_result);
+  if(lookup_result.state == OCACHE_MISS) {
+    error_exit("The line is not present in the cache\n");
+  }
+  return ocache_entry_get_size(lookup_result.hit_entry, lookup_result.hit_index);
+}
+
+int ocache_get_valid_tag_count(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  int count = 0;
+  ocache_entry_t *curr = ocache_get_set_begin(ocache, oid, addr, shape);
+  for(int i = 0;i < ocache->way_count;i++) {
+    if(ocache_entry_is_all_invalid(curr) == 0) {
+      count++;
+    }
+    curr++;
+  }
+  return count;
+}
+
 void ocache_set_print(ocache_t *ocache, int set) {
   ocache_entry_t *curr = ocache->data + set * ocache->way_count;
   printf("---------- level %d name %s set %d ----------\n", 
@@ -2995,9 +3506,9 @@ void ocache_set_print(ocache_t *ocache, int set) {
 
 void ocache_conf_print(ocache_t *ocache) {
   printf("---------- ocache_t conf ----------\n");
-  printf("name \"%s\" level %d size %d bytes %d lines %d sets %d ways\n", 
+  printf("name \"%s\" level %d size %d bytes lines %d sets %d ways %d set size %d bytes\n", 
     ocache->name ? ocache->name : "[No Name]", ocache->level, ocache->size, ocache->line_count, 
-    ocache->set_count, ocache->way_count);
+    ocache->set_count, ocache->way_count, ocache->set_size);
   printf("use_shape %d dmap %p line size %lu\n", ocache->use_shape, ocache->dmap, UTIL_CACHE_LINE_SIZE);
   for(int i = 0;i < OCACHE_SHAPE_COUNT;i++) {
     printf("name \"%s\" addr {mask 0x%lX shift %d} OID {mask 0x%lX shift %d}\n", 
@@ -3016,11 +3527,29 @@ void ocache_conf_print(ocache_t *ocache) {
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_CPACK_cb) {
     printf("CPACK\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_MBD_cb) {
-    printf("MBD (type %s)\n", ocache_MBD_type_names[ocache->MBD_type]);
+    printf("MBD (dict size %d bits %d Repl.Algo. %s type %s)\n", 
+      MBD_DICT_COUNT, MBD_DICT_INDEX_BITS,
+      #ifdef MBD_DICT_LRU
+        "LRU",
+      #else
+        "FIFO",
+      #endif
+      ocache_MBD_type_names[ocache->MBD_type]);
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
   } else {
     printf("Unknown (debugging?)\n");
+  }
+  printf("Insert type: ");
+  if(ocache->insert_cb == ocache_insert_sb_cb) {
+    printf("sector cache (super-block based)\n");
+  } else if(ocache->insert_cb == ocache_insert_seg_cb) {
+    printf("segmented cache\n");
+  } else {
+    printf("Unknown insertion method call back (likely an error)\n");
+  }
+  if(ocache->bcache != NULL) {
+    bcache_conf_print(ocache->bcache);
   }
   printf("-----------------------------------\n");
   return;
@@ -3077,6 +3606,11 @@ void ocache_stat_print(ocache_t *ocache) {
       printf(" [%s] %lu", BDI_names[i], ocache->BDI_compress_type_counts[i]);
     }
     putchar('\n');
+    printf("BDI size classes: ");
+    for(int i = 0;i < 8;i++) {
+      printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->BDI_size_counts[i]);
+    }
+    putchar('\n');
     assert(ocache->BDI_compress_type_counts[0] == 0 && ocache->BDI_compress_type_counts[1] == 0);
     // These two constitute all cases
     assert(ocache->BDI_success_count + ocache->BDI_failed_count == ocache->comp_attempt_count);
@@ -3094,7 +3628,7 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum,
       100.0 * (ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum));
-    printf("Size classes ");
+    printf("FPC size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->FPC_size_counts[i]);
     }
@@ -3111,14 +3645,20 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum,
       100.0 * (ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum));
-    printf("Size classes ");
+    printf("CPACK size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->CPACK_size_counts[i]);
     }
     putchar('\n');
   } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_MBD_cb) {
-    printf("MBD dict entries %d bits %d type %s\n", 
-      MBD_DICT_COUNT, MBD_DICT_INDEX_BITS, ocache_MBD_type_names[ocache->MBD_type]);
+    printf("MBD dict entries %d bits %d Repl.Algo. %s type %s\n", 
+      MBD_DICT_COUNT, MBD_DICT_INDEX_BITS, 
+      #ifdef MBD_DICT_LRU
+        "LRU",
+      #else
+        "FIFO",
+      #endif
+      ocache_MBD_type_names[ocache->MBD_type]);
     printf("MBD attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
       ocache->comp_attempt_count, ocache->MBD_success_count, ocache->MBD_fail_count,
       100.0 * ocache->MBD_success_count / (double)ocache->comp_attempt_count);
@@ -3134,25 +3674,54 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->MBD_insert_base_is_present, ocache->MBD_insert_base_is_missing,
       100.0 * ocache->MBD_insert_base_is_present / 
         (double)(ocache->MBD_insert_base_is_present + ocache->MBD_insert_base_is_missing));
+    if(ocache->bcache != NULL) {
+      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base present %.2lf%%\n",
+        ocache->MBD_insert_bcache_hit, ocache->MBD_insert_bcache_miss,
+        100.0 * ocache->MBD_insert_bcache_hit / 
+          (double)(ocache->MBD_insert_bcache_hit + ocache->MBD_insert_bcache_miss),
+        100.0 * (ocache->MBD_insert_base_is_present + ocache->MBD_insert_bcache_hit) / 
+        (double)(ocache->MBD_insert_base_is_present + ocache->MBD_insert_base_is_missing));
+    }
     printf("MBD read base present %lu missing %lu (base present percentage %.2lf%%)\n",
     ocache->MBD_read_base_is_present, ocache->MBD_read_base_is_missing,
     100.0 * ocache->MBD_read_base_is_present / 
       (double)(ocache->MBD_read_base_is_present + ocache->MBD_read_base_is_missing));
-    printf("Size classes ");
+    if(ocache->bcache != NULL) {
+      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base present %.2lf%%\n",
+        ocache->MBD_read_bcache_hit, ocache->MBD_read_bcache_miss,
+        100.0 * ocache->MBD_read_bcache_hit / 
+          (double)(ocache->MBD_read_bcache_hit + ocache->MBD_read_bcache_miss),
+        100.0 * (ocache->MBD_read_base_is_present + ocache->MBD_read_bcache_hit) / 
+        (double)(ocache->MBD_read_base_is_present + ocache->MBD_read_base_is_missing));
+    }
+    uint64_t MBD_total_case_count = \
+      ocache->MBD_zero_count + ocache->MBD_match_count + ocache->MBD_uncomp_count + \
+      ocache->MBD_delta_size_dist[0] + ocache->MBD_delta_size_dist[1] + ocache->MBD_delta_size_dist[2] + \
+      ocache->MBD_delta_size_dist[3];
+    printf("MBD Per-word stats [ZERO] %lu (%.2lf%%) [MATCH] %lu (%.2lf%%) [UNCOMP] %lu (%.2lf%%)"
+           " [4-bit] %lu (%.2lf%%) [8-bit] %lu (%.2lf%%) [12-bit] %lu (%.2lf%%) [16-bit] %lu (%.2lf%%)\n",
+      ocache->MBD_zero_count, 100.0 * (double)ocache->MBD_zero_count / (double)MBD_total_case_count,
+      ocache->MBD_match_count, 100.0 * (double)ocache->MBD_match_count / (double)MBD_total_case_count,
+      ocache->MBD_uncomp_count, 100.0 * (double)ocache->MBD_uncomp_count / (double)MBD_total_case_count,
+      ocache->MBD_delta_size_dist[0], 100.0 * (double)ocache->MBD_delta_size_dist[0] / (double)MBD_total_case_count,
+      ocache->MBD_delta_size_dist[1], 100.0 * (double)ocache->MBD_delta_size_dist[1] / (double)MBD_total_case_count,
+      ocache->MBD_delta_size_dist[2], 100.0 * (double)ocache->MBD_delta_size_dist[2] / (double)MBD_total_case_count,
+      ocache->MBD_delta_size_dist[3], 100.0 * (double)ocache->MBD_delta_size_dist[3] / (double)MBD_total_case_count);
+    printf("MBD dict inserts %lu dup %lu (%.2lf%% dup)\n", 
+      ocache->MBD_dict_insert_dup_count, ocache->MBD_dict_insert_count, 
+      100.0 * (double)ocache->MBD_dict_insert_dup_count / (double)ocache->MBD_dict_insert_count);
+    printf("MBD size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->MBD_size_counts[i]);
     }
     putchar('\n');
-    printf("Per-word stats [ZERO] %lu [MATCH] %lu [UNCOMP] %lu [4-bit] %lu [8-bit] %lu [12-bit] %lu [16-bit] %lu\n",
-      ocache->MBD_zero_count, ocache->MBD_match_count, ocache->MBD_uncomp_count, 
-      ocache->MBD_delta_size_dist[0], ocache->MBD_delta_size_dist[1], 
-      ocache->MBD_delta_size_dist[2], ocache->MBD_delta_size_dist[3]);
   } else {
     printf("Unknown compression method (debugging?)\n");
   }
   // General stats refershed by ocache_refresh_stat(). Note that these are unrelated to BDI, and are still valid
   // for FPC-based compression
   ocache_refresh_stat(ocache);
+  printf("Snapshot stats:\n");
   printf("Logical lines %lu sb %lu sb logical lines %lu (avg. %.4lf lines per sb) sb line size %lu\n"
          "[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
     ocache->logical_line_count, ocache->sb_slot_count, ocache->sb_logical_line_count,
@@ -3169,6 +3738,9 @@ void ocache_stat_print(ocache_t *ocache) {
     printf("[%d] %lu ", i + 1, ocache->sb_logical_line_count_dist[i]);
   }
   putchar('\n');
+  if(ocache->bcache != NULL) {
+    bcache_stat_print(ocache->bcache);
+  }
   printf("-----------------------------------\n");
   return;
 }
@@ -4851,6 +5423,8 @@ void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, i
 //   cc.ocache.l1.size cc.ocache.l1.way_count cc.ocache.l1.latency
 //   cc.ocache.l2.size cc.ocache.l2.way_count cc.ocache.l2.latency
 //   cc.ocache.llc.size cc.ocache.llc.physical_way_count cc.ocache.llc.latency
+//   cc.ocache.llc.insert_type ("sb", "seg"), optional
+//   cc.ocache.llc.bcache.line_count cc.ocache.llc.bcache.way_count cc.ocache.llc.bcache.shape
 //   cc.ocache.default_shape (4_1, 1_4, 2_2, None)
 cc_ocache_t *cc_ocache_init_conf(conf_t *conf) {
   cc_ocache_t *cc = cc_ocache_init();
@@ -4877,6 +5451,24 @@ cc_ocache_t *cc_ocache_init_conf(conf_t *conf) {
     conf_find_int32_range(conf, "cc.ocache.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
   const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.ocache.llc.algorithm");
   cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_latency, llc_algorithm);
+  // insert type, optional
+  char *insert_type_str;
+  int insert_type_found = conf_find_str(conf, "cc.ocache.llc.insert_type", &insert_type_str);
+  if(insert_type_found == 1) {
+    ocache_set_insert_type(cc->shared_llc, insert_type_str);
+  }
+  // bcache, if given
+  int bcache_line_count, bcache_way_count;
+  char *bcache_shape_str;
+  int bcache_ret = 0;
+  bcache_ret += conf_find_int32(conf, "cc.ocache.llc.bcache.line_count", &bcache_line_count);
+  bcache_ret += conf_find_int32(conf, "cc.ocache.llc.bcache.way_count", &bcache_way_count);
+  bcache_ret += conf_find_str(conf, "cc.ocache.llc.bcache.shape", &bcache_shape_str);
+  if(bcache_ret == 3) {
+    ocache_init_bcache(cc->shared_llc, bcache_line_count, bcache_way_count, bcache_shape_str);
+  } else if(bcache_ret > 0) {
+    printf("bcache will not be initialized because some essential configurations are missing\n");
+  }
   // Default shape
   const char *default_shape = conf_find_str_mandatory(conf, "cc.ocache.default_shape");
   assert(default_shape != NULL);
@@ -5037,22 +5629,26 @@ uint64_t cc_ocache_llc_insert_recursive(
   // Evict an entry consisting of at most four lines
   if(insert_result.state == OCACHE_EVICT) {
     (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_LLC, id, CC_STAT_EVICT))++;
-    for(int i = 0;i < 4;i++) {
-      if(ocache_entry_is_valid(&insert_result.evict_entry, i) == 0) {
-        continue;
+    for(int entry_index = 0;entry_index < insert_result.insert_evict_count;entry_index++) {
+      // This is the entry currently being processed
+      ocache_entry_t *evict_entry = insert_result.insert_evict_entries + entry_index;
+      for(int i = 0;i < 4;i++) {
+        if(ocache_entry_is_valid(evict_entry, i) == 0) {
+          continue;
+        }
+        uint64_t base_oid = evict_entry->oid;
+        uint64_t base_addr = evict_entry->addr;
+        int evict_dirty = ocache_entry_is_dirty(evict_entry, i);
+        uint64_t evict_oid, evict_addr;
+        // Note this is different from the inserted shape
+        int evict_shape = evict_entry->shape;
+        // Generates the logical line oid and addr using the block info
+        ocache_gen_addr_in_sb(llc, base_oid, base_addr, i, evict_shape, &evict_oid, &evict_addr);
+        // This is size in the LLC
+        int size = ocache_entry_get_size(evict_entry, i);
+        // Do not need shape here since upper level caches do not use compression
+        cycle = cc_ocache_llc_evict_recursive(cc, id, cycle, evict_oid, evict_addr, evict_dirty, size);
       }
-      uint64_t base_oid = insert_result.evict_entry.oid;
-      uint64_t base_addr = insert_result.evict_entry.addr;
-      int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, i);
-      uint64_t evict_oid, evict_addr;
-      // Note this is different from the inserted shape
-      int evict_shape = insert_result.evict_entry.shape;
-      // Generates the logical line oid and addr using the block info
-      ocache_gen_addr_in_sb(llc, base_oid, base_addr, i, evict_shape, &evict_oid, &evict_addr);
-      // This is size in the LLC
-      int size = ocache_entry_get_size(&insert_result.evict_entry, i);
-      // Do not need shape here since upper level caches do not use compression
-      cycle = cc_ocache_llc_evict_recursive(cc, id, cycle, evict_oid, evict_addr, evict_dirty, size);
     }
   } else {
     assert(insert_result.state == OCACHE_SUCCESS);
@@ -5071,10 +5667,11 @@ uint64_t cc_ocache_l2_insert_recursive(
   (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L2, id, CC_STAT_INSERT))++;
   if(insert_result.state == OCACHE_EVICT) {
     (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L2, id, CC_STAT_EVICT))++;
-    uint64_t evict_oid = insert_result.evict_entry.oid;
-    uint64_t evict_addr = insert_result.evict_entry.addr;
+    assert(insert_result.insert_evict_count == 1);
+    uint64_t evict_oid = insert_result.insert_evict_entries[0].oid;
+    uint64_t evict_addr = insert_result.insert_evict_entries[0].addr;
     // Whether the L2 copy is dirty
-    int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, 0);
+    int evict_dirty = ocache_entry_is_dirty(&insert_result.insert_evict_entries[0], 0);
     pmap_entry_t *pmap_entry = pmap_find(cc->commons.dmap, evict_addr);
     // If shape is defined, then use it. Otherwise use default shape in the cc
     int evict_shape = (pmap_entry == NULL) ? shape = cc->default_shape : pmap_entry->shape;
@@ -5140,10 +5737,11 @@ uint64_t cc_ocache_l1_insert_recursive(
   (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L1, id, CC_STAT_INSERT))++;
   if(insert_result.state == OCACHE_EVICT) {
     (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L1, id, CC_STAT_EVICT))++;
-    uint64_t evict_oid = insert_result.evict_entry.oid;
-    uint64_t evict_addr = insert_result.evict_entry.addr;
+    assert(insert_result.insert_evict_count == 1);
+    uint64_t evict_oid = insert_result.insert_evict_entries[0].oid;
+    uint64_t evict_addr = insert_result.insert_evict_entries[0].addr;
     // Whether the L1 copy is dirty
-    int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, 0);
+    int evict_dirty = ocache_entry_is_dirty(&insert_result.insert_evict_entries[0], 0);
     MESI_entry_t *MESI_entry = dmap_find_MESI_entry(cc->commons.dmap, evict_oid, evict_addr);
     assert(MESI_entry != NULL);
     // Must be included in both current L1 and L2 according to inclusiveness
@@ -5523,7 +6121,9 @@ void cc_ocache_stat_print(cc_ocache_t *cc) {
 //   cc.simple.core_count
 //   cc.simple.l1.size cc.simple.l1.way_count cc.simple.l1.latency
 //   cc.simple.l2.size cc.simple.l2.way_count cc.simple.l2.latency
-//   cc.simple.llc.size cc.simple.llc.physical_way_count cc.simple.llc.latency
+//   cc.simple.llc.size cc.simple.llc.physical_way_count cc.simple.llc.latency cc.simple.llc.algorithm
+//   cc.simple.llc.bcache.line_count cc.simple.llc.bcache.way_count 
+//   cc.simple.llc.insert_type ("seg", "sb"), if not specified then just sb
 //   cc.simple.default_shape (4_1, 1_4, 2_2, None)
 cc_simple_t *cc_simple_init_conf(conf_t *conf) {
   cc_simple_t *cc = cc_simple_init();
@@ -5570,6 +6170,24 @@ cc_simple_t *cc_simple_init_conf(conf_t *conf) {
   ocache_set_level(cc->shared_llc, MESI_CACHE_LLC);
   ocache_set_name(cc->shared_llc, "Shared LLC (cc_simple)");
   ocache_set_compression_type(cc->shared_llc, llc_algorithm);
+  // insert type, optional
+  char *insert_type_str;
+  int insert_type_found = conf_find_str(conf, "cc.simple.llc.insert_type", &insert_type_str);
+  if(insert_type_found == 1) {
+    ocache_set_insert_type(cc->shared_llc, insert_type_str);
+  }
+  // bcache, if given
+  int bcache_line_count, bcache_way_count;
+  char *bcache_shape_str;
+  int bcache_ret = 0;
+  bcache_ret += conf_find_int32(conf, "cc.simple.llc.bcache.line_count", &bcache_line_count);
+  bcache_ret += conf_find_int32(conf, "cc.simple.llc.bcache.way_count", &bcache_way_count);
+  bcache_ret += conf_find_str(conf, "cc.simple.llc.bcache.shape", &bcache_shape_str);
+  if(bcache_ret == 3) {
+    ocache_init_bcache(cc->shared_llc, bcache_line_count, bcache_way_count, bcache_shape_str);
+  } else if(bcache_ret > 0) {
+    printf("bcache will not be initialized because some essential configurations are missing\n");
+  }
   // Default shape
   const char *default_shape = conf_find_str_mandatory(conf, "cc.simple.default_shape");
   assert(default_shape != NULL);
@@ -5649,45 +6267,48 @@ uint64_t cc_simple_llc_insert_recursive(
   ocache_insert(cc->shared_llc, oid, addr, shape, dirty, &insert_result);
   (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_LLC, 0, CC_STAT_INSERT))++;
   if(insert_result.state == OCACHE_EVICT) {
-    for(int i = 0;i < 4;i++) {
-      if(ocache_entry_is_valid(&insert_result.evict_entry, i) == 0) {
-        continue;
-      }
-      uint64_t evict_oid, evict_addr;
-      ocache_gen_addr_in_sb(cc->shared_llc, insert_result.evict_entry.oid, insert_result.evict_entry.addr, 
-        i, insert_result.evict_entry.shape, &evict_oid, &evict_addr);
-      // We only update it when optional dmap is present (for MBD)
-      dmap_entry_t *dmap_entry = dmap_find(cc->shared_llc->dmap, evict_oid, evict_addr);
-      if(dmap_entry != NULL) {
-        dmap_entry->MESI_entry.llc_state = MESI_STATE_I;
-      }
-      // Whether LLC version is dirty
-      int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, i);
-      int evict_size = ocache_entry_get_size(&insert_result.evict_entry, i);
-      // Whether invalidated version is dirty
-      int inv_dirty = 0;
-      // Invalidate the line from L1 and L2
-      ocache_op_result_t inv_result;
-      ocache_inv(cc_simple_get_core_cache(cc, MESI_CACHE_L1, 0), evict_oid, evict_addr, OCACHE_SHAPE_NONE, &inv_result);
-      if(inv_result.state == OCACHE_EVICT) {
-        assert(inv_result.evict_index == 0);
-        inv_dirty |= ocache_entry_is_dirty(&inv_result.evict_entry, 0);
-      }
-      ocache_inv(cc_simple_get_core_cache(cc, MESI_CACHE_L2, 0), evict_oid, evict_addr, OCACHE_SHAPE_NONE, &inv_result);
-      if(inv_result.state == OCACHE_EVICT) {
-        assert(inv_result.evict_index == 0);
-        inv_dirty |= ocache_entry_is_dirty(&inv_result.evict_entry, 0);
-      }
-      if(evict_dirty == 1 || inv_dirty == 1) {
-        (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_LLC, 0, CC_STAT_EVICT))++;
-        int wb_size = (inv_dirty == 1) ? UTIL_CACHE_LINE_SIZE : evict_size;
-        dram_write(cc->commons.dram, cycle, evict_oid, evict_addr, wb_size);
-        if(cc->commons.dram_debug_cb != NULL) {
-          cc->commons.dram_debug_cb(DRAM_WRITE, 0, cycle, evict_oid, evict_addr, wb_size);
+    for(int entry_index = 0;entry_index < insert_result.insert_evict_count;entry_index++) {
+      ocache_entry_t *evict_entry = insert_result.insert_evict_entries + entry_index;
+      for(int i = 0;i < 4;i++) {
+        if(ocache_entry_is_valid(evict_entry, i) == 0) {
+          continue;
         }
-        // Update DRAM write stats
-        cc->commons.dram_write_count++;
-        cc->commons.dram_write_bytes += wb_size;
+        uint64_t evict_oid, evict_addr;
+        ocache_gen_addr_in_sb(cc->shared_llc, evict_entry->oid, evict_entry->addr, 
+          i, evict_entry->shape, &evict_oid, &evict_addr);
+        // We only update it when optional dmap is present (for MBD)
+        dmap_entry_t *dmap_entry = dmap_find(cc->shared_llc->dmap, evict_oid, evict_addr);
+        if(dmap_entry != NULL) {
+          dmap_entry->MESI_entry.llc_state = MESI_STATE_I;
+        }
+        // Whether LLC version is dirty
+        int evict_dirty = ocache_entry_is_dirty(evict_entry, i);
+        int evict_size = ocache_entry_get_size(evict_entry, i);
+        // Whether invalidated version is dirty
+        int inv_dirty = 0;
+        // Invalidate the line from L1 and L2
+        ocache_op_result_t inv_result;
+        ocache_inv(cc_simple_get_core_cache(cc, MESI_CACHE_L1, 0), evict_oid, evict_addr, OCACHE_SHAPE_NONE, &inv_result);
+        if(inv_result.state == OCACHE_EVICT) {
+          assert(inv_result.evict_index == 0);
+          inv_dirty |= ocache_entry_is_dirty(&inv_result.evict_entry, 0);
+        }
+        ocache_inv(cc_simple_get_core_cache(cc, MESI_CACHE_L2, 0), evict_oid, evict_addr, OCACHE_SHAPE_NONE, &inv_result);
+        if(inv_result.state == OCACHE_EVICT) {
+          assert(inv_result.evict_index == 0);
+          inv_dirty |= ocache_entry_is_dirty(&inv_result.evict_entry, 0);
+        }
+        if(evict_dirty == 1 || inv_dirty == 1) {
+          (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_LLC, 0, CC_STAT_EVICT))++;
+          int wb_size = (inv_dirty == 1) ? UTIL_CACHE_LINE_SIZE : evict_size;
+          dram_write(cc->commons.dram, cycle, evict_oid, evict_addr, wb_size);
+          if(cc->commons.dram_debug_cb != NULL) {
+            cc->commons.dram_debug_cb(DRAM_WRITE, 0, cycle, evict_oid, evict_addr, wb_size);
+          }
+          // Update DRAM write stats
+          cc->commons.dram_write_count++;
+          cc->commons.dram_write_bytes += wb_size;
+        }
       }
     }
   }
@@ -5702,13 +6323,14 @@ uint64_t cc_simple_l2_insert_recursive(
   ocache_insert(cc_simple_get_core_cache(cc, MESI_CACHE_L2, 0), oid, addr, OCACHE_SHAPE_NONE, dirty, &insert_result);
   (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L2, 0, CC_STAT_INSERT))++;
   if(insert_result.state == OCACHE_EVICT) {
-    assert(ocache_entry_is_valid(&insert_result.evict_entry, 0) == 1);
-    uint64_t evict_oid = insert_result.evict_entry.oid;
-    uint64_t evict_addr = insert_result.evict_entry.addr;
+    assert(insert_result.insert_evict_count == 1);
+    assert(ocache_entry_is_valid(&insert_result.insert_evict_entries[0], 0) == 1);
+    uint64_t evict_oid = insert_result.insert_evict_entries[0].oid;
+    uint64_t evict_addr = insert_result.insert_evict_entries[0].addr;
     pmap_t *pmap = cc->commons.dmap;
     pmap_entry_t *pmap_entry = pmap_find(pmap, addr);
     int evict_shape = (pmap_entry == NULL) ? cc->default_shape : pmap_entry->shape;
-    int evict_dirty = ocache_entry_is_dirty(&insert_result.evict_entry, 0);
+    int evict_dirty = ocache_entry_is_dirty(&insert_result.insert_evict_entries[0], 0);
     // Invalidate the line from L1 also
     ocache_op_result_t inv_result;
     ocache_inv(cc_simple_get_core_cache(cc, MESI_CACHE_L1, 0), evict_oid, evict_addr, OCACHE_SHAPE_NONE, &inv_result);
@@ -5738,10 +6360,11 @@ uint64_t cc_simple_l1_insert_recursive(
   ocache_insert(cc_simple_get_core_cache(cc, MESI_CACHE_L1, 0), oid, addr, OCACHE_SHAPE_NONE, dirty, &insert_result);
   (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L1, 0, CC_STAT_INSERT))++;
   if(insert_result.state == OCACHE_EVICT) {
-    assert(ocache_entry_is_valid(&insert_result.evict_entry, 0) == 1);
-    uint64_t evict_oid = insert_result.evict_entry.oid;
-    uint64_t evict_addr = insert_result.evict_entry.addr;
-    if(ocache_entry_is_dirty(&insert_result.evict_entry, 0) == 1) {
+    assert(insert_result.insert_evict_count == 1);
+    assert(ocache_entry_is_valid(&insert_result.insert_evict_entries[0], 0) == 1);
+    uint64_t evict_oid = insert_result.insert_evict_entries[0].oid;
+    uint64_t evict_addr = insert_result.insert_evict_entries[0].addr;
+    if(ocache_entry_is_dirty(&insert_result.insert_evict_entries[0], 0) == 1) {
       cc_simple_l2_insert_recursive(cc, id, cycle, evict_oid, evict_addr, OCACHE_SHAPE_NONE, 1);
       (*cc_common_get_stat_ptr(&cc->commons, MESI_CACHE_L1, 0, CC_STAT_EVICT))++;
     } else {
@@ -6811,7 +7434,7 @@ static void main_populate_dmap(main_t *main, uint64_t addr_1d_aligned, uint64_t 
 uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   int index = main->mem_op_index;
   main->mem_op_index++;
-  // If sim has not started, just return in the same cycle
+  // If sim has not started, just return in the same cycle (fast-forward)
   if(main->started == 0) {
     return cycle;
   }
@@ -6891,6 +7514,20 @@ void main_zsim_debug_print_all(main_t *main) {
   pmap_print(oc_get_pmap(main->oc));
   printf("addr map:\n");
   main_addr_map_print(main->addr_map);
+  return;
+}
+
+// This function starts simulation immediately. It works by updating start_inst_count to the current value
+// such that the sim will begin on next report progress call
+void main_zsim_start_sim(main_t *main) {
+  if(main->started == 1) {
+    printf("[2DOC] Received magic op, but simulation has already started at inst %lu cycle %lu\n",
+      main->param->start_inst_count, main->start_cycle_count);
+  } else {
+    printf("[2DOC] Received magic op; Simulation starts at inst %lu cycle %lu (wait progress %d)\n",
+      main->last_inst_count, main->last_cycle_count, main->progress);
+    main->param->start_inst_count = main->last_inst_count;
+  }
   return;
 }
 
