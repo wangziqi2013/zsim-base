@@ -16,7 +16,7 @@
 #%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
 
 
-#%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
+%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
 
 
 #%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
@@ -31,7 +31,7 @@
 #%include tests/2DOC/cc_simple_MBDv4_1_4_conf.txt
 
 
-%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+#%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
 
 
 #%include tests/2DOC/cc_simple_MBD_2_2_conf.txt

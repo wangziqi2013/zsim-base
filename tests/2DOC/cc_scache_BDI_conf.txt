@@ -24,4 +24,4 @@ cc.scache.llc.ratio = 2
 
 cc.scache.llc.algorithm = BDI
 
-main.result_suffix = simple_scache_BDI
+main.result_suffix = scache_BDI
