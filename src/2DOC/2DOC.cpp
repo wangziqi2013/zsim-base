@@ -360,6 +360,10 @@ int FPC_data_bits[8] = {
   3, 4, 8, 16, 16, 16, 8, 32,
 };
 
+const char *FPC_type_names[8] = {
+  "ZERO", "4b", "8b", "16b", "LOW Z", "HALF WORD", "REPEAT BYTE", "UNCOMP",
+};
+
 // This function is limited, as it only handles byte aligned source word (but not necessarily 8-multiple bits)
 // Also bits must be less than or equal to 64 bits; src must also be 64 bit aligned
 // Returns the new dest_offset
@@ -530,7 +534,7 @@ int FPC_comp(void *out_buf, void *_in_buf) {
 
 // Dry run mode of FPC. Only runs over input data without generating compressed bits
 // Returns compressed size in bits
-int FPC_get_comp_size_bits(void *_in_buf) {
+int _FPC_get_comp_size_bits(void *_in_buf, FPC_type_stat_t *stats) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int offset = 0;
   int zero_count = 0; // Track zero runs
@@ -553,6 +557,7 @@ int FPC_get_comp_size_bits(void *_in_buf) {
         offset += 6;
         zero_count = 0; // Not necessary but let it be for readability
         state = FPC_STATE_NORMAL;
+        stats->zero_run++;
       }
       continue;
     }
@@ -560,19 +565,26 @@ int FPC_get_comp_size_bits(void *_in_buf) {
     uint8_t *byte_p = (uint8_t *)&curr;
     if(byte_p[0] == byte_p[1] && byte_p[1] == byte_p[2] && byte_p[2] == byte_p[3]) {
       type = 6UL;
+      stats->repeated_bytes++;
     } else if((curr & 0xFFFFFFF8) == 0 || (curr & 0xFFFFFFF8) == 0xFFFFFFF8) {
       type = 1UL; // Sign extended 4 bits
+      stats->small_value_4_bits++;
     } else if((curr & 0xFFFFFF80) == 0 || (curr & 0xFFFFFF80) == 0xFFFFFF80) {
       type = 2UL; // Sign extended 8 bits
+      stats->small_value_8_bits++;
     } else if((curr & 0xFFFF8000) == 0 || (curr & 0xFFFF8000) == 0xFFFF8000) {
       type = 3UL; // Sign extended 16 bits 
+      stats->small_value_16_bits++;
     } else if((curr & 0x0000FFFF) == 0) {
       type = 4UL; // Lower bits are zero
+      stats->lower_zero++;
     } else if((curr & 0xFF80FF80) == 0 || (curr & 0xFF80FF80) == 0xFF80FF80 || 
               (curr & 0xFF80FF80) == 0xFF800000 || (curr & 0xFF80FF80) == 0x0000FF80) {
       type = 5UL; // Two 16-bit integer compressed to 8 bytes independently
+      stats->half_word_to_8_bits++;
     } else {
       type = 7UL; // Uncompressable 32 bits
+      stats->uncomp++;
     }
     // Always write 3 bit type and some data according to the lookup table
     assert(type < 8);
@@ -2356,7 +2368,7 @@ int ocache_get_compressed_size_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   if(entry == NULL) {
     error_exit("Entry for FPC compression is not found\n");
   }
-  int FPC_bits = FPC_get_comp_size_bits(entry->data);
+  int FPC_bits = _FPC_get_comp_size_bits(entry->data, &ocache->FPC_type_stat);
   if(FPC_bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     ocache->FPC_fail_count++;
     ocache->FPC_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
@@ -3628,6 +3640,17 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum,
       100.0 * (ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->FPC_uncomp_size_sum + ocache->FPC_after_size_sum));
+    double FPC_type_stat_total = 0.0;
+    for(int i = 0;i < 8;i++) {
+      FPC_type_stat_total += (double)ocache->FPC_type_stat.type_counts[i];
+    }
+    printf("FPC type stats:");
+    for(int i = 0;i < 8;i++) {
+      printf(" [%s] %lu (%.2lf%%)", 
+        FPC_type_names[i], ocache->FPC_type_stat.type_counts[i], 
+        100.0 * (double)ocache->FPC_type_stat.type_counts[i] / FPC_type_stat_total);
+    }
+    putchar('\n');
     printf("FPC size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->FPC_size_counts[i]);
@@ -3718,13 +3741,50 @@ void ocache_stat_print(ocache_t *ocache) {
   } else {
     printf("Unknown compression method (debugging?)\n");
   }
-  // General stats refershed by ocache_refresh_stat(). Note that these are unrelated to BDI, and are still valid
-  // for FPC-based compression
+  // General stats refershed by ocache_refresh_stat(). These stats are common to all compression types.
   ocache_refresh_stat(ocache);
-  printf("Snapshot stats:\n");
-  printf("Logical lines %lu sb %lu sb logical lines %lu (avg. %.4lf lines per sb) sb line size %lu\n"
+  // Then compute sum if there are snapshots
+  int stat_snapshot_count = 1; // The current data is counted as one
+  ocache_stat_snapshot_t *curr = ocache->stat_snapshot_head;
+  while(curr != NULL) {
+    ocache->logical_line_count += curr->logical_line_count;
+    ocache->sb_slot_count += curr->sb_slot_count;
+    ocache->sb_logical_line_count += curr->sb_logical_line_count;
+    ocache->sb_logical_line_size_sum += curr->sb_logical_line_size_sum;
+    ocache->sb_4_1_count += curr->sb_4_1_count;
+    ocache->sb_1_4_count += curr->sb_1_4_count;
+    ocache->sb_2_2_count += curr->sb_2_2_count;
+    ocache->no_shape_line_count += curr->no_shape_line_count;
+    for(int i = 0;i < 8;i++) {
+      ocache->size_histogram[i] += curr->size_histogram[i];
+    }
+    for(int i = 0;i < 4;i++) {
+      ocache->sb_logical_line_count_dist[i] += curr->sb_logical_line_count_dist[i];
+    }
+    stat_snapshot_count++;
+    curr = curr->next;
+  }
+  // Compute average 
+  ocache->logical_line_count /= stat_snapshot_count;
+  ocache->sb_slot_count /= stat_snapshot_count;
+  ocache->sb_logical_line_count /= stat_snapshot_count;
+  ocache->sb_logical_line_size_sum /= stat_snapshot_count;
+  ocache->sb_4_1_count /= stat_snapshot_count;
+  ocache->sb_1_4_count /= stat_snapshot_count;
+  ocache->sb_2_2_count /= stat_snapshot_count;
+  ocache->no_shape_line_count /= stat_snapshot_count;
+  for(int i = 0;i < 8;i++) {
+    ocache->size_histogram[i] /= stat_snapshot_count;
+  }
+  for(int i = 0;i < 4;i++) {
+    ocache->sb_logical_line_count_dist[i] /= stat_snapshot_count;
+  }
+  printf("Snapshot stats (avg. over %d snapshots):\n", stat_snapshot_count);
+  printf("Logical lines %lu (%.2lfx uncomp) sb %lu sb logical lines %lu (avg. %.4lf lines per sb) sb line size %lu\n"
          "[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
-    ocache->logical_line_count, ocache->sb_slot_count, ocache->sb_logical_line_count,
+    ocache->logical_line_count, 
+    (double)ocache->logical_line_count / (double)ocache->line_count,
+    ocache->sb_slot_count, ocache->sb_logical_line_count,
     (double)ocache->sb_logical_line_count / (double)ocache->sb_slot_count,
     ocache->sb_logical_line_size_sum,
     ocache->sb_4_1_count, ocache->sb_1_4_count, ocache->sb_2_2_count, ocache->no_shape_line_count);
@@ -3738,6 +3798,7 @@ void ocache_stat_print(ocache_t *ocache) {
     printf("[%d] %lu ", i + 1, ocache->sb_logical_line_count_dist[i]);
   }
   putchar('\n');
+  // Print bcache stat
   if(ocache->bcache != NULL) {
     bcache_stat_print(ocache->bcache);
   }
@@ -7099,8 +7160,10 @@ void main_zsim_info_free(main_zsim_info_t *info) {
 // Read configuration file
 // main.max_inst_count - The simulation upper bound
 // main.start_inst_count - The simulation starting point
-// main.logging - Whether all requests are logged
-// main.logging_filename - The file name of the log file; Only read if logging = 1
+// main.result_suffix - Result dir suffix for distinction
+// main.app_name - Will appear in result dir name
+// main.addr_1d_to_2d_type - Type of addr mapping
+// main.result_dir_has_timestamp - Whether the result dir has a timestamp
 main_param_t *main_param_init(conf_t *conf) {
   main_param_t *param = (main_param_t *)malloc(sizeof(main_param_t));
   SYSEXPECT(param != NULL);
@@ -7136,6 +7199,11 @@ main_param_t *main_param_init(conf_t *conf) {
   } else {
     param->addr_1d_to_2d_type = NULL;
   }
+  // Whether result dir has timestamp, default true
+  int result_ts_found = conf_find_bool(conf, "main.result_dir_has_timestamp", &param->result_dir_has_timestamp);
+  if(result_ts_found == 0) {
+    param->result_dir_has_timestamp = 1;
+  }
   return param;
 }
 
@@ -7157,6 +7225,8 @@ void main_param_conf_print(main_param_t *param) {
   } else {
     printf("Not using 1d-to-2d address mapping\n");
   }
+  printf("Results will be saved in a directory %s timestamp\n", 
+    param->result_dir_has_timestamp == 1 ? "WITH" : "WITHOUT");
   return;
 }
 
@@ -7269,6 +7339,7 @@ void main_sim_begin(main_t *main) {
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
+  printf("Simulation time: %lu seconds\n", main->end_time + main->begin_time);
   main_stat_print(main);
   // Save stat snapshots to text files
   char save_dir[MAIN_RESULT_DIR_SIZE];
@@ -7297,8 +7368,12 @@ void main_sim_end(main_t *main) {
 // Generates the directory name used to save result;
 // Format is: result_[time]_[app name]_[custom suffix], without the trailing "/"
 // This function does not check buffer size. Always assume it is large enough
+// The [time] will not be added if param->result_dir_has_timestamp == 0
 void main_gen_result_dir_name(main_t *main, char *buf) {
-  snprintf(buf, MAIN_RESULT_DIR_SIZE, "result_%lu", main->begin_time);
+  snprintf(buf, MAIN_RESULT_DIR_SIZE, "result");
+  if(main->param->result_dir_has_timestamp == 1) {
+    snprintf(buf, MAIN_RESULT_DIR_SIZE, "_%lu", main->begin_time);
+  }
   if(main->param->app_name != NULL) {
     strcat(buf, "_");
     strcat(buf, main->param->app_name);
@@ -7307,16 +7382,6 @@ void main_gen_result_dir_name(main_t *main, char *buf) {
     strcat(buf, "_");
     strcat(buf, main->param->result_suffix);
   }
-  return;
-}
-
-void main_set_app_name(main_t *main, const char *app_name) {
-  if(main->param->app_name != NULL) {
-    error_exit("main's app_name is already set, value \"%s\"\n", main->param->app_name);
-  } else if(strlen(app_name) > MAIN_APP_NAME_MAX_SIZE) {
-    error_exit("app_name's length exceeds largest allowed\n");
-  }
-  main->param->app_name = strclone(app_name);
   return;
 }
 

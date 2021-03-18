@@ -136,6 +136,25 @@ int zero_comp(void *in_buf);
 
 // Number of bits of data payload, indexed by type
 extern int FPC_data_bits[8];
+// Abbr names of FPC types
+extern const char *FPC_type_names[8];
+
+// FPC type stat
+typedef struct {
+  union {
+    uint64_t type_counts[8];
+    struct {
+      uint64_t zero_run;
+      uint64_t small_value_4_bits;
+      uint64_t small_value_8_bits;
+      uint64_t small_value_16_bits;
+      uint64_t lower_zero;
+      uint64_t half_word_to_8_bits;
+      uint64_t repeated_bytes;
+      uint64_t uncomp;
+    };
+  };
+} FPC_type_stat_t;
 
 int FPC_pack_bits(void *dest, int dest_offset, uint64_t *src, int bits);
 int FPC_pack_bits_bmi(void *_dest, int dest_offset, uint64_t *src, int bits);
@@ -143,7 +162,11 @@ int FPC_unpack_bits(uint64_t *dest, void *src, int src_offset, int bits);
 int FPC_unpack_bits_bmi(uint64_t *dest, void *_src, int src_offset, int bits);
 // Returns the number of bits of a successful compression
 int FPC_comp(void *out_buf, void *_in_buf); // Generate output data, return comp'ed size in bits
-int FPC_get_comp_size_bits(void *_in_buf);  // Dry run only; Return comp size in bits
+int _FPC_get_comp_size_bits(void *_in_buf, FPC_type_stat_t *stats);
+inline static int FPC_get_comp_size_bits(void *_in_buf) {
+  FPC_type_stat_t FPC_stat;
+  return _FPC_get_comp_size_bits(_in_buf, &FPC_stat);
+}
 void FPC_decomp(void *_out_buf, void *in_buf);
 void FPC_print_compressed(void *in_buf);
 void FPC_print_packed_bits(uint64_t *buf, int begin_offset, int bits);
@@ -193,6 +216,9 @@ int CPACK_get_comp_size_bits(void *_in_buf); // Dry run only, no output buffer
 void CPACK_print_compressed(void *in_buf);
 
 //* MBD - Experimental Multi-Based Delta compression
+
+//#define MBD_DICT_COUNT        8
+//#define MBD_DICT_INDEX_BITS   3
 
 #define MBD_DICT_COUNT        16
 #define MBD_DICT_INDEX_BITS   4
@@ -883,6 +909,7 @@ typedef struct ocache_struct_t {
   uint64_t FPC_before_size_sum;      // Size sum before compression, only for successful lines
   uint64_t FPC_after_size_sum;       // Size sum after compression, only for successful lines
   uint64_t FPC_size_counts[8];       // Size distribution of FPC
+  FPC_type_stat_t FPC_type_stat;     // Type stats, passed to comp function
   // CPACK-specific stats. All fields have the same meaning as FPC
   uint64_t CPACK_success_count;        
   uint64_t CPACK_fail_count;
@@ -1990,13 +2017,14 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 #define MAIN_WRITE            1
 
 typedef struct {
-  uint64_t max_inst_count;    // Max number of instructions
-  uint64_t start_inst_count;  // Starting instructions, default zero
-  char *result_suffix;        // Suffix of result directory, for better recognizability; Optional, NULL if invalid
+  uint64_t max_inst_count;      // Max number of instructions
+  uint64_t start_inst_count;    // Starting instructions, default zero
+  char *result_suffix;          // Suffix of result directory, for better recognizability; Optional, NULL if invalid
   // This could be set by either conf file key main.app_name, or by main_set_app_name()
-  char *app_name;             // Name of the application, will be reflected in the result directory name; Optional
+  char *app_name;               // Name of the application, will be reflected in the result directory name; Optional
   // If set, 4 adjacent blocks are rotated to the same addr and OID 0, 1, 2, 3; Only valid for 4_1 shape
-  char *addr_1d_to_2d_type; // Address translation type string; Set by main.addr_1d_to_2d_type
+  char *addr_1d_to_2d_type;     // Address translation type string; Set by main.addr_1d_to_2d_type
+  int result_dir_has_timestamp; // Whether to use timestamp for results, default set to 1
 } main_param_t;
 
 main_param_t *main_param_init(conf_t *conf);
@@ -2060,7 +2088,6 @@ void main_sim_end(main_t *main);
 
 // Generate result directory name given a buffer; Updates the buffer in-place
 void main_gen_result_dir_name(main_t *main, char *buf);
-void main_set_app_name(main_t *main, const char *app_name);
 
 // Get current memory op (must be valid); Bound check is performed
 inline static main_latency_list_entry_t *main_get_mem_op(main_t *main) {
