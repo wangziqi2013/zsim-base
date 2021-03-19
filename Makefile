@@ -14,6 +14,9 @@ release:
 	PINPATH=$(CURDIR)/pin-2.14 scons --r
 	@echo "If compilation fails and says hdf5 cannot be found, run make clean and retry"
 
+bwaves_r:
+	./build/release/zsim ./tests/2DOC/bwaves_r/bwaves_r.cfg
+
 
 clean:
 	@rm ./.sconsign.dblite
