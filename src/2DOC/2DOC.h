@@ -866,6 +866,10 @@ typedef struct ocache_struct_t {
   bcache_t *bcache;          // Base cache, used to reduce requests to DRAM for base blocks
   // Statistics
   uint8_t stat_begin[0];             // Makes the begin address of stat region
+  // Insert stat
+  uint64_t insert_count;             // Number of inserts
+  uint64_t insert_sb_hit_count;  // The SB is already present in the set
+  uint64_t insert_sb_miss_count;  // The SB is missing in the set
   // General stat
   uint64_t comp_attempt_count;       // Number of compression attempts
   uint64_t comp_attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
@@ -930,8 +934,8 @@ typedef struct ocache_struct_t {
   uint64_t MBD_match_count;
   uint64_t MBD_dict_insert_count;       // Number of dict inserts
   uint64_t MBD_dict_insert_dup_count;   // Number of dict insert duplicated values
-  uint64_t MBD_insert_base_is_present;  // Number of times base is present
-  uint64_t MBD_insert_base_is_missing;  // Number of times base is missing
+  uint64_t MBD_insert_base_hit;  // Number of times base is present
+  uint64_t MBD_insert_base_miss;  // Number of times base is missing
   uint64_t MBD_insert_bcache_hit;
   uint64_t MBD_insert_bcache_miss;
   uint64_t MBD_read_base_is_present;    // This is set by cc_simple
@@ -2025,6 +2029,8 @@ typedef struct {
   // If set, 4 adjacent blocks are rotated to the same addr and OID 0, 1, 2, 3; Only valid for 4_1 shape
   char *addr_1d_to_2d_type;     // Address translation type string; Set by main.addr_1d_to_2d_type
   int result_dir_has_timestamp; // Whether to use timestamp for results, default set to 1
+  int ignore_magic_op_start_sim; // Ignore the start sim signal from magic op; Disables "main_zsim_start_sim()"
+  char *chdir;                  // Change to this directory on main() initialization
 } main_param_t;
 
 main_param_t *main_param_init(conf_t *conf);
@@ -2075,12 +2081,15 @@ typedef struct main_struct_t {
   int zsim_write_size;
   // zsim configuration passed via the interface, which will be printed out when sim ends
   main_zsim_info_t *zsim_info_list;
+  char *saved_cwd; // Current working directory, saved on main init before chdir
 } main_t;
 
 // Wraps around the conf init
 main_t *main_init(const char *conf_filename);
 main_t *main_init_conf(conf_t *conf);
 void main_free(main_t *main);
+
+void main_chdir(main_t *main);
 
 // Called before and after the simulation respectively
 void main_sim_begin(main_t *main);

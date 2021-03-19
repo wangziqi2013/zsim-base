@@ -490,6 +490,8 @@ int conf_find_uint64_abbr(conf_t *conf, const char *key, uint64_t *ret) {
     *ret = t * 1000UL;
   } else if(streq(end, "M") || streq(end, "m")) {
     *ret = t * 1000UL * 1000UL;
+  } else if(streq(end, "B") || streq(end, "b")) {
+    *ret = t * 1000UL * 1000UL * 1000UL;
   } else {
     error_exit("Could not recognize abbreviation \"%s\" after numeric value \"%lu\"\n", end, t);
   }

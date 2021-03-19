@@ -2312,6 +2312,7 @@ static void ocache_insert_helper_uncompressed(
   ocache_entry_t *entry = NULL;
   if(lookup_result->state == OCACHE_HIT_NORMAL) {
     // Case 2: Hit uncompressed line
+    ocache->insert_sb_hit_count++;
     assert(lookup_result->hit_entry != NULL);
     assert(lookup_result->hit_entry->shape == OCACHE_SHAPE_NONE);
     assert(lookup_result->cand_count == 0);
@@ -2319,6 +2320,7 @@ static void ocache_insert_helper_uncompressed(
     insert_result->state = OCACHE_SUCCESS; // Do not need eviction
   } else {
     // Case 1.1.1 Miss uncompressed line (evicted line may still be compressed)
+    ocache->insert_sb_miss_count++;
     ocache_entry_t *lru_entry = lookup_result->lru_entry;
     assert(lru_entry != NULL);
     // Note that we must use this function to determine whether it is an invalid entry
@@ -2455,7 +2457,7 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
     if(base_entry != NULL) {
       __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict);
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
-        ocache->MBD_insert_base_is_missing++;
+        ocache->MBD_insert_base_miss++;
         // Access bcache if it is initialized
         if(ocache->bcache != NULL) {
           int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
@@ -2466,11 +2468,11 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
           } 
         }
       } else {
-        ocache->MBD_insert_base_is_present++;
+        ocache->MBD_insert_base_hit++;
       }
     }
   } else {
-    ocache->MBD_insert_base_is_present++;
+    ocache->MBD_insert_base_hit++;
   }
   int bits = __MBD_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict);
   // Update stats
@@ -2768,23 +2770,8 @@ static void ocache_insert_helper_compressed_hit(
   //if(ocache_entry_is_all_invalid(hit_entry) == 1) { // <--- unnecessary, see above
   //  ocache_entry_inv(hit_entry);
   //}
-  //ocache_entry_t *old_hit_entry = hit_entry;
   // Case 3.1 - Hit the slot, and current slot could still hold the line
   if(ocache_entry_is_fit(hit_entry, compressed_size) == 1) {
-    /*
-    // Try other candidates that are not hit_entry first
-    for(int i = 0;i < lookup_result->cand_count;i++) {
-      ocache_entry_t *cand = lookup_result->candidates[i];
-      if(cand == hit_entry) {
-        continue;
-      }
-      // If fit them insert into another candidates' slot
-      if(ocache_entry_is_fit(cand, compressed_size) == 1) {
-        hit_entry = cand;
-        break;
-      }
-    }
-    */
     ocache_entry_set_valid(hit_entry, hit_index);
     if(dirty == 1) {
       ocache_entry_set_dirty(hit_entry, hit_index);
@@ -2794,13 +2781,6 @@ static void ocache_insert_helper_compressed_hit(
     insert_result->state = OCACHE_SUCCESS;
     insert_result->insert_entry = hit_entry;
     insert_result->insert_index = hit_index;
-    /*
-    // If the line is not inserted back to the old hit entry, and that entry becomes invalid
-    // then make it invalid by invalidating LRU and other information as well
-    if(ocache_entry_is_all_invalid(old_hit_entry) == 1) {
-      ocache_entry_inv(old_hit_entry);
-    }
-    */
     return;
   }
   // Case 3.2 - Hit the slot, but size is too large
@@ -2844,6 +2824,7 @@ void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0);
   // Only for compressed caches do we allow a shape
   assert(ocache->use_shape == 1 || shape == OCACHE_SHAPE_NONE);
+  ocache->insert_count++;
   ocache_op_result_t lookup_result;
   // This will:
   //   (1) Set hit_entry and hit_index if hit
@@ -2866,11 +2847,13 @@ void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   if(state == OCACHE_MISS) {
     if(lookup_result.cand_count == 0) {
       // Case 1.1.2: Compressed line miss, no candidate, evict an existing entry and make a super block
+      ocache->insert_sb_miss_count++;
       ocache_insert_helper_compressed_miss_no_candid(
         ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
       );
     } else {
       // Case 1.2: Compressed line miss, with candidate, try other super blocks
+      ocache->insert_sb_hit_count++;
       ocache_insert_helper_compressed_miss_with_candid(
         ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
       );
@@ -2878,6 +2861,7 @@ void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
     return;
   }
   assert(state == OCACHE_HIT_COMPRESSED);
+  ocache->insert_sb_hit_count++;
   // Case 3: Compressed line hit
   ocache_insert_helper_compressed_hit(
     ocache, oid, addr, shape, dirty, comp_size, insert_result, &lookup_result
@@ -2933,6 +2917,7 @@ static void ocache_insert_helper_evict_valid_lru(
 //   (3) Return evicted entries in insert_evict_entries and insert_evict_count
 void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
   int shape, int dirty, ocache_op_result_t *result) {
+  ocache->insert_count++;
   // Do not update LRU & always scan all tags in the set, such that total_aligned_size is always valid
   ocache_lookup_write(ocache, oid, addr, shape, result);
   // Compressed size of the line
@@ -2945,6 +2930,7 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   if(result->state != OCACHE_MISS) {
     assert(result->state == OCACHE_HIT_NORMAL || result->state == OCACHE_HIT_COMPRESSED);
     assert(result->cand_count == 1 || result->state == OCACHE_HIT_NORMAL);
+    ocache->insert_sb_hit_count++;
     result->insert_evict_count = 0;
     result->state = OCACHE_SUCCESS;
     ocache_entry_t *hit_entry = result->hit_entry;
@@ -2987,10 +2973,12 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
     if(result->cand_count > 0) {
       // This is SB hit, always insert into the same SB
       assert(result->cand_count == 1);
+      ocache->insert_sb_hit_count++;
       insert_entry = result->candidates[0];
       assert(insert_entry->oid == base_oid && insert_entry->addr == base_addr);
       assert(insert_entry->shape == shape);
     } else {
+      ocache->insert_sb_miss_count++;
       // This is full miss, must claim the LRU entry and init to be the current base addr / shape
       insert_entry = result->lru_entry;
       // Claim a tag entry from LRU. If LRU entry is valid, evict it first; This will change total_aligned_size
@@ -3380,7 +3368,8 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
 void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
   FILE *fp = fopen(filename, "w");
   SYSEXPECT(fp != NULL);
-  fprintf(fp, "logical_line_count, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, "
+  fprintf(fp, "logical_line_count, effective_size, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, "
+              "data_occupancy, "
               "sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count, "
               // Size distribution
               "1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64, "
@@ -3388,9 +3377,14 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
               "singleton, pair, trio, quad\n");
   ocache_stat_snapshot_t *snapshot = ocache->stat_snapshot_head;
   while(snapshot != NULL) {
-    fprintf(fp, "%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu",
-      snapshot->logical_line_count, snapshot->sb_slot_count, snapshot->sb_logical_line_count,
+    fprintf(fp, "%lu, %.2lf, %lu, %lu, %lu, "
+                "%.2lf, "
+                "%lu, %lu, %lu, %lu",
+      snapshot->logical_line_count, 
+      (double)snapshot->logical_line_count / (double)ocache->line_count,
+      snapshot->sb_slot_count, snapshot->sb_logical_line_count,
       snapshot->sb_logical_line_size_sum,
+      100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
       snapshot->sb_4_1_count, snapshot->sb_1_4_count, snapshot->sb_2_2_count, snapshot->no_shape_line_count);
     // Then print histogram elements, note that we prepend a comma before the number
     for(int i = 0;i < 8;i++) {
@@ -3570,6 +3564,10 @@ void ocache_conf_print(ocache_t *ocache) {
 // This function will print vertical compression stats if use_shape is 1
 void ocache_stat_print(ocache_t *ocache) {
   printf("---------- ocache_t stat ----------\n");
+  // Insert stat
+  printf("Insert %lu SB hit %lu SB miss %lu (%.2lf%% rate)\n",
+    ocache->insert_count, ocache->insert_sb_hit_count, ocache->insert_sb_miss_count,
+    100.0 * (double)ocache->insert_sb_hit_count / (double)ocache->insert_count);
   // Vertical compression stats, only printed for LLC
   if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb || 
      ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_third_party_cb) {
@@ -3693,24 +3691,24 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum,
       100.0 * (ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum));
-    printf("MBD insert base present %lu missing %lu (base present percentage %.2lf%%)\n",
-      ocache->MBD_insert_base_is_present, ocache->MBD_insert_base_is_missing,
-      100.0 * ocache->MBD_insert_base_is_present / 
-        (double)(ocache->MBD_insert_base_is_present + ocache->MBD_insert_base_is_missing));
+    printf("MBD insert base hit %lu missing %lu (base hit percentage %.2lf%%)\n",
+      ocache->MBD_insert_base_hit, ocache->MBD_insert_base_miss,
+      100.0 * ocache->MBD_insert_base_hit / 
+        (double)(ocache->MBD_insert_base_hit + ocache->MBD_insert_base_miss));
     if(ocache->bcache != NULL) {
-      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base present %.2lf%%\n",
+      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base hit %.2lf%%\n",
         ocache->MBD_insert_bcache_hit, ocache->MBD_insert_bcache_miss,
         100.0 * ocache->MBD_insert_bcache_hit / 
           (double)(ocache->MBD_insert_bcache_hit + ocache->MBD_insert_bcache_miss),
-        100.0 * (ocache->MBD_insert_base_is_present + ocache->MBD_insert_bcache_hit) / 
-        (double)(ocache->MBD_insert_base_is_present + ocache->MBD_insert_base_is_missing));
+        100.0 * (ocache->MBD_insert_base_hit + ocache->MBD_insert_bcache_hit) / 
+        (double)(ocache->MBD_insert_base_hit + ocache->MBD_insert_base_miss));
     }
-    printf("MBD read base present %lu missing %lu (base present percentage %.2lf%%)\n",
+    printf("MBD read base hit %lu missing %lu (base hit percentage %.2lf%%)\n",
     ocache->MBD_read_base_is_present, ocache->MBD_read_base_is_missing,
     100.0 * ocache->MBD_read_base_is_present / 
       (double)(ocache->MBD_read_base_is_present + ocache->MBD_read_base_is_missing));
     if(ocache->bcache != NULL) {
-      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base present %.2lf%%\n",
+      printf("    bcache hit %lu miss %lu (rate %.2lf%%), actual base hit %.2lf%%\n",
         ocache->MBD_read_bcache_hit, ocache->MBD_read_bcache_miss,
         100.0 * ocache->MBD_read_bcache_hit / 
           (double)(ocache->MBD_read_bcache_hit + ocache->MBD_read_bcache_miss),
@@ -3780,13 +3778,15 @@ void ocache_stat_print(ocache_t *ocache) {
     ocache->sb_logical_line_count_dist[i] /= stat_snapshot_count;
   }
   printf("Snapshot stats (avg. over %d snapshots):\n", stat_snapshot_count);
-  printf("Logical lines %lu (%.2lfx uncomp) sb %lu sb logical lines %lu (avg. %.4lf lines per sb) sb line size %lu\n"
-         "[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
+  printf("Logical lines %lu (%.2lfx uncomp) sb %lu sb logical lines %lu (avg. %.2lf lines per sb)"
+         " sb line size %lu (data occupancy %.2lf%%)\n",
     ocache->logical_line_count, 
     (double)ocache->logical_line_count / (double)ocache->line_count,
     ocache->sb_slot_count, ocache->sb_logical_line_count,
     (double)ocache->sb_logical_line_count / (double)ocache->sb_slot_count,
     ocache->sb_logical_line_size_sum,
+    100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE));
+  printf("[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
     ocache->sb_4_1_count, ocache->sb_1_4_count, ocache->sb_2_2_count, ocache->no_shape_line_count);
   printf("Size histogram: ");
   for(int i = 0;i < 8;i++) {
@@ -4452,8 +4452,9 @@ void scache_stat_print(scache_t *scache) {
     scache->evict_line_count, (double)scache->evict_line_count / (double)scache->insert_count);
   // Print line distribution, etc.
   scache_refresh_stat(scache);
-  printf("Total line count %lu comp line count %lu comp size sum (unaligned) %lu (aligned) %lu\n",
-    scache->logical_line_count, scache->uncomp_logical_line_count,
+  printf("Total line count %lu (%.2lfx uncomp) comp line count %lu comp size sum (unaligned) %lu (aligned) %lu\n",
+    scache->logical_line_count, (double)scache->logical_line_count / (double)scache->physical_line_count,
+    scache->logical_line_count - scache->uncomp_logical_line_count,
     scache->comp_line_size, scache->aligned_comp_line_size);
   return;
 }
@@ -7164,6 +7165,8 @@ void main_zsim_info_free(main_zsim_info_t *info) {
 // main.app_name - Will appear in result dir name
 // main.addr_1d_to_2d_type - Type of addr mapping
 // main.result_dir_has_timestamp - Whether the result dir has a timestamp
+// main.ignore_magic_op_start_sim
+// main.chdir
 main_param_t *main_param_init(conf_t *conf) {
   main_param_t *param = (main_param_t *)malloc(sizeof(main_param_t));
   SYSEXPECT(param != NULL);
@@ -7204,6 +7207,21 @@ main_param_t *main_param_init(conf_t *conf) {
   if(result_ts_found == 0) {
     param->result_dir_has_timestamp = 1;
   }
+  // Whether to ignore zsim / magic op start sim
+  int ignore_magic_op_start_sim_found = \
+    conf_find_bool(conf, "main.ignore_magic_op_start_sim", &param->ignore_magic_op_start_sim);
+  if(ignore_magic_op_start_sim_found == 0) {
+    param->ignore_magic_op_start_sim = 0;
+  }
+  // The directory to change to
+  int chdir_found;
+  char *chdir_str;
+  chdir_found = conf_find_str(conf, "main.chdir", &chdir_str);
+  if(chdir_found == 0) {
+    param->chdir = NULL;
+  } else {
+    param->chdir = strclone(chdir_str);
+  }
   return param;
 }
 
@@ -7211,6 +7229,7 @@ void main_param_free(main_param_t *param) {
   if(param->result_suffix != NULL) free(param->result_suffix);
   if(param->app_name != NULL) free(param->app_name);
   if(param->addr_1d_to_2d_type != NULL) free(param->addr_1d_to_2d_type);
+  if(param->chdir != NULL) free(param->chdir);
   free(param);
   return;
 }
@@ -7219,23 +7238,30 @@ void main_param_conf_print(main_param_t *param) {
   printf("Inst count max %lu start %lu\n", param->max_inst_count, param->start_inst_count);
   if(param->result_suffix != NULL) printf("Result suffix: \"%s\"\n", param->result_suffix);
   if(param->app_name != NULL) printf("App name: \"%s\"\n", param->app_name);
+  // Addr xtat type
   printf("Addr 1d-to-2d type: ");
   if(param->addr_1d_to_2d_type != NULL) {
     printf("\"%s\"\n", param->addr_1d_to_2d_type);
   } else {
     printf("Not using 1d-to-2d address mapping\n");
   }
+  // Result saving directory
   printf("Results will be saved in a directory %s timestamp\n", 
     param->result_dir_has_timestamp == 1 ? "WITH" : "WITHOUT");
+  // Ignore sim start singal
+  printf("Start sim magic op will be %s\n",
+    param->ignore_magic_op_start_sim == 1 ? "IGNORED" : "FOLLOWED");
+  if(param->chdir != NULL) {
+    printf("Change to directory: \"%s\"\n", param->chdir);
+  } else {
+    printf("Not using main.chdir\n");
+  }
   return;
 }
 
 // Keys:
-//   l1.size, l1.way_count, l1.latency 
-//   l2.size, l2.way_count, l2.latency
-//   l3.size, l3.way_count, l3.latency
-//   cpu.core_count
-//   l3.compressed
+//   cc.type
+//   (cc-related cache hierarchy confs)
 //   cc.default_shape
 //   ---
 //   dram.bank_count
@@ -7244,11 +7270,12 @@ void main_param_conf_print(main_param_t *param) {
 //   ---
 //   main.max_inst_count
 //   main.start_inst_count
-//   main.logging
-//   main.logging_filename
 //   main.result_suffix
 //   main.app_name
 //   main.addr_1d_to_2d_type ( = none / addr_map / 4_1)
+//   main.result_dir_has_timestamp
+//   main.ignore_magic_op_start_sim
+//   main.chdir
 main_t *main_init_conf(conf_t *conf) {
   main_t *main = (main_t *)malloc(sizeof(main_t));
   SYSEXPECT(main != NULL);
@@ -7291,6 +7318,9 @@ main_t *main_init(const char *conf_filename) {
   free(main->conf_filename);
   // Copy file name to the name buffer
   main->conf_filename = strclone(conf_filename);
+  if(main->param->chdir != NULL) {
+    main_chdir(main);
+  }
   // Must be the last one to call
   main_sim_begin(main);
   return main;
@@ -7312,7 +7342,24 @@ void main_free(main_t *main) {
     main_zsim_info_free(curr);
     curr = next;
   }
+  if(main->saved_cwd != NULL) {
+    free(main->saved_cwd);
+  }
   free(main);
+  return;
+}
+
+// Change working dir to chdir, and save previous working dir in saved_cwd
+void main_chdir(main_t *main) {
+  assert(main->param->chdir != NULL);
+  main->saved_cwd = get_current_dir_name();
+  SYSEXPECT(main->saved_cwd != NULL);
+  int chdir_ret = chdir(main->param->chdir);
+  SYSEXPECT(chdir_ret == 0);
+  char *test = get_current_dir_name();
+  printf("Switched working dir to: \"%s\"\n", test);
+  printf("  ...from \"%s\"\n", main->saved_cwd);
+  free(test);
   return;
 }
 
@@ -7341,6 +7388,11 @@ void main_sim_end(main_t *main) {
   main->end_time = time(NULL);
   printf("Simulation time: %lu seconds\n", main->end_time + main->begin_time);
   main_stat_print(main);
+  // Switch back to previous working dir
+  if(main->saved_cwd != NULL) {
+    int chdir_ret = chdir(main->saved_cwd);
+    SYSEXPECT(chdir_ret == 0);
+  }
   // Save stat snapshots to text files
   char save_dir[MAIN_RESULT_DIR_SIZE];
   main_gen_result_dir_name(main, save_dir);
@@ -7589,9 +7641,13 @@ void main_zsim_start_sim(main_t *main) {
     printf("[2DOC] Received magic op, but simulation has already started at inst %lu cycle %lu\n",
       main->param->start_inst_count, main->start_cycle_count);
   } else {
-    printf("[2DOC] Received magic op; Simulation starts at inst %lu cycle %lu (wait progress %d)\n",
-      main->last_inst_count, main->last_cycle_count, main->progress);
-    main->param->start_inst_count = main->last_inst_count;
+    if(main->param->ignore_magic_op_start_sim == 1) {
+      printf("[2DOC] Received magic op; Ignored due to main.ignore_magic_op_start_sim\n");
+    } else {
+      printf("[2DOC] Received magic op; Simulation starts at inst %lu cycle %lu (wait progress %d)\n",
+        main->last_inst_count, main->last_cycle_count, main->progress);
+      main->param->start_inst_count = main->last_inst_count;
+    }
   }
   return;
 }
