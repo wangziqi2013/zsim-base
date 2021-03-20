@@ -3284,6 +3284,7 @@ void ocache_refresh_stat(ocache_t *ocache) {
   ocache->sb_slot_count = 0UL;
   ocache->sb_logical_line_count = 0UL;
   ocache->sb_logical_line_size_sum = 0UL;
+  ocache->sb_aligned_logical_line_size_sum = 0UL;
   ocache->no_shape_line_count = 0UL;
   ocache->sb_4_1_count = 0UL;
   ocache->sb_1_4_count = 0UL;
@@ -3313,11 +3314,11 @@ void ocache_refresh_stat(ocache_t *ocache) {
           case OCACHE_SHAPE_2_2: ocache->sb_2_2_count++; break;
         }
         // Update compressed line size
-        ocache->sb_logical_line_size_sum += (entry->sizes[0] + entry->sizes[1] + entry->sizes[2] + entry->sizes[3]);
-        if(entry->sizes[0] != 0) ocache->size_histogram[(entry->sizes[0] - 1) / 8]++;
-        if(entry->sizes[1] != 0) ocache->size_histogram[(entry->sizes[1] - 1) / 8]++;
-        if(entry->sizes[2] != 0) ocache->size_histogram[(entry->sizes[2] - 1) / 8]++;
-        if(entry->sizes[3] != 0) ocache->size_histogram[(entry->sizes[3] - 1) / 8]++;
+        for(int index = 0;index < 4;index++) {
+          ocache->sb_logical_line_size_sum += entry->sizes[index];
+          ocache->sb_aligned_logical_line_size_sum += ocache_entry_align_size(NULL, entry->sizes[index]);
+          if(entry->sizes[index] != 0) ocache->size_histogram[(entry->sizes[index] - 1) / 8]++;
+        }
       }
     } else {
       assert(entry->lru == 0);
@@ -3345,6 +3346,7 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
   snapshot->sb_slot_count = ocache->sb_slot_count;
   snapshot->sb_logical_line_count = ocache->sb_logical_line_count;
   snapshot->sb_logical_line_size_sum = ocache->sb_logical_line_size_sum;
+  snapshot->sb_aligned_logical_line_size_sum = ocache->sb_aligned_logical_line_size_sum;
   snapshot->no_shape_line_count = ocache->no_shape_line_count;
   snapshot->sb_4_1_count = ocache->sb_4_1_count;
   snapshot->sb_1_4_count = ocache->sb_1_4_count;
@@ -3361,7 +3363,8 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
 // The format is as follows:
 // Each entry of the snapshot is one line, comma separated list
 // Fields are: 
-//   logical_line_count, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum,
+//   logical_line_count, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, 
+//   sb_aligned_logical_line_size_sum
 //   sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count
 //   1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64
 // This function does not create or write any file if there is no snapshot
@@ -3369,7 +3372,9 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
   FILE *fp = fopen(filename, "w");
   SYSEXPECT(fp != NULL);
   fprintf(fp, "logical_line_count, effective_size, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, "
-              "data_occupancy, "
+              "data_occupancy (unaligned), "
+              "sb_aligned_logical_line_size_sum, "
+              "data_occupancy (aligned), "
               "sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count, "
               // Size distribution
               "1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64, "
@@ -3377,7 +3382,12 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
               "singleton, pair, trio, quad\n");
   ocache_stat_snapshot_t *snapshot = ocache->stat_snapshot_head;
   while(snapshot != NULL) {
-    fprintf(fp, "%lu, %.2lf, %lu, %lu, %lu, "
+    fprintf(fp, "%lu, "
+                "%.2lf, "
+                "%lu, %lu, "
+                "%lu, "
+                "%.2lf, "
+                "%lu, "
                 "%.2lf, "
                 "%lu, %lu, %lu, %lu",
       snapshot->logical_line_count, 
@@ -3385,6 +3395,8 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
       snapshot->sb_slot_count, snapshot->sb_logical_line_count,
       snapshot->sb_logical_line_size_sum,
       100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
+      snapshot->sb_aligned_logical_line_size_sum,
+      100.0 * (double)ocache->sb_aligned_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
       snapshot->sb_4_1_count, snapshot->sb_1_4_count, snapshot->sb_2_2_count, snapshot->no_shape_line_count);
     // Then print histogram elements, note that we prepend a comma before the number
     for(int i = 0;i < 8;i++) {
@@ -3749,6 +3761,7 @@ void ocache_stat_print(ocache_t *ocache) {
     ocache->sb_slot_count += curr->sb_slot_count;
     ocache->sb_logical_line_count += curr->sb_logical_line_count;
     ocache->sb_logical_line_size_sum += curr->sb_logical_line_size_sum;
+    ocache->sb_aligned_logical_line_size_sum += curr->sb_aligned_logical_line_size_sum;
     ocache->sb_4_1_count += curr->sb_4_1_count;
     ocache->sb_1_4_count += curr->sb_1_4_count;
     ocache->sb_2_2_count += curr->sb_2_2_count;
@@ -3767,6 +3780,7 @@ void ocache_stat_print(ocache_t *ocache) {
   ocache->sb_slot_count /= stat_snapshot_count;
   ocache->sb_logical_line_count /= stat_snapshot_count;
   ocache->sb_logical_line_size_sum /= stat_snapshot_count;
+  ocache->sb_aligned_logical_line_size_sum /= stat_snapshot_count;
   ocache->sb_4_1_count /= stat_snapshot_count;
   ocache->sb_1_4_count /= stat_snapshot_count;
   ocache->sb_2_2_count /= stat_snapshot_count;
@@ -3779,13 +3793,15 @@ void ocache_stat_print(ocache_t *ocache) {
   }
   printf("Snapshot stats (avg. over %d snapshots):\n", stat_snapshot_count);
   printf("Logical lines %lu (%.2lfx uncomp) sb %lu sb logical lines %lu (avg. %.2lf lines per sb)"
-         " sb line size %lu (data occupancy %.2lf%%)\n",
+         " sb line size %lu (data occupancy %.2lf%%) aligned sb line size %lu (aligned data occupancy %.2lf%%)\n",
     ocache->logical_line_count, 
     (double)ocache->logical_line_count / (double)ocache->line_count,
     ocache->sb_slot_count, ocache->sb_logical_line_count,
     (double)ocache->sb_logical_line_count / (double)ocache->sb_slot_count,
     ocache->sb_logical_line_size_sum,
-    100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE));
+    100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
+    ocache->sb_aligned_logical_line_size_sum,
+    100.0 * (double)ocache->sb_aligned_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE));
   printf("[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
     ocache->sb_4_1_count, ocache->sb_1_4_count, ocache->sb_2_2_count, ocache->no_shape_line_count);
   printf("Size histogram: ");
@@ -7386,7 +7402,7 @@ void main_sim_begin(main_t *main) {
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
-  printf("Simulation time: %lu seconds\n", main->end_time + main->begin_time);
+  printf("Simulation time: %lu seconds\n", main->end_time - main->begin_time);
   main_stat_print(main);
   // Switch back to previous working dir
   if(main->saved_cwd != NULL) {
@@ -7485,6 +7501,7 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
 }
 
 // Called by simulator for end of BB simulation
+// This function is called after zsim has finished simulating the pipeline for the BB just finished
 void main_bb_sim_finish(main_t *main) {
   int list_count = main_latency_list_get_count(main->latency_list);
   // These two must be identical otherwise the sim'ed core missed or over-used mem uops
@@ -7493,6 +7510,8 @@ void main_bb_sim_finish(main_t *main) {
   }
   main->mem_op_index = 0;
   main_latency_list_reset(main->latency_list);
+  // Currently not used; may be enabled later
+  main->old_started = main->started;
   return;
 }
 
@@ -7548,13 +7567,16 @@ static void main_populate_dmap(main_t *main, uint64_t addr_1d_aligned, uint64_t 
 
 // Calls main_read and main_write() after preparing for memory operations
 // Return finish cycle of the operation
+// This function is called from zsim pipeline simulation phase after a basic block has been finished
 uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   int index = main->mem_op_index;
   main->mem_op_index++;
   // If sim has not started, just return in the same cycle (fast-forward)
   if(main->started == 0) {
+    //printf("old started == 0; skipping sim\n");
     return cycle;
   }
+  //printf("old started == 1; sim mem op\n");
   // This function also checks bound
   main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, index);
   // This is potentially unaligned, which is directly taken from the application's trace

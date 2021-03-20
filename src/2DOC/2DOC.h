@@ -826,6 +826,7 @@ typedef struct ocache_stat_snapshot_struct_t {
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
   uint64_t sb_logical_line_count;    // Valid lines in valid super blocks
   uint64_t sb_logical_line_size_sum; // Sum of shaped line sizes
+  uint64_t sb_aligned_logical_line_size_sum; // Aligned, same as above
   uint64_t sb_4_1_count;             // 4 * 1 sb count
   uint64_t sb_1_4_count;             // 1 * 4 sb count
   uint64_t sb_2_2_count;             // 2 * 2 sb count
@@ -947,6 +948,7 @@ typedef struct ocache_struct_t {
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
   uint64_t sb_logical_line_count;    // Valid lines in valid super blocks
   uint64_t sb_logical_line_size_sum; // Sum of shaped line sizes
+  uint64_t sb_aligned_logical_line_size_sum; // Same as above. Aligned
   uint64_t sb_4_1_count;             // 4 * 1 sb count
   uint64_t sb_1_4_count;             // 1 * 4 sb count
   uint64_t sb_2_2_count;             // 2 * 2 sb count
@@ -2066,6 +2068,7 @@ typedef struct main_struct_t {
   int progress;        // 0 - 100
   int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
+  int old_started;     // Copy of "started" at the beginning of the current BB; Used to start BB sim
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t begin_time;
   uint64_t end_time;
@@ -2111,10 +2114,15 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle);
 // The following two are called during basic block execution (bb = basic block)
 inline static void main_bb_read(main_t *main, uint64_t addr, int size, void *data) {
   (void)data; 
+  //if(main->old_started == 1) {
   main_latency_list_append(main->latency_list, MAIN_READ, addr, size, NULL);
+  //}
 }
 inline static void main_bb_write(main_t *main, uint64_t addr, int size, void *data) {
+  (void)data;
+  //if(main->old_started == 1) {
   main_latency_list_append(main->latency_list, MAIN_WRITE, addr, size, data);
+  //}
 }
 
 // Called when finish simulating a BB; Resets the latency list and mem op index
