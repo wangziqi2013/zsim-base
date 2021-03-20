@@ -247,12 +247,15 @@ void LaunchProcess(uint32_t procIdx) {
         int nargs = args.size()+1;
         const char* aptrs[nargs];
 
-        trace(Harness, "Calling arguments:");
+        //trace(Harness, "Calling arguments:");
+        printf("Arguments: ");
         for (unsigned int i = 0; i < args.size(); i++) {
-            trace(Harness, " arg%d = %s", i, args[i].c_str());
+            //trace(Harness, " arg%d = %s", i, args[i].c_str());
             aptrs[i] = args[i].c_str();
+            printf("%s ", aptrs[i]);
         }
         aptrs[nargs-1] = nullptr;
+        putchar('\n');
 
         //Chdir to process dir if needed
         if (perProcessDir) {
