@@ -637,6 +637,15 @@ typedef struct ocache_entry_struct_t {
   int total_aligned_size; // Sum of aligned sizes of this entry
 } ocache_entry_t;
 
+// Returns the number of valid lines
+inline static int ocache_entry_get_valid_line_count(ocache_entry_t *entry) {
+  return popcount_int32(entry->states & 0x0F);
+}
+
+inline static int ocache_entry_get_dirty_line_count(ocache_entry_t *entry) {
+  return popcount_int32(entry->states & 0xF0);
+}
+
 // Align a size to the given boundary (must be power of 2)
 inline static int ocache_entry_align_size(ocache_entry_t *entry, int size) {
   (void)entry;
@@ -715,6 +724,10 @@ inline static int ocache_entry_get_size(ocache_entry_t *entry, int index) {
   assert(index >= 0 && index < 4);
   assert(entry->sizes[index] >= 0 && entry->sizes[index] <= (int)UTIL_CACHE_LINE_SIZE);
   return (int)entry->sizes[index];
+}
+
+inline static int ocache_entry_get_aligned_size(ocache_entry_t *entry, int index) {
+  return ocache_entry_align_size(NULL, ocache_entry_get_size(entry, index));
 }
 
 // Return the sum of all sizes, not aligned
@@ -866,11 +879,14 @@ typedef struct ocache_struct_t {
   int MBD_type;              // OCACHE_MBD_V0, _V2, _V4
   bcache_t *bcache;          // Base cache, used to reduce requests to DRAM for base blocks
   // Statistics
-  uint8_t stat_begin[0];             // Makes the begin address of stat region
+  uint8_t stat_begin[0];              // Makes the begin address of stat region
   // Insert stat
-  uint64_t insert_count;             // Number of inserts
-  uint64_t insert_sb_hit_count;  // The SB is already present in the set
-  uint64_t insert_sb_miss_count;  // The SB is missing in the set
+  uint64_t insert_count;              // Number of inserts
+  uint64_t insert_sb_hit_count;       // The SB is already present in the set
+  uint64_t insert_sb_miss_count;      // The SB is missing in the set
+  uint64_t insert_evict_tag_count;    // Number of evicts due to tag contention
+  uint64_t insert_evict_data_count;   // Number of evicts due to data contention
+  uint64_t insert_evict_partial_evict_saved_line_count; // Number of lines saved by partial evict
   // General stat
   uint64_t comp_attempt_count;       // Number of compression attempts
   uint64_t comp_attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
@@ -2114,15 +2130,15 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle);
 // The following two are called during basic block execution (bb = basic block)
 inline static void main_bb_read(main_t *main, uint64_t addr, int size, void *data) {
   (void)data; 
-  //if(main->old_started == 1) {
-  main_latency_list_append(main->latency_list, MAIN_READ, addr, size, NULL);
-  //}
+  if(main->old_started == 1) {
+    main_latency_list_append(main->latency_list, MAIN_READ, addr, size, NULL);
+  }
 }
 inline static void main_bb_write(main_t *main, uint64_t addr, int size, void *data) {
   (void)data;
-  //if(main->old_started == 1) {
-  main_latency_list_append(main->latency_list, MAIN_WRITE, addr, size, data);
-  //}
+  if(main->old_started == 1) {
+    main_latency_list_append(main->latency_list, MAIN_WRITE, addr, size, data);
+  }
 }
 
 // Called when finish simulating a BB; Resets the latency list and mem op index

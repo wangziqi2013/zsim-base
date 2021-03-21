@@ -2887,10 +2887,12 @@ static void ocache_insert_helper_evict(ocache_t *ocache, ocache_entry_t *entry, 
   return;
 }
 
+// This is called on data contention
+// This function may only partially evict an SB; The evict order is large to small to minimize number of evictions
 static void ocache_insert_helper_evict_valid_lru(
   ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, int aligned_comp_size, ocache_op_result_t *result) {
   while(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
-    ocache_entry_t *valid_lru_entry = NULL;
+    ocache_entry_t *valid_lru_entry = NULL; // Must be a valid entry having the smallest LRU
     uint64_t min_lru = -1UL;
     ocache_entry_t *entry = ocache_get_set_begin(ocache, oid, addr, shape);
     for(int i = 0;i < ocache->way_count;i++) {
@@ -2904,7 +2906,56 @@ static void ocache_insert_helper_evict_valid_lru(
       entry++;
     } // for
     assert(valid_lru_entry != NULL);
-    ocache_insert_helper_evict(ocache, valid_lru_entry, result);
+    int count = ocache_entry_get_valid_line_count(valid_lru_entry);
+    assert(count > 0);
+    // Number of aligned bytes that should be evicted
+    int size_delta = \
+      result->total_aligned_size + aligned_comp_size - ocache->set_size;
+    assert(size_delta > 0);
+    // If the entire entry should be evicted, then just use the fast path
+    if(size_delta >= ocache_entry_get_total_aligned_size(valid_lru_entry) || count == 1) {
+      ocache_insert_helper_evict(ocache, valid_lru_entry, result);
+    } else {
+      ocache_entry_t temp;
+      ocache_entry_dup(&temp, valid_lru_entry);
+      int evict_mask = 0x0; // 0x1, 0x2, 0x4, 0x8 represents the four blocks
+      for(int i = 0;i < count;i++) {
+        int largest_size = 0;
+        int largest_index = -1;
+        // Pick largest line 
+        for(int j = 0;j < 4;j++) {
+          if(ocache_entry_is_valid(valid_lru_entry, j) == 1) {
+            int aligned_size = ocache_entry_get_aligned_size(valid_lru_entry, j);
+            if(aligned_size > largest_size) {
+              largest_size = aligned_size;
+              largest_index = j;
+            }
+          }
+        }
+        assert(largest_index != -1);
+        evict_mask |= (0x1 << largest_index);
+        // Clear the entry from LRU entry since as the point we know it will surely be evicted
+        ocache_entry_inv_index(valid_lru_entry, largest_index);
+        // If after evicting the line we have enough storage then that's it
+        if(size_delta <= largest_size) {
+          break;
+        }
+        size_delta -= largest_size;
+        assert(size_delta > 0);
+      }
+      // Clear those that are not evicted (not set in the mask)
+      for(int i = 0;i < 4;i++) {
+        // If the line is not evicted, then inv from temp
+        // If the line is evicted, then inv from the LRU entry
+        if((evict_mask & (0x1 << i)) == 0) {
+          ocache_entry_inv_index(&temp, i);
+        }
+      }
+      // Must use temp, since this function will clear the given entry
+      ocache_insert_helper_evict(ocache, &temp, result);
+      ocache->insert_evict_partial_evict_saved_line_count += (count - popcount_int32(evict_mask));
+    } // if-else whether to fully or partially evict the entry
+    ocache->insert_evict_data_count++;
   } // while
   assert(result->insert_evict_count > 0);
   return;
@@ -2983,6 +3034,7 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
       insert_entry = result->lru_entry;
       // Claim a tag entry from LRU. If LRU entry is valid, evict it first; This will change total_aligned_size
       if(ocache_entry_is_all_invalid(insert_entry) == 0) {
+        ocache->insert_evict_tag_count++;
         // This will update result->total_aligned_size
         ocache_insert_helper_evict(ocache, insert_entry, result);
         result->state = OCACHE_EVICT; // Eviction for tag
@@ -3577,9 +3629,11 @@ void ocache_conf_print(ocache_t *ocache) {
 void ocache_stat_print(ocache_t *ocache) {
   printf("---------- ocache_t stat ----------\n");
   // Insert stat
-  printf("Insert %lu SB hit %lu SB miss %lu (%.2lf%% rate)\n",
+  printf("Insert %lu SB hit %lu SB miss %lu (%.2lf%% rate) evict tag %lu data %lu saved %lu\n",
     ocache->insert_count, ocache->insert_sb_hit_count, ocache->insert_sb_miss_count,
-    100.0 * (double)ocache->insert_sb_hit_count / (double)ocache->insert_count);
+    100.0 * (double)ocache->insert_sb_hit_count / (double)ocache->insert_count,
+    ocache->insert_evict_tag_count, ocache->insert_evict_data_count,
+    ocache->insert_evict_partial_evict_saved_line_count);
   // Vertical compression stats, only printed for LLC
   if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb || 
      ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_third_party_cb) {
@@ -7572,7 +7626,8 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   int index = main->mem_op_index;
   main->mem_op_index++;
   // If sim has not started, just return in the same cycle (fast-forward)
-  if(main->started == 0) {
+  //if(main->started == 0) {
+  if(main->old_started == 0) {
     //printf("old started == 0; skipping sim\n");
     return cycle;
   }
