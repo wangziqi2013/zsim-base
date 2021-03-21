@@ -1,0 +1,72 @@
+#%include tests/2DOC/cc_simple_BDI_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_BDI_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_BDI_4_1_conf.txt
+
+
+#%include tests/2DOC/cc_simple_BDI_third_party_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_BDI_1_4_seg_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
+
+
+#%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_CPACK_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_MBDv0_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_MBDv2_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_MBDv4_1_4_conf.txt
+
+
+%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+
+
+#%include tests/2DOC/cc_simple_MBD_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_MBD_4_1_conf.txt
+
+
+#%include tests/2DOC/cc_simple_uncomp_conf.txt
+
+
+#%include tests/2DOC/cc_scache_BDI_conf.txt
+
+#%include tests/2DOC/cc_scache_FPC_conf.txt
+
+#%include tests/2DOC/cc_scache_MBD_conf.txt
+
+
+#%include tests/2DOC/cc_scache_conf.txt
+
+#%include tests/2DOC/cc_ocache_conf.txt
+
+dram.bank_count = 65536
+dram.read_latency = 300
+dram.write_latency = 300
+
+main.max_inst_count = 5B
+main.start_inst_count = 10B
+
+main.addr_1d_to_2d_type = None
+
+main.app_name = blender_r
+main.result_dir_has_timestamp = 0
+main.ignore_magic_op_start_sim = 1
+
+main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/526.blender_r/data/refrate/input
