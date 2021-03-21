@@ -74,6 +74,15 @@ cam4_r:
 imagick_r:
 	-./build/release/zsim ./tests/2DOC/imagick_r/imagick_r.cfg
 
+nab_r:
+	-./build/release/zsim ./tests/2DOC/nab_r/nab_r.cfg
+
+fotonic3d_r:
+	-./build/release/zsim ./tests/2DOC/fotonic3d_r/fotonic3d_r.cfg
+
+roms_r:
+	-./build/release/zsim ./tests/2DOC/fotonic3d_r/roms_r.cfg
+
 clean:
 	@rm ./.sconsign.dblite
 	@rm -rf ./build
