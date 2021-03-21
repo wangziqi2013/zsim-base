@@ -513,16 +513,27 @@ void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
 }
 
 static uint64_t main_inst_count = 0;
+
+// This function is called before any basic block; It simulates the past basic block,
+// stored in core->prevBbl, if not NULL
 void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
-    core->bbl(bblAddr, bblInfo); // Simulate the bbl we just finished
+    if(zinfo->main->old_started == 1) {
+        core->bbl(bblAddr, bblInfo); // Simulate the bbl we just finished
+    } else {
+        // Avoid overflowing the buffer
+        core->loads = core->stores = 0;
+        // Set this, such that the first BB since start flag is set will be simulated
+        core->prevBbl = bblInfo; 
+    }
+
+    main_inst_count += bblInfo->instrs;
+    // This may set started to 1, indicating the start of simulation
+    main_report_progress(zinfo->main, main_inst_count, core->curCycle);
 
     // Finished the current bb, reset the internal address log
     // Will report error if the access log has not been exhausted
     main_bb_sim_finish(zinfo->main);
-
-    main_inst_count += bblInfo->instrs;
-    main_report_progress(zinfo->main, main_inst_count, core->curCycle);
 
     while (core->curCycle > core->phaseEndCycle) {
         core->phaseEndCycle += zinfo->phaseLength;
