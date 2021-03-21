@@ -77,11 +77,11 @@ imagick_r:
 nab_r:
 	-./build/release/zsim ./tests/2DOC/nab_r/nab_r.cfg
 
-fotonic3d_r:
-	-./build/release/zsim ./tests/2DOC/fotonic3d_r/fotonic3d_r.cfg
+fotonik3d_r:
+	-./build/release/zsim ./tests/2DOC/fotonik3d_r/fotonik3d_r.cfg
 
 roms_r:
-	-./build/release/zsim ./tests/2DOC/fotonic3d_r/roms_r.cfg
+	-./tests/2DOC/roms_r/run.sh
 
 clean:
 	@rm ./.sconsign.dblite
