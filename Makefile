@@ -68,6 +68,12 @@ wrf_r:
 blender_r:
 	-./build/release/zsim ./tests/2DOC/blender_r/blender_r.cfg
 
+cam4_r:
+	-./build/release/zsim ./tests/2DOC/cam4_r/cam4_r.cfg
+
+imagick_r:
+	-./build/release/zsim ./tests/2DOC/imagick_r/imagick_r.cfg
+
 clean:
 	@rm ./.sconsign.dblite
 	@rm -rf ./build
