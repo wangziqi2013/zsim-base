@@ -525,6 +525,8 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
         core->loads = core->stores = 0;
         // Set this, such that the first BB since start flag is set will be simulated
         core->prevBbl = bblInfo; 
+        // Act as an IPC = 1 core to maintain phase advance (otherwise zsim will warn stalling)
+        core->curCycle += bblInfo->instrs;
     }
 
     main_inst_count += bblInfo->instrs;
