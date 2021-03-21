@@ -65,8 +65,8 @@ main.start_inst_count = 10B
 
 main.addr_1d_to_2d_type = None
 
-main.app_name = fotonic3d_r
+main.app_name = fotonik3d_r
 main.result_dir_has_timestamp = 0
 main.ignore_magic_op_start_sim = 1
 
-main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/549.fotonik3d_r/data/refrate/input/
+main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/549.fotonik3d_r/data/refrate/input
