@@ -447,8 +447,11 @@ static void InitSystem(Config& config) {
     // Report main conf file name
     const char *main_conf_filename = config.get<const char *>("sim.main_conf", "");
     main_add_info(zinfo->main, "sim.main_conf", main_conf_filename);
-    main_add_info(zinfo->main, "OOO_IW_SIZE", OOO_IW_SIZE);
-    main_add_info(zinfo->main, "OOO_ROB_SIZE", OOO_ROB_SIZE);
+    char temp_buf[64];
+    snprintf(temp_buf, sizeof(temp_buf), "%d", OOO_IW_SIZE);
+    main_add_info(zinfo->main, "OOO_IW_SIZE", temp_buf);
+    snprintf(temp_buf, sizeof(temp_buf), "%d", OOO_ROB_SIZE);
+    main_add_info(zinfo->main, "OOO_ROB_SIZE", temp_buf);
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
