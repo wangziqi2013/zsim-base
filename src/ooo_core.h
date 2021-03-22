@@ -38,6 +38,9 @@
 // Uncomment to enable stall stats
 // #define OOO_STALL_STATS
 
+#define OOO_ROB_SIZE    80
+#define OOO_IW_SIZE     36
+
 class FilterCache;
 
 extern uint64_t ooo_load_count;
@@ -397,9 +400,12 @@ class OOOCore : public Core {
         //This would be something like the Atom... (but careful, the iw probably does not allow 2-wide when configured with 1 slot)
         //WindowStructure<1024, 1 /*size*/, 2 /*width*/> insWindow; //this would be something like an Atom, except all the instruction pairing business...
 
-        //Nehalem
-        WindowStructure<1024, 36 /*size*/> insWindow; //NOTE: IW width is implicitly determined by the decoder, which sets the port masks according to uop type
-        ReorderBuffer<128, 4> rob;
+        // Nehalem - IW = 36, ROB = 128
+        // Our sim - IW = 36, ROB = 80
+        WindowStructure<1024, OOO_IW_SIZE /*size*/> insWindow; //NOTE: IW width is implicitly determined by the decoder, which sets the port masks according to uop type
+        
+        //ReorderBuffer<128, 4> rob;
+        ReorderBuffer<OOO_ROB_SIZE, 4> rob;
 
         // Agner's guide says it's a 2-level pred and BHSR is 18 bits, so this is the config that makes sense;
         // in practice, this is probably closer to the Pentium M's branch predictor, (see Uzelac and Milenkovic,
