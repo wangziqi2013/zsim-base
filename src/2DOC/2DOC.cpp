@@ -7437,7 +7437,7 @@ void main_sim_begin(main_t *main) {
   // Print conf first
   main_conf_print(main);
   printf("\n\n========== simulation begin ==========\n");
-  main->begin_time = time(NULL);
+  main->init_time = time(NULL);
   main->finished = 0;
   main->progress = 0;
   if(main->param->start_inst_count == 0UL) {
@@ -7456,7 +7456,6 @@ void main_sim_begin(main_t *main) {
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
-  printf("Simulation time: %lu seconds\n", main->end_time - main->begin_time);
   main_stat_print(main);
   // Switch back to previous working dir
   if(main->saved_cwd != NULL) {
@@ -7535,6 +7534,7 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
       main->started = 1;
       main->progress = 0;
       main->start_cycle_count = cycle;
+      main->begin_time = time(NULL);
     }
     int progress = (int)(100.0 * (double) \
       (inst - main->param->start_inst_count) / (double)main->param->max_inst_count
@@ -7564,7 +7564,7 @@ void main_bb_sim_finish(main_t *main) {
   }
   main->mem_op_index = 0;
   main_latency_list_reset(main->latency_list);
-  // Currently not used; may be enabled later
+  // Snapshot of the started flag, used for simulator to determine whether to perform precise core sim
   main->old_started = main->started;
   return;
 }
@@ -7784,6 +7784,15 @@ void main_stat_print(main_t *main) {
       sim_inst_count, sim_cycle_count, 
       main->param->max_inst_count, main->param->start_inst_count);
   printf("  IPC = %lf\n", (double)sim_inst_count / (double)sim_cycle_count);
+  printf("Total time: %lu seconds (wait+sim throughput %.2lf inst/sec)\n", 
+    main->end_time - main->init_time,
+    (double)main->last_inst_count / (double)(main->end_time - main->init_time));
+  printf("  Wait time: %lu seconds (throughput %.2lf inst/sec)\n",
+    main->begin_time - main->init_time,
+    (double)main->param->start_inst_count / (double)(main->begin_time - main->init_time));
+  printf("  Sim time: %lu seconds (throughput %.2lf inst/sec)\n",
+    main->end_time - main->begin_time,
+    (double)sim_inst_count / (double)(main->end_time - main->begin_time));
   if(main->finished == 0) {
     main->finished = 1;
     // Print stat on IPC

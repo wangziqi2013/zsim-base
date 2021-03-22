@@ -2086,8 +2086,9 @@ typedef struct main_struct_t {
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
   int old_started;     // Copy of "started" at the beginning of the current BB; Used to start BB sim
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
-  uint64_t begin_time;
-  uint64_t end_time;
+  uint64_t init_time;  // When object is inited
+  uint64_t begin_time; // When started = 1
+  uint64_t end_time;   // When sim ends
   //
   // 1d-to-2d address translation call back; Set by auto_vertical_ flags. Default to using the addr map
   void (*addr_1d_to_2d_cb)(struct main_struct_t *, uint64_t, uint64_t *, uint64_t *);
