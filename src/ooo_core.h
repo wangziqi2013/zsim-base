@@ -38,7 +38,9 @@
 // Uncomment to enable stall stats
 // #define OOO_STALL_STATS
 
-#define OOO_ROB_SIZE    80
+// Nehalem - IW = 36, ROB = 128
+// Our sim - IW = 36, ROB = 80
+#define OOO_ROB_SIZE    128
 #define OOO_IW_SIZE     36
 
 class FilterCache;
