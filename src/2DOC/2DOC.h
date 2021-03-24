@@ -2092,6 +2092,10 @@ typedef struct main_struct_t {
   //
   // 1d-to-2d address translation call back; Set by auto_vertical_ flags. Default to using the addr map
   void (*addr_1d_to_2d_cb)(struct main_struct_t *, uint64_t, uint64_t *, uint64_t *);
+  // sim end call back - Called right before printing the stats; Arg is set when registering this cb
+  void (*sim_end_cb)(struct main_struct_t *main, void *arg);
+  // Does not have ownership; Will be passed to the end cb
+  void *sim_end_cb_arg;
   // zsim write buffer, used to redirect writes
   // Must be aligned such that certain instructions will not incur alignment errors
   uint8_t zsim_write_buffer[MAIN_MEM_OP_MAX_SIZE * 2] __attribute__((aligned(64)));
@@ -2114,6 +2118,8 @@ void main_chdir(main_t *main);
 // Called before and after the simulation respectively
 void main_sim_begin(main_t *main);
 void main_sim_end(main_t *main);
+
+void main_register_sim_end_cb(void (*cb)(main_t *main, void *arg), void *arg);
 
 // Generate result directory name given a buffer; Updates the buffer in-place
 void main_gen_result_dir_name(main_t *main, char *buf);

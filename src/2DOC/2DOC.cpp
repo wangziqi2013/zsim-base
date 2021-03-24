@@ -7456,6 +7456,10 @@ void main_sim_begin(main_t *main) {
 void main_sim_end(main_t *main) {
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
+  // Call this before printing confs and stats
+  if(main->sim_end_cb != NULL) {
+    main->sim_end_cb(main, main->sim_end_cb_arg);
+  }
   main_stat_print(main);
   // Switch back to previous working dir
   if(main->saved_cwd != NULL) {
@@ -7483,6 +7487,15 @@ void main_sim_end(main_t *main) {
 #ifndef UNIT_TEST
   exit(0);
 #endif
+  return;
+}
+
+void main_register_sim_end_cb(main_t *main, void (*cb)(main_t *main, void *arg), void *arg) {
+  if(main->sim_end_cb != NULL) {
+    error_exit("End-of-sim call back has already been registered\n");
+  }
+  main->sim_end_cb = cb;
+  main->sim_end_cb_arg = arg;
   return;
 }
 
@@ -7773,6 +7786,11 @@ void main_conf_print(main_t *main) {
   main_addr_map_conf_print(main->addr_map);
   printf("latency list:\n");
   main_latency_list_conf_print(main->latency_list);
+  if(main->sim_end_cb != NULL) {
+    printf("Sim end cb is registered\n");
+  } else {
+    printf("Sim end cb is NOT registered\n");
+  }
   return;
 }
 
