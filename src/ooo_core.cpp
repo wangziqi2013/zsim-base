@@ -320,6 +320,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     //assert(entry->op == MAIN_WRITE);
                     ooo_store_size += entry->size;
                     uint64_t reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
+                    core_stat.store_count++;
+                    core_stat.store_cycle_count += (reqSatisfiedCycle - dispatchCycle);
                     //uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
                     cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
 

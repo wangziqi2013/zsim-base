@@ -63,6 +63,8 @@ struct InstrFuncPtrs {  // NOLINT(whitespace)
 typedef struct {
     uint64_t load_count;              // Total number of load uops
     uint64_t load_cycle_count;        // Total number of load cycles (dispatch to commit)
+    uint64_t store_count;
+    uint64_t store_cycle_count;
 } core_stat_t;
 
 //Generic core class
