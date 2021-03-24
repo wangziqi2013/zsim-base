@@ -78,6 +78,9 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     instrs = uops = bbls = approxInstrs = mispredBranches = 0;
 
     for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
+
+    memset(&core_stat, 0x00, sizeof(ooo_stat_t));
+    return;
 }
 
 void OOOCore::initStats(AggregateStat* parentStat) {
