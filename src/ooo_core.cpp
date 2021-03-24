@@ -78,9 +78,6 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     instrs = uops = bbls = approxInstrs = mispredBranches = 0;
 
     for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
-
-    memset(&core_stat, 0x00, sizeof(ooo_stat_t));
-    return;
 }
 
 void OOOCore::initStats(AggregateStat* parentStat) {
@@ -279,6 +276,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                         //main_latency_list_entry_t *entry = main_get_mem_op(zinfo->main);
                         //assert(entry->op == MAIN_READ);
                         reqSatisfiedCycle = main_mem_op(zinfo->main, dispatchCycle);
+                        core_stat.load_count++;
+                        core_stat.load_cycle_count += (reqSatisfiedCycle - dispatchCycle);
                         //reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
                     //}

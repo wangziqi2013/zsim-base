@@ -60,6 +60,11 @@ struct InstrFuncPtrs {  // NOLINT(whitespace)
 #define FPTR_NOP (2L)
 #define FPTR_RETRY (3L)
 
+typedef struct {
+    uint64_t load_count;              // Total number of load uops
+    uint64_t load_cycle_count;        // Total number of load cycles (dispatch to commit)
+} core_stat_t;
+
 //Generic core class
 
 class Core : public GlobAlloc {
@@ -71,7 +76,9 @@ class Core : public GlobAlloc {
         g_string name;
 
     public:
-        explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}
+        explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {
+            memset(&core_stat, 0x00, sizeof(core_stat_t));
+        }
 
         virtual uint64_t getInstrs() const = 0; // typically used to find out termination conditions or dumps
         virtual uint64_t getPhaseCycles() const = 0; // used by RDTSC faking --- we need to know how far along we are in the phase, but not the total number of phases
@@ -85,6 +92,8 @@ class Core : public GlobAlloc {
         virtual void join() {}
 
         virtual InstrFuncPtrs GetFuncPtrs() = 0;
+
+        core_stat_t core_stat;
 };
 
 #endif  // CORE_H_

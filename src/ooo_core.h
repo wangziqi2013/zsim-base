@@ -49,11 +49,6 @@ extern uint64_t ooo_load_count;
 extern uint64_t ooo_store_count;
 extern uint64_t ooo_store_size;
 
-typedef struct {
-    uint64_t load_count;              // Total number of load uops
-    uint64_t load_cycle_count;        // Total number of load cycles (dispatch to commit)
-} ooo_stat_t;
-
 /* 2-level branch predictor:
  *  - L1: Branch history shift registers (bshr): 2^NB entries, HB bits of history/entry, indexed by XOR'd PC
  *  - L2: Pattern history table (pht): 2^LB entries, 2-bit sat counters, indexed by XOR'd bshr contents
@@ -470,9 +465,6 @@ class OOOCore : public Core {
         inline EventRecorder* getEventRecorder() {return cRec.getEventRecorder();}
         void cSimStart();
         void cSimEnd();
-
-        // Statistics
-        ooo_stat_t core_stat;
 
     private:
         inline void load(Address addr);
