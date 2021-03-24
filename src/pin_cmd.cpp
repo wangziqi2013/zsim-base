@@ -40,16 +40,21 @@
 PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint64_t shmid) {
     //Figure the program paths
     const char* zsimEnvPath = getenv("ZSIM_PATH");
+    const char *pinEnvPath = getenv("PIN_PATH");
     g_string pinPath, zsimPath;
     if (zsimEnvPath) {
-        info("Using env path %s", zsimEnvPath);
-        pinPath = zsimEnvPath;
-        pinPath += "/pinbin";
+        printf("Using zsim env path: %s\n", zsimEnvPath);
         zsimPath = zsimEnvPath;
         zsimPath += "/libzsim.so";
     } else {
-        pinPath = QUOTED(PIN_PATH);
         zsimPath = QUOTED(ZSIM_PATH);
+    }
+    if(pinEnvPath != NULL) {
+        printf("Using PIN env path: %s\n", pinEnvPath);
+        pinPath = pinEnvPath;
+        pinPath += "/pinbin";
+    } else {
+        pinPath = QUOTED(PIN_PATH);
     }
 
     args.push_back(pinPath);
