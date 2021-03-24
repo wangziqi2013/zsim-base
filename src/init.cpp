@@ -423,7 +423,7 @@ static void SimEndCallBack_2DOC(main_t *main, void *arg) {
     (void)arg;
     for(int i = 0;i < (int)zinfo->numCores;i++) {
         Core *core = zinfo->cores[i];
-        printf("Core %d: Loads %lu cycles %lu stores %lu cycles %lu\n", i,
+        printf("Core %d: Loads %'lu cycles %'lu stores %'lu cycles %'lu\n", i,
             core->core_stat.load_count, core->core_stat.load_cycle_count,
             core->core_stat.store_count, core->core_stat.store_cycle_count);
     }
@@ -464,7 +464,7 @@ static void InitSystem(Config& config) {
     snprintf(temp_buf, sizeof(temp_buf), "%d", OOO_ROB_SIZE);
     main_add_info(zinfo->main, "OOO_ROB_SIZE", temp_buf);
     // Sim end call back
-    main_register_sim_end_cb(SimEndCallBack_2DOC, NULL);
+    main_register_sim_end_cb(zinfo->main, SimEndCallBack_2DOC, NULL);
     // If a network file is specified, build a Network
     string networkFile = config.get<const char*>("sys.networkFile", "");
     Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
