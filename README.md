@@ -21,8 +21,12 @@ We list our changes made to the original zsim as follows:
    The compilation system will report error which makes no sense.
    This is caused by a hidden database file, `.sconsign.dblite`, under zsim directory. We added a `make clean` command
    to remove this file before recompliting the entire project.
+   
+6. Added release build, which can be invoked by typing `make release`. This will just call scons with --r switch, which builds a release 
+   version, with `assert()` macro turned off and more aggressive compiler optimizations. The release version is supposed to be 
+   slightly faster than opt. You can find the binary under ./build/release/ directory.
 
-To compile, execute `make` or `make zsim`; To run zsim, execute `./build/opt/zsim [conf file]`; To completely remove the current build, 
+To compile, execute `make`, `make zsim`, or `make release`; To run zsim, execute `./build/opt/zsim [conf file]`; To completely remove the current build, 
 execution `make clean`.
 
 If the binary reports error and requires `-injection child` to be enabled, you need to add the following options under key "sim":
