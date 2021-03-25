@@ -22,9 +22,13 @@ We list our changes made to the original zsim as follows:
    This is caused by a hidden database file, `.sconsign.dblite`, under zsim directory. We added a `make clean` command
    to remove this file before recompliting the entire project.
    
-6. Added release build, which can be invoked by typing `make release`. This will just call scons with --r switch, which builds a release 
+6. Added release build target, which can be invoked by typing `make release`. This will just call scons with --r switch, which builds a release 
    version, with `assert()` macro turned off and more aggressive compiler optimizations. The release version is supposed to be 
    slightly faster than opt. You can find the binary under ./build/release/ directory.
+   
+7. Fixed PIN crash when running simple.cfg. The crash message says something about "unexpected AUX VEC type 26", with a stack trace and 
+   lots of '@' symbols. This is caused by
+   PIN failing kernel version check. The crash can be resolved by adding "-ifeellucky" under sim.pinOptions, which is already added to simple.cfg.
 
 To compile, execute `make`, `make zsim`, or `make release`; To run zsim, execute `./build/opt/zsim [conf file]`; To completely remove the current build, 
 execution `make clean`.
