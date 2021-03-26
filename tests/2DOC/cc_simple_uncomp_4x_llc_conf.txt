@@ -8,8 +8,8 @@ cc.simple.l2.size = 262144
 cc.simple.l2.way_count = 8
 cc.simple.l2.latency = 11
 
-# 1MB
-cc.simple.llc.size = 1048576
+# 4MB
+cc.simple.llc.size = 4194304 
 cc.simple.llc.physical_way_count = 8
 cc.simple.llc.latency = 30
 cc.simple.llc.algorithm = None
@@ -18,4 +18,4 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = None
 
-main.result_suffix = simple_uncomp
+main.result_suffix = simple_uncomp_4x_llc

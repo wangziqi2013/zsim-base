@@ -1,0 +1,65 @@
+
+# This file specifies the scheme of compression, which is included by all files
+
+#%include tests/2DOC/cc_simple_BDI_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_BDI_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_BDI_4_1_conf.txt
+
+
+#%include tests/2DOC/cc_simple_BDI_third_party_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_BDI_1_4_seg_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_FPC_2_2_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_third_party_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_FPC_1_4_seg_conf.txt
+
+
+#%include tests/2DOC/cc_simple_CPACK_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_CPACK_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_MBDv0_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_MBDv2_1_4_conf.txt
+
+#%include tests/2DOC/cc_simple_MBDv4_1_4_conf.txt
+
+
+#%include tests/2DOC/cc_simple_MBD_2_2_conf.txt
+
+#%include tests/2DOC/cc_simple_MBD_4_1_conf.txt
+
+#######################################################
+
+#%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+
+%include tests/2DOC/cc_simple_uncomp_conf.txt
+
+#%include tests/2DOC/cc_simple_uncomp_2x_llc_conf.txt
+
+#%include tests/2DOC/cc_simple_uncomp_4x_llc_conf.txt
+
+#######################################################
+
+#%include tests/2DOC/cc_scache_BDI_conf.txt
+
+#%include tests/2DOC/cc_scache_FPC_conf.txt
+
+#%include tests/2DOC/cc_scache_MBD_conf.txt
+
+
+#%include tests/2DOC/cc_scache_conf.txt
+
+#%include tests/2DOC/cc_ocache_conf.txt

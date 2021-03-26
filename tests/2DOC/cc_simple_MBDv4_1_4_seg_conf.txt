@@ -1,18 +1,16 @@
 oc.cc_type = simple
 
 cc.simple.l1.size = 32768
-cc.simple.l1.way_count = 8
+cc.simple.l1.way_count = 4
 cc.simple.l1.latency = 4
 
 cc.simple.l2.size = 262144
 cc.simple.l2.way_count = 8
-cc.simple.l2.latency = 8
+cc.simple.l2.latency = 11
 
 # 1MB
 cc.simple.llc.size = 1048576
-# 4MB
-#l3.size = 4194304 
-cc.simple.llc.physical_way_count = 16
+cc.simple.llc.physical_way_count = 8
 cc.simple.llc.latency = 30
 cc.simple.llc.algorithm = MBDv4
 
@@ -21,7 +19,7 @@ cc.simple.llc.insert_type = seg
 
 # Base cache, 64-set, 8-way, 512 lines in total, 32KB storage
 cc.simple.llc.bcache.line_count = 4096
-cc.simple.llc.bcache.way_count = 16
+cc.simple.llc.bcache.way_count = 8
 cc.simple.llc.bcache.shape = 1_4
 
 cc.simple.core_count = 1
