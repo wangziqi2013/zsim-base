@@ -168,7 +168,45 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         return;
     }
 
-    /* Simulate execution of previous BBL */
+    // Simulate execution of previous BBL
+
+    uint32_t bblInstrs = prevBbl->instrs;
+    DynBbl* bbl = &(prevBbl->oooBbl[0]);
+    prevBbl = bblInfo;
+
+    curCycle += bblInstrs;
+    for (uint32_t i = 0; i < bbl->uops; i++) {
+        DynUop* uop = &(bbl->uop[i]);
+        switch (uop->type) {
+            case UOP_GENERAL: {
+                curCycle++;
+            } break;
+            case UOP_LOAD: {
+                curCycle = main_mem_op(zinfo->main, curCycle);
+            } break;
+            case UOP_STORE: {
+                curCycle = main_mem_op(zinfo->main, curCycle);
+            } break;
+            default: {
+                curCycle++;
+            } break;
+        }
+    }
+    loads = stores = 0;
+    return;
+}
+
+/*
+inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
+    if (!prevBbl) {
+        // This is the 1st BBL since scheduled, nothing to simulate
+        prevBbl = bblInfo;
+        // Kill lingering ops from previous BBL
+        loads = stores = 0;
+        return;
+    }
+
+    // Simulate execution of previous BBL
 
     uint32_t bblInstrs = prevBbl->instrs;
     DynBbl* bbl = &(prevBbl->oooBbl[0]);
@@ -261,7 +299,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     uint64_t lqCycle = loadQueue.minAllocCycle();
                     if (lqCycle > dispatchCycle) {
 #ifdef LSU_IW_BACKPRESSURE
-                        insWindow.poisonRange(curCycle, lqCycle, 0x4 /*PORT_2, loads*/);
+                        // PORT_2, loads
+                        insWindow.poisonRange(curCycle, lqCycle, 0x4);
 #endif
                         dispatchCycle = lqCycle;
                     }
@@ -286,12 +325,11 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     uint32_t fwdIdx = (addr>>2) & (FWD_ENTRIES-1);
                     if (fwdArray[fwdIdx].addr == addr) {
                         // info("0x%lx FWD %ld %ld", addr, reqSatisfiedCycle, fwdArray[fwdIdx].storeCycle);
-                        /* Take the MAX (see FilterCache's code) Our fwdArray
-                         * imposes more stringent timing constraints than the
-                         * l1d, b/c FilterCache does not change the line's
-                         * availCycle on a store. This allows FilterCache to
-                         * track per-line, not per-word availCycles.
-                         */
+                        // * Take the MAX (see FilterCache's code) Our fwdArray
+                        // * imposes more stringent timing constraints than the
+                        // * l1d, b/c FilterCache does not change the line's
+                        // * availCycle on a store. This allows FilterCache to
+                        // * track per-line, not per-word availCycles.
                         reqSatisfiedCycle = MAX(reqSatisfiedCycle, fwdArray[fwdIdx].storeCycle);
                     }
 
@@ -306,7 +344,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     uint64_t sqCycle = storeQueue.minAllocCycle();
                     if (sqCycle > dispatchCycle) {
 #ifdef LSU_IW_BACKPRESSURE
-                        insWindow.poisonRange(curCycle, sqCycle, 0x10 /*PORT_4, stores*/);
+                        // PORT_4, stores
+                        insWindow.poisonRange(curCycle, sqCycle, 0x10);
 #endif
                         dispatchCycle = sqCycle;
                     }
@@ -377,14 +416,14 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     loads = stores = 0;
 
 
-    /* Simulate frontend for branch pred + fetch of this BBL
-     *
-     * NOTE: We assume that the instruction length predecoder and the IQ are
-     * weak enough that they can't hide any ifetch or bpred stalls. In fact,
-     * predecoder stalls are incorporated in the decode stall component (see
-     * decoder.cpp). So here, we compute fetchCycle, then use it to adjust
-     * decodeCycle.
-     */
+    // Simulate frontend for branch pred + fetch of this BBL
+    //
+    // NOTE: We assume that the instruction length predecoder and the IQ are
+    // weak enough that they can't hide any ifetch or bpred stalls. In fact,
+    // predecoder stalls are incorporated in the decode stall component (see
+    // decoder.cpp). So here, we compute fetchCycle, then use it to adjust
+    // decodeCycle.
+    //
 
     // Model fetch-decode delay (fixed, weak predec/IQ assumption)
     uint64_t fetchCycle = decodeCycle - (DECODE_STAGE - FETCH_STAGE);
@@ -394,27 +433,26 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     if (branchPc && !branchPred.predict(branchPc, branchTaken)) {
         mispredBranches++;
 
-        /* Simulate wrong-path fetches
-         *
-         * This is not for a latency reason, but sometimes it increases fetched
-         * code footprint and L1I MPKI significantly. Also, we assume a perfect
-         * BTB here: we always have the right address to missfetch on, and we
-         * never need resteering.
-         *
-         * NOTE: Resteering due to BTB misses is done at the BAC unit, is
-         * relatively rare, and carries an 8-cycle penalty, which should be
-         * partially hidden if the branch is predicted correctly --- so we
-         * don't simulate it.
-         *
-         * Since we don't have a BTB, we just assume the next branch is not
-         * taken. With a typical branch mispred penalty of 17 cycles, we
-         * typically fetch 3-4 lines in advance (16B/cycle). This sets a higher
-         * limit, which can happen with branches that take a long time to
-         * resolve (because e.g., they depend on a load). To set this upper
-         * bound, assume a completely backpressured IQ (18 instrs), uop queue
-         * (28 uops), IW (36 uops), and 16B instr length predecoder buffer. At
-         * ~3.5 bytes/instr, 1.2 uops/instr, this is about 5 64-byte lines.
-         */
+        // Simulate wrong-path fetches
+        //
+        // This is not for a latency reason, but sometimes it increases fetched
+        // code footprint and L1I MPKI significantly. Also, we assume a perfect
+        // BTB here: we always have the right address to missfetch on, and we
+        // never need resteering.
+        //
+        // NOTE: Resteering due to BTB misses is done at the BAC unit, is
+        // relatively rare, and carries an 8-cycle penalty, which should be
+        // partially hidden if the branch is predicted correctly --- so we
+        // don't simulate it.
+        //
+        // Since we don't have a BTB, we just assume the next branch is not
+        // taken. With a typical branch mispred penalty of 17 cycles, we
+        // typically fetch 3-4 lines in advance (16B/cycle). This sets a higher
+        // limit, which can happen with branches that take a long time to
+        // resolve (because e.g., they depend on a load). To set this upper
+        // bound, assume a completely backpressured IQ (18 instrs), uop queue
+        // (28 uops), IW (36 uops), and 16B instr length predecoder buffer. At
+        // ~3.5 bytes/instr, 1.2 uops/instr, this is about 5 64-byte lines.
 
         // info("Mispredicted branch, %ld %ld %ld | %ld %ld", decodeCycle, curCycle, lastCommitCycle,
         //         lastCommitCycle-decodeCycle, lastCommitCycle-curCycle);
@@ -458,6 +496,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         decodeCycle = minFetchDecCycle;
     }
 }
+*/
 
 // Timing simulation code
 void OOOCore::join() {
@@ -517,6 +556,7 @@ void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
 }
 
 static uint64_t main_inst_count = 0;
+static int bb_count_since_last_report = 0;
 
 // This function is called before any basic block; It simulates the past basic block,
 // stored in core->prevBbl, if not NULL
@@ -534,8 +574,15 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     }
 
     main_inst_count += bblInfo->instrs;
-    // This may set started to 1, indicating the start of simulation
-    main_report_progress(zinfo->main, main_inst_count, core->curCycle);
+    
+    // Reduce unnecessary reports
+    if(bb_count_since_last_report == 10) {
+        // This may set started to 1, indicating the start of simulation
+        main_report_progress(zinfo->main, main_inst_count, core->curCycle);
+        bb_count_since_last_report = 0;
+    } else {
+        bb_count_since_last_report++;
+    }
 
     // Finished the current bb, reset the internal address log
     // Will report error if the access log has not been exhausted
