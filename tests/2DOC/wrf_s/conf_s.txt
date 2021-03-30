@@ -10,8 +10,9 @@ main.start_inst_count = 100B
 
 main.addr_1d_to_2d_type = None
 
-main.app_name = cam4_r
+main.app_name = wrf_s
 main.result_dir_has_timestamp = 0
 main.ignore_magic_op_start_sim = 1
 
-main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/527.cam4_r/data/all/input/
+main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/521.wrf_r/data/all/input/
+#main.chdir = /home/ziqiw/data_disk_2/SPEC2017/benchspec/CPU/521.wrf_r/build/build_base_mytest-m64.0000/
