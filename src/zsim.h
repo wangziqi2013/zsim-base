@@ -185,6 +185,8 @@ struct GlobSimInfo {
     TraceDriver* traceDriver;
 
     main_t *main;
+    // Absolute value of inst simulated
+    uint64_t total_inst_count;
 };
 
 

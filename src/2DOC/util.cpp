@@ -337,6 +337,12 @@ void conf_node_free(conf_node_t *node) {
   return;
 }
 
+void conf_node_update_value(conf_node_t *node, const char *new_value) {
+  free(node->value);
+  node->value = strclone(new_value);
+  return;
+}
+
 void conf_free(conf_t *conf) {
   conf_node_t *curr = conf->head;
   while(curr) {
@@ -387,11 +393,7 @@ int conf_remove(conf_t *conf, const char *key) {
 int conf_rewrite(conf_t *conf, const char *key, const char *value) {
   conf_node_t *node = conf_find(conf, key);
   if(node == NULL) return 0;
-  free(node->value); // Recall that this is allocated using malloc()
-  char *new_val = (char *)malloc(strlen(value) + 1);
-  SYSEXPECT(new_val != NULL);
-  strcpy(new_val, value);
-  node->value = new_val;
+  conf_node_update_value(node, value);
   return 1;
 }
 
@@ -641,6 +643,32 @@ void conf_dump(conf_t *conf, const char *filename) {
     node = node->next;
   }
   fclose(fp);
+  return;
+}
+
+void conf_begin_prefix(conf_t *conf, conf_it_t *it, const char *prefix) {
+  int len = strlen(prefix);
+  *it = conf->head;
+  while(*it != NULL) {
+    if(strncmp((*it)->key, prefix, len) == 0) {
+      break;
+    }
+    *it = (*it)->next;
+  }
+  return;
+}
+
+void conf_next_prefix(conf_t *conf, conf_it_t *it, const char *prefix) {
+  int len = strlen(prefix);
+  // This is before comparison otherwise we will not make progress
+  *it = (*it)->next;
+  while(*it != NULL) {
+    if(strncmp((*it)->key, prefix, len) == 0) {
+      break;
+    }
+    *it = (*it)->next;
+  }
+  (void)conf;
   return;
 }
 

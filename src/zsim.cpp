@@ -542,7 +542,7 @@ VOID main_mem_read_1(THREADID tid, ADDRINT addr, uint32_t size) {
 }
 
 VOID main_mem_read_2(THREADID tid, ADDRINT addr) {
-    main_bb_read(zinfo->main, addr, 8, NULL);
+    main_bb_read(zinfo->main, addr, 4, NULL);
     return;
 }
 
@@ -563,11 +563,15 @@ VOID Instruction(INS ins) {
     //INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)PrintIp, IARG_THREAD_ID, IARG_REG_VALUE, REG_INST_PTR, IARG_END);
 
     if (!procTreeNode->isInFastForward() || !zinfo->ffReinstrument) {
+    // totally ignore non-standard memory ops (same with decoder)
+    //if(INS_IsStandardMemop(ins)) {
+        /*
         AFUNPTR LoadFuncPtr = (AFUNPTR) IndirectLoadSingle;
         AFUNPTR StoreFuncPtr = (AFUNPTR) IndirectStoreSingle;
 
         AFUNPTR PredLoadFuncPtr = (AFUNPTR) IndirectPredLoadSingle;
         AFUNPTR PredStoreFuncPtr = (AFUNPTR) IndirectPredStoreSingle;
+        */
 
         //* 2DOC instrumentation
 
@@ -576,11 +580,13 @@ VOID Instruction(INS ins) {
         //mem_op_count[count]++;
 
         if (INS_IsMemoryRead(ins)) {
+            /*
             if (!INS_IsPredicated(ins)) {
                 INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_END);
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_EXECUTING, IARG_END);
             }
+            */
             
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_read_1, 
                 IARG_FAST_ANALYSIS_CALL, 
@@ -591,11 +597,13 @@ VOID Instruction(INS ins) {
         }
 
         if (INS_HasMemoryRead2(ins)) {
+            /*
             if (!INS_IsPredicated(ins)) {
                 INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_END);
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_EXECUTING, IARG_END);
             }
+            */
 
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_read_2, 
                 IARG_FAST_ANALYSIS_CALL, 
@@ -605,11 +613,14 @@ VOID Instruction(INS ins) {
         }
 
         if (INS_IsMemoryWrite(ins)) {
+            /*
             if (!INS_IsPredicated(ins)) {
                 INS_InsertCall(ins, IPOINT_BEFORE,  StoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_END);
             } else {
                 INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_END);
             }
+            */
+
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)main_mem_write_before, 
                 IARG_FAST_ANALYSIS_CALL, 
                 IARG_THREAD_ID, 
@@ -690,22 +701,58 @@ VOID Instruction(INS ins) {
 }
 
 
-VOID Trace(TRACE trace, VOID *v) {
+VOID Trace_normal(TRACE trace, VOID *v) {
     if (!procTreeNode->isInFastForward() || !zinfo->ffReinstrument) {
         // Visit every basic block in the trace
         for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
             BblInfo* bblInfo = Decoder::decodeBbl(bbl, zinfo->oooDecode);
-            BBL_InsertCall(bbl, IPOINT_BEFORE /*could do IPOINT_ANYWHERE if we redid load and store simulation in OOO*/, (AFUNPTR)IndirectBasicBlock, IARG_FAST_ANALYSIS_CALL,
+            BBL_InsertCall(bbl, IPOINT_BEFORE /*could do IPOINT_ANYWHERE if we redid load and store simulation in OOO*/, 
+                (AFUNPTR)IndirectBasicBlock, IARG_FAST_ANALYSIS_CALL,
                  IARG_THREAD_ID, IARG_ADDRINT, BBL_Address(bbl), IARG_PTR, bblInfo, IARG_END);
         }
     }
-
     //Instruction instrumentation now here to ensure proper ordering
     for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
         for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
             Instruction(ins);
         }
     }
+    return;
+}
+
+static int unreported_bbl_count = 0;
+
+VOID PIN_FAST_ANALYSIS_CALL ff_bb_cb(uint64_t inst_count) {
+    zinfo->total_inst_count += inst_count;
+    unreported_bbl_count++;
+    if(unreported_bbl_count == 100) {
+        main_report_progress(zinfo->main, zinfo->total_inst_count, zinfo->total_inst_count); // IPC = 1
+        if(zinfo->main->started == 1) {
+            // XSAVE error? Some instrumentations are not cleared?
+            PIN_RemoveInstrumentation();
+            //CODECACHE_FlushCache();
+            //TRACE_AddInstrumentFunction(Trace_normal, 0);
+        }
+        unreported_bbl_count = 0;
+    }
+    if(zinfo->main->started == 1) {
+        printf("ff_bb_cb called unreported_bbl_count = %d\n", unreported_bbl_count);
+    }
+    return;
+}
+
+// Fast-forwarding trace
+VOID Trace_ff(TRACE trace, VOID *v) {
+    if(zinfo->main->started == 0) {
+        // Visit every basic block in the trace
+        for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
+            BBL_InsertCall(bbl, IPOINT_BEFORE, (AFUNPTR)ff_bb_cb, IARG_FAST_ANALYSIS_CALL,
+                IARG_ADDRINT, (uint64_t)BBL_NumIns(bbl), IARG_END);
+        }
+    } else {
+        Trace_normal(trace, v);
+    }
+    return;
 }
 
 /***** vDSO instrumentation and patching code *****/
@@ -1655,7 +1702,7 @@ int main(int argc, char *argv[]) {
     VirtInit();
 
     //Register instrumentation
-    TRACE_AddInstrumentFunction(Trace, 0);
+    TRACE_AddInstrumentFunction(Trace_normal, 0);
     VdsoInit(); //initialized vDSO patching information (e.g., where all the possible vDSO entry points are)
 
     PIN_AddThreadStartFunction(ThreadStart, 0);

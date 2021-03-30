@@ -894,6 +894,8 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
     zinfo = gm_calloc<GlobSimInfo>();
     zinfo->outputDir = gm_strdup(outputDir);
     zinfo->statsBackends = new g_vector<StatsBackend*>();
+    // Added for 2DOC
+    zinfo->total_inst_count = 0UL;
 
     Config config(configFile);
 

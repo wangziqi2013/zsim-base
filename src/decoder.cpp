@@ -211,16 +211,17 @@ void Decoder::emitExecUop(uint32_t rs0, uint32_t rs1, uint32_t rd0, uint32_t rd1
 void Decoder::emitBasicMove(Instr& instr, DynUopVec& uops, uint32_t lat, uint8_t ports) {
     // Note: SPEC 2017 roms_s fails this condition on instruction vmovhps xmm0, xmm0, qword ptr [rsp+0x2e0]
     // There is one load and one input reg which violates the invariant
-    //if (instr.numLoads + instr.numInRegs > 1 || instr.numStores + instr.numOutRegs != 1) {
-    if (instr.numStores + instr.numOutRegs != 1) {
+    if (instr.numLoads + instr.numInRegs > 1 || instr.numStores + instr.numOutRegs != 1) {
+    //if (instr.numStores + instr.numOutRegs != 1) {
         reportUnhandledCase(instr, "emitBasicMove");
     }
     //Note that we can have 0 loads and 0 input registers. In this case, we are loading from an immediate, and we set the input register to 0 so there is no dependence
     uint32_t inReg = (instr.numInRegs == 1)? instr.inRegs[0] : 0;
-    if(instr.numLoads + instr.numInRegs > 1) { // Special case, see above
+    //if(instr.numLoads + instr.numInRegs > 1) { // Special case, see above
         // Treat multi-source load as a memory read and just drop the reg operand
-        emitLoad(instr, 0, uops, instr.outRegs[0]); 
-    } else if (!instr.numLoads && !instr.numStores) { //reg->reg
+    //    emitLoad(instr, 0, uops, instr.outRegs[0]); 
+    //} else 
+    if (!instr.numLoads && !instr.numStores) { //reg->reg
         emitExecUop(inReg, 0, instr.outRegs[0], 0, uops, lat, ports);
     } else if (instr.numLoads && !instr.numStores) { //mem->reg
         emitLoad(instr, 0, uops, instr.outRegs[0]);
@@ -1296,6 +1297,11 @@ BblInfo* Decoder::decodeBbl(BBL bbl, bool oooDecoding) {
         for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
             bool inaccurate = false;
             uint32_t prevUops = uopVec.size();
+            // Totally ignore non-standard mem ops
+            //if(!INS_IsStandardMemop(ins)) {
+            //    curIns++;
+            //    continue;
+            //}
             if (Decoder::canFuse(ins)) {
                 inaccurate = Decoder::decodeFusedInstrs(ins, uopVec);
                 instrAddr.push_back(INS_Address(ins));

@@ -435,11 +435,9 @@ void MESI_entry_print(MESI_entry_t *entry);
 //* dmap_t - Cache line level data map
 //* pmap_t - Page information
 
-// 256 MB working set, 4M lines, avg chain length 4, 1M slots, 8M memory for the directory
-#define DMAP_INIT_COUNT                  (1 * 1024 * 1024)
+// 512 MB working set, 8M lines, avg chain length 2, 2M slots, 16M memory for the directory
+#define DMAP_INIT_COUNT                  (2 * 1024 * 1024)
 #define DMAP_MASK                        (DMAP_INIT_COUNT - 1)
-// Comment this out to disable profiling
-#define DMAP_PROFILING
 
 #define DMAP_READ                        0
 #define DMAP_WRITE                       1
@@ -499,8 +497,13 @@ inline static int dmap_get_count(dmap_t *dmap) { return dmap->count - dmap->pmap
 
 // Unlink an entry from the internal list
 void dmap_entry_unlink(dmap_entry_t *entry);
+dmap_entry_t *_dmap_insert(dmap_t *dmap, uint64_t oid, uint64_t addr, int *new_entry);
 // Insert a new record, or return an existing one. Always return not-NULL
-dmap_entry_t *dmap_insert(dmap_t *dmap, uint64_t oid, uint64_t addr);
+inline static dmap_entry_t *dmap_insert(dmap_t *dmap, uint64_t oid, uint64_t addr) {
+  int new_entry;
+  return _dmap_insert(dmap, oid, addr, &new_entry); 
+  (void)new_entry;
+}
 // Can return NULL if the combination does not exist
 dmap_entry_t *dmap_find(dmap_t *dmap, uint64_t oid, uint64_t addr);
 // Returns NULL if the dmap entry is not found
@@ -1866,6 +1869,32 @@ void cc_simple_print_set(cc_simple_t *cc, int cache, int id, int set_index);
 void cc_simple_conf_print(cc_simple_t *cc);
 void cc_simple_stat_print(cc_simple_t *cc);
 
+//* cc_debug_t - Debugging cc
+
+#define CC_DEBUG_MODE_FIX_LATENCY     0
+
+typedef struct {
+  cc_common_t commons;
+  int mode;
+  // Fixed latency mode
+  int load_latency;
+  int store_latency;
+} cc_debug_t;
+
+cc_debug_t *cc_debug_init();
+cc_debug_t *cc_debug_init_conf(conf_t *conf);
+void cc_debug_free(cc_debug_t *cc);
+
+void cc_debug_set_dmap(cc_debug_t *cc, dmap_t *dmap);
+void cc_debug_set_dram(cc_debug_t *cc, dmap_t *dram);
+void cc_debug_set_dram_debug_cb(cc_debug_t *cc, cc_dram_debug_cb_t cb);
+
+uint64_t cc_debug_load(cc_debug_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t cc_debug_store(cc_debug_t *cc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+
+void cc_debug_conf_print(cc_debug_t *cc);
+void cc_debug_stat_print(cc_debug_t *cc);
+
 //* oc_t - Overlay Compression top level class
 
 struct oc_struct_t;
@@ -1874,11 +1903,14 @@ struct oc_struct_t;
 typedef uint64_t (*oc_cc_cb_t)(struct oc_struct_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
 
 // Used for oc.cc_simple_type
+#define OC_CC_BEGIN      0
 #define OC_CC_SIMPLE     0
 #define OC_CC_SCACHE     1 
 #define OC_CC_OCACHE     2
+#define OC_CC_DEBUG      3
+#define OC_CC_END        4
 
-extern const char *oc_cc_simple_type_names[3];
+extern const char *oc_cc_type_names[4];
 
 // Currently only support single core
 typedef struct oc_struct_t {
@@ -1889,14 +1921,17 @@ typedef struct oc_struct_t {
     cc_simple_t *cc_simple;
     cc_scache_t *cc_scache;
     cc_ocache_t *cc_ocache;
+    cc_debug_t *cc_debug;
   };
   // cc type
   int cc_type;
-  // This points to the commons structure to both cc, such that we do not need two functions for accessing them
+  // This points to the commons structure to cc
   cc_common_t *cc_commons;
   // Load and store call backs
   oc_cc_cb_t load_cb;
   oc_cc_cb_t store_cb;
+  // Local statistics (cache access stats are maintained by cc)
+  uint64_t cross_line_access_count; // Accesses that request more than one cache lines
 } oc_t;
 
 // Initializes the cc based on conf options; Also init cc_commons and load/store cbs
@@ -1916,16 +1951,17 @@ uint64_t oc_scache_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_
 uint64_t oc_ocache_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
 uint64_t oc_ocache_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
 
-// The following two are top-level load and store, which wraps cc_simple_load() and cc_simple_store(). 
-// They will take care of data operations.
+uint64_t oc_debug_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
+uint64_t oc_debug_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr);
 
-// Convert an arbitrary range to cache aligned accesses
-void oc_gen_aligned_line_addr(oc_t *oc, uint64_t addr, int size, uint64_t *base_addr, int *line_count);
+// The following two are top-level load and store, which wraps cc functions
+// These functions assume that dmap will be updated before and after the operations by
+// upper level modules accordingly
 
 // Writing size bytes to buf, which will be consumed by the application program
-uint64_t oc_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int size, void *buf);
+uint64_t oc_load(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t aligned_addr, int line_count);
 // Copy size bytes from buf to dmap's data store
-uint64_t oc_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t addr, int size, void *buf);
+uint64_t oc_store(oc_t *oc, int id, uint64_t cycle, uint64_t oid, uint64_t aligned_addr, int line_count);
 
 inline static dmap_t *oc_get_dmap(oc_t *oc) { return oc->dmap; }
 inline static pmap_t *oc_get_pmap(oc_t *oc) { return oc->dmap; }
@@ -2041,6 +2077,10 @@ void main_latency_list_stat_print(main_latency_list_t *list);
 typedef struct {
   uint64_t max_inst_count;      // Max number of instructions
   uint64_t start_inst_count;    // Starting instructions, default zero
+  // Sim intervals
+  int interval_count;   // Number of intervals to simulate, default 1
+  uint64_t interval_skip_inst_count; // Number of instructions to skip after finishing the current interval's sim
+  //
   char *result_suffix;          // Suffix of result directory, for better recognizability; Optional, NULL if invalid
   // This could be set by either conf file key main.app_name, or by main_set_app_name()
   char *app_name;               // Name of the application, will be reflected in the result directory name; Optional
@@ -2082,13 +2122,21 @@ typedef struct main_struct_t {
   uint64_t last_cycle_count;
   uint64_t start_cycle_count; // Cycle count when it starts, default zero
   int progress;        // 0 - 100
-  int finished;        // Init 0, only set to 1 when max_inst_count since start_inst_count is reached
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
-  int old_started;     // Copy of "started" at the beginning of the current BB; Used to start BB sim
+  // Currently not used; May be used in the future
+  int warmup;          // Not started yet, but we start to bring data into the cache; Not stat'ed
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t init_time;  // When object is inited
   uint64_t begin_time; // When started = 1
   uint64_t end_time;   // When sim ends
+  //
+  int current_interval;            // Current simulating interval; -1 means have not started sim
+  // Current interval
+  uint64_t next_toggle_inst_count;     // Absolute inst count of the next toggle point
+  uint64_t last_toggle_inst_count;     // Absolute inst count since the last toggle
+  uint64_t last_toggle_cycle_count;    // Absolute cycle count since the last toggle
+  uint64_t sim_inst_count;
+  uint64_t sim_cycle_count;
   //
   // 1d-to-2d address translation call back; Set by auto_vertical_ flags. Default to using the addr map
   void (*addr_1d_to_2d_cb)(struct main_struct_t *, uint64_t, uint64_t *, uint64_t *);
@@ -2119,7 +2167,7 @@ void main_chdir(main_t *main);
 void main_sim_begin(main_t *main);
 void main_sim_end(main_t *main);
 
-void main_register_sim_end_cb(void (*cb)(main_t *main, void *arg), void *arg);
+void main_register_sim_end_cb(main_t *main, void (*cb)(main_t *main, void *arg), void *arg);
 
 // Generate result directory name given a buffer; Updates the buffer in-place
 void main_gen_result_dir_name(main_t *main, char *buf);
@@ -2137,13 +2185,13 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle);
 // The following two are called during basic block execution (bb = basic block)
 inline static void main_bb_read(main_t *main, uint64_t addr, int size, void *data) {
   (void)data; 
-  if(main->old_started == 1) {
+  if(main->started == 1) {
     main_latency_list_append(main->latency_list, MAIN_READ, addr, size, NULL);
   }
 }
 inline static void main_bb_write(main_t *main, uint64_t addr, int size, void *data) {
   (void)data;
-  if(main->old_started == 1) {
+  if(main->started == 1) {
     main_latency_list_append(main->latency_list, MAIN_WRITE, addr, size, data);
   }
 }
@@ -2156,6 +2204,25 @@ void main_1d_to_2d_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t
 void main_1d_to_2d_None_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
 void main_1d_to_2d_auto_vertical_4_1_cb(main_t *main, uint64_t addr_1d, uint64_t *oid_2d, uint64_t *addr_2d);
 
+// Convert an arbitrary range to cache aligned accesses
+// Generate cache aligned access plans given an arbitrary address and size
+inline static void main_gen_aligned_line_addr(
+  main_t *main, uint64_t addr, int size, uint64_t *base_addr, int *line_count) {
+  assert(size > 0);
+  uint64_t end_addr = (addr + size - 1) & ~(UTIL_CACHE_LINE_SIZE - 1);
+  addr = addr & ~(UTIL_CACHE_LINE_SIZE - 1);
+  *line_count = ((end_addr - addr) / UTIL_CACHE_LINE_SIZE) + 1;
+  *base_addr = addr;
+  assert(*line_count > 0);
+  assert(*base_addr % UTIL_CACHE_LINE_SIZE == 0);
+  assert(end_addr % UTIL_CACHE_LINE_SIZE == 0);
+  (void)main;
+  return;
+}
+
+void main_mem_op_before(main_t *main, 
+  uint64_t addr_1d_aligned, uint64_t oid_2d, uint64_t addr_2d_aligned, int line_count);
+void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_unaligned, int size, void *buf);
 // The following is called during processor simulation, which takes argument from the internal latency 
 // list, rather than from external.
 // Return value is finish cycle of the operation

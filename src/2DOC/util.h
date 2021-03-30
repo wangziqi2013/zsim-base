@@ -213,13 +213,14 @@ static inline void spinlock_wait(volatile spinlock_t *lock) {
 
 typedef struct conf_node_struct_t {
   char *key;
-  char *value;
+  char *value;    // This can be updated by calling conf_node_update_value()
   int line;
   int accessed;   // Whether this conf node has been accessed by a find_* function; Use this to find unused option
   struct conf_node_struct_t *next;
 } conf_node_t;
 
 void conf_node_free(conf_node_t *node);
+void conf_node_update_value(conf_node_t *node, const char *new_value);
 
 // Configuration files are flat structured "key = value" pairs; Lines beginning 
 // with "#" are comments; Lines beginning with "%" are directives
@@ -241,7 +242,7 @@ conf_t *conf_init_empty();                                  // Initialize an emp
 conf_t *conf_init_from_str(const char *s);                  // Initialize from a string
 void conf_free(conf_t *conf);
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists
-int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns if the entry exists
+int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns 1 if the entry exists
 inline static void conf_enable_warn_unused(conf_t *conf) { conf->warn_unused = 1; }
 
 conf_node_t *conf_find(conf_t *conf, const char *key);        // Returns node pointer
@@ -281,6 +282,7 @@ inline static uint64_t conf_get_item_count(conf_t *conf) { return conf->item_cou
 
 // Called by nvoverlay after init
 void conf_conf_print(conf_t *conf);
+// Save the conf to a file, which can be read back
 void conf_dump(conf_t *conf, const char *filename);
 
 // Conf iter interface
@@ -290,6 +292,13 @@ inline static int  conf_is_end(conf_t *conf, conf_it_t *it) { return *it == NULL
 inline static void conf_next(conf_t *conf, conf_it_t *it)   { *it = (*it)->next; (void)conf; }
 inline static const char *conf_it_key(conf_it_t *it) { return (*it)->key; }
 inline static const char *conf_it_value(conf_it_t *it) { return (*it)->value; }
+
+// Iter for certain prefix, i.e. For a key "something.second_level.abcde", both "something" and 
+// "something.second_level" are prefixes of the key; This function returns an iterator that 
+// stops at the first node whose key matches the prefix; This could return conf_is_end() iterator
+void conf_begin_prefix(conf_t *conf, conf_it_t *it, const char *prefix);
+// Advance to the next node that has the prefix; Could reach the end of the conf; Does not accept end iterator
+void conf_next_prefix(conf_t *conf, conf_it_t *it, const char *prefix);
 
 //* tracer_t
 
