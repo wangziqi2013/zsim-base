@@ -17,22 +17,72 @@ release:
 deepsjeng_r:
 	-./build/release/zsim ./tests/2DOC/SPEC2017_rate/deepsjeng_r/deepsjeng_r.cfg
 
+# Spec 2006
+
+perlbench_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/perlbench_2006/perlbench_2006.cfg
+
+libquantum_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/libquantum_2006/libquantum_2006.cfg
+
+bzip2_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/bzip2_2006/bzip2_2006.cfg
+
+gcc_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/gcc_2006/gcc_2006.cfg
+
+bwaves_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/bwaves_2006/bwaves_2006.cfg
+
+gamess_2006:
+	-./tests/2DOC/SPEC2006/gamess_2006/run.sh
+
+mcf_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/mcf_2006/mcf_2006.cfg
+
+milc_2006:
+	-./tests/2DOC/SPEC2006/milc_2006/run.sh
+
+zeusmp_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/zeusmp_2006/zeusmp_2006.cfg
+
+gromacs_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/gromacs_2006/gromacs_2006.cfg
+
+cactusADM_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/cactusADM_2006/cactusADM_2006.cfg
+
+leslie3d_2006:
+	-./tests/2DOC/SPEC2006/leslie3d_2006/run.sh
+
+namd_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/namd_2006/namd_2006.cfg
+
+gobmk_2006:
+	-./tests/2DOC/SPEC2006/gobmk_2006/run.sh
+
+dealII_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/dealII_2006/dealII_2006.cfg
+
+soplex_2006:
+	-./build/release/zsim ./tests/2DOC/SPEC2006/soplex_2006/soplex_2006.cfg
+
 # Spec 2017 speed
 
 gcc_s:
-	-./build/release/zsim ./tests/2DOC/gcc_s/gcc_s.cfg
+	-./build/release/zsim ./tests/2DOC/SPEC2017_speed/gcc_s/gcc_s.cfg
 
 mcf_s:
-	-./build/release/zsim ./tests/2DOC/mcf_s/mcf_s.cfg
+	-./build/release/zsim ./tests/2DOC/SPEC2017_speed/mcf_s/mcf_s.cfg
 
 wrf_s:
-	-./build/release/zsim ./tests/2DOC/wrf_s/wrf_s.cfg
+	-./build/release/zsim ./tests/2DOC/SPEC2017_speed/wrf_s/wrf_s.cfg
 
 cam4_s:
-	-./build/release/zsim ./tests/2DOC/cam4_s/cam4_s.cfg
+	-./build/release/zsim ./tests/2DOC/SPEC2017_speed/cam4_s/cam4_s.cfg
 
 imagick_s:
-	-./build/release/zsim ./tests/2DOC/imagick_s/imagick_s.cfg
+	-./build/release/zsim ./tests/2DOC/SPEC2017_speed/imagick_s/imagick_s.cfg
 
 # Spec 2017 rate
 
