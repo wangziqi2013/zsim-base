@@ -43,9 +43,9 @@
 
 #######################################################
 
-%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
+#%include tests/2DOC/cc_simple_MBDv4_1_4_seg_conf.txt
 
-#%include tests/2DOC/cc_simple_uncomp_conf.txt
+%include tests/2DOC/cc_simple_uncomp_conf.txt
 
 #%include tests/2DOC/cc_simple_uncomp_2x_llc_conf.txt
 
