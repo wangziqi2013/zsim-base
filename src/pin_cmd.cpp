@@ -127,26 +127,45 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
         const char* loader = conf->get<const char*>(p_ss.str() +  ".loader", "");
         const char* env = conf->get<const char*>(p_ss.str() +  ".env", "");
 
-        int use_workload_path = 0;
+        int free_cmd = 0;
+        int free_input = 0;
         if(workloadPath != NULL) {
             if(cmd[0] != '/') {
-                use_workload_path = 1;
-                printf("Using relative workload path: \"%s\"\n", workloadPath);
-                char *cmd2 = malloc(strlen(cmd) + strlen(workloadPath) + 16);
+                free_cmd = 1;
+                printf("[zsim] Using relative workload path: \"%s\"\n", workloadPath);
+                printf("[zsim]   Command: \"%s\"\n", cmd);
+                char *cmd2 = (char *)malloc(strlen(cmd) + strlen(workloadPath) + 16);
                 strcpy(cmd2, workloadPath);
                 strcat(cmd2, "/");
                 strcat(cmd2, cmd);
                 cmd = (const char *)cmd2;
             } else {
-                printf("WORKLOAD_PATH is given, but process command is absolute path; Ignore\n");
+                printf("[zsim] WORKLOAD_PATH is given, but process command is absolute path; Ignore\n");
+            }
+            if(input[0] != '/') {
+                int free_input = 1;
+                if(free_cmd == 0) {
+                    printf("[zsim] Using relative workload path: \"%s\"\n", workloadPath);
+                }
+                printf("[zsim]   Input: \"%s\"\n", input);
+                char *input2 = (char *)malloc(strlen(input) + strlen(workloadPath) + 16);
+                strcpy(input2, workloadPath);
+                strcat(input2, "/");
+                strcat(input2, input);
+                cmd = (const char *)input2;
+            } else {
+                printf("[zsim] WORKLOAD_PATH is given, but process input is absolute path; Ignore\n");
             }
         }
 
         ProcCmdInfo pi = {g_string(cmd), g_string(input), g_string(loader), g_string(env)};
         procInfo.push_back(pi);
         // Free the temp string
-        if(use_workload_path == 1) {
-            free(cmd);
+        if(free_cmd == 1) {
+            free((void *)cmd);
+        }
+        if(free_input == 1) {
+            free((void *)input);
         }
     }
 }
