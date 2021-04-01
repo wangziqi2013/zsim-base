@@ -248,14 +248,13 @@ void LaunchProcess(uint32_t procIdx) {
         const char* aptrs[nargs];
 
         //trace(Harness, "Calling arguments:");
-        printf("Arguments: ");
+        printf("[zsim] Arguments: ");
         for (unsigned int i = 0; i < args.size(); i++) {
             //trace(Harness, " arg%d = %s", i, args[i].c_str());
             aptrs[i] = args[i].c_str();
-            printf("%s ", aptrs[i]);
+            printf("[zsim]   %s\n", aptrs[i]);
         }
         aptrs[nargs-1] = nullptr;
-        putchar('\n');
 
         //Chdir to process dir if needed
         if (perProcessDir) {
