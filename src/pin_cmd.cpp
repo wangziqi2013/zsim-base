@@ -112,6 +112,8 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
         args.push_back("-logToFile");
     }
 
+    const char *workloadPath = getenv("WORKLOAD_PATH");
+
     //Read the per-process params of the processes run directly by the harness
     while (true) {
         std::stringstream p_ss;
@@ -119,13 +121,33 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
 
         if (!conf->exists(p_ss.str().c_str())) break;
 
+        // This is the command to run process
         const char* cmd = conf->get<const char*>(p_ss.str() +  ".command");
         const char* input = conf->get<const char*>(p_ss.str() +  ".input", "");
         const char* loader = conf->get<const char*>(p_ss.str() +  ".loader", "");
         const char* env = conf->get<const char*>(p_ss.str() +  ".env", "");
 
+        int use_workload_path = 0;
+        if(workloadPath != NULL) {
+            if(cmd[0] != '/') {
+                use_workload_path = 1;
+                printf("Using relative workload path: \"%s\"\n", workloadPath);
+                char *cmd2 = malloc(strlen(cmd) + strlen(workloadPath) + 16);
+                strcpy(cmd2, workloadPath);
+                strcat(cmd2, "/");
+                strcat(cmd2, cmd);
+                cmd = (const char *)cmd2;
+            } else {
+                printf("WORKLOAD_PATH is given, but process command is absolute path; Ignore\n");
+            }
+        }
+
         ProcCmdInfo pi = {g_string(cmd), g_string(input), g_string(loader), g_string(env)};
         procInfo.push_back(pi);
+        // Free the temp string
+        if(use_workload_path == 1) {
+            free(cmd);
+        }
     }
 }
 
