@@ -14,58 +14,93 @@ release:
 	PINPATH=$(CURDIR)/pin-2.14 scons --r
 	@echo "If compilation fails and says hdf5 cannot be found, run make clean and retry"
 
-deepsjeng_r:
-	-./build/release/zsim ./tests/2DOC/SPEC2017_rate/deepsjeng_r/deepsjeng_r.cfg
-
 # Spec 2006
 
+WORKLOAD_PATH_2006=/home/ziqiw/data_disk_2/SPEC2006/benchspec/CPU2006
+
 perlbench_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/perlbench_2006/perlbench_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/perlbench_2006/perlbench_2006.cfg
 
 libquantum_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/libquantum_2006/libquantum_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/libquantum_2006/libquantum_2006.cfg
 
 bzip2_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/bzip2_2006/bzip2_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/bzip2_2006/bzip2_2006.cfg
 
 gcc_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/gcc_2006/gcc_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/gcc_2006/gcc_2006.cfg
 
 bwaves_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/bwaves_2006/bwaves_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/bwaves_2006/bwaves_2006.cfg
 
 gamess_2006:
-	-./tests/2DOC/SPEC2006/gamess_2006/run.sh
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./tests/2DOC/SPEC2006/gamess_2006/run.sh
 
 mcf_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/mcf_2006/mcf_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/mcf_2006/mcf_2006.cfg
 
 milc_2006:
-	-./tests/2DOC/SPEC2006/milc_2006/run.sh
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./tests/2DOC/SPEC2006/milc_2006/run.sh
 
 zeusmp_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/zeusmp_2006/zeusmp_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/zeusmp_2006/zeusmp_2006.cfg
 
 gromacs_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/gromacs_2006/gromacs_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/gromacs_2006/gromacs_2006.cfg
 
 cactusADM_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/cactusADM_2006/cactusADM_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/cactusADM_2006/cactusADM_2006.cfg
 
 leslie3d_2006:
-	-./tests/2DOC/SPEC2006/leslie3d_2006/run.sh
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./tests/2DOC/SPEC2006/leslie3d_2006/run.sh
 
 namd_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/namd_2006/namd_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/namd_2006/namd_2006.cfg
 
 gobmk_2006:
-	-./tests/2DOC/SPEC2006/gobmk_2006/run.sh
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./tests/2DOC/SPEC2006/gobmk_2006/run.sh
 
 dealII_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/dealII_2006/dealII_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/dealII_2006/dealII_2006.cfg
 
 soplex_2006:
-	-./build/release/zsim ./tests/2DOC/SPEC2006/soplex_2006/soplex_2006.cfg
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/soplex_2006/soplex_2006.cfg
+
+povray_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/povray_2006/povray_2006.cfg
+
+calculix_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/calculix_2006/calculix_2006.cfg
+
+hmmer_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/hmmer_2006/hmmer_2006.cfg
+
+sjeng_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/sjeng_2006/sjeng_2006.cfg
+
+gemsFDTD_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/gemsFDTD_2006/gemsFDTD_2006.cfg
+
+h264ref_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/h264ref_2006/h264ref_2006.cfg
+
+tonto_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/tonto_2006/tonto_2006.cfg
+
+omnetpp_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/omnetpp_2006/omnetpp_2006.cfg
+
+astar_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/astar_2006/astar_2006.cfg
+
+wrf_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/wrf_2006/wrf_2006.cfg
+
+sphinx3_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/sphinx3_2006/sphinx3_2006.cfg
+
+xalancbmk_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/xalancbmk_2006/xalancbmk_2006.cfg
 
 # Spec 2017 speed
 
@@ -151,6 +186,9 @@ fotonik3d_r:
 
 roms_r:
 	-./tests/2DOC/SPEC2017_rate/roms_r/run.sh
+
+deepsjeng_r:
+	-./build/release/zsim ./tests/2DOC/SPEC2017_rate/deepsjeng_r/deepsjeng_r.cfg
 
 clean:
 	@rm ./.sconsign.dblite
