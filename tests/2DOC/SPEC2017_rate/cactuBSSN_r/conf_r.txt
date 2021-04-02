@@ -1,15 +1,18 @@
 # All conf files share the same scheme selection
 %include tests/2DOC/scheme_conf.txt
 
-dram.bank_count = 65536
+dram.bank_count = 16
 dram.read_latency = 300
 dram.write_latency = 300
 
-main.max_inst_count = 2B
-main.start_inst_count = 500M
+main.max_inst_count = 10B
+main.start_inst_count = 100B
 
 main.addr_1d_to_2d_type = None
 
-main.app_name = namd_r
+main.app_name = cactuBSSN_r
 main.result_dir_has_timestamp = 0
 main.ignore_magic_op_start_sim = 1
+
+main.chdir = 507.cactuBSSN_r/data/refrate/input
+main.chdir_is_rel = 1

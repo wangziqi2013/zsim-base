@@ -12,3 +12,4 @@ main.ignore_magic_op_start_sim = 1
 main.app_name = libquantum_2006
 main.result_dir_has_timestamp = 0
 
+main.chdir_is_rel = 1

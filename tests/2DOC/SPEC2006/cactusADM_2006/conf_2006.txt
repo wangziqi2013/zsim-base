@@ -12,4 +12,5 @@ main.ignore_magic_op_start_sim = 1
 main.app_name = cactusADM_2006
 main.result_dir_has_timestamp = 0
 
-main.chdir = /home/ziqiw/data_disk_2/SPEC2006/benchspec/CPU2006/436.cactusADM/data/ref/input/
+main.chdir = 436.cactusADM/data/ref/input/
+main.chdir_is_rel = 1
