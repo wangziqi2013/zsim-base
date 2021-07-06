@@ -138,6 +138,11 @@ void assert_uint64_power2(uint64_t num, const char *name);
 
 inline static int streq(const char *a, const char *b) { return strcmp(a, b) == 0; }
 char *strclone(const char *s); // Duplicate a string by copying it (note that C lib already has strdup)
+char *strnclone(const char *s, int n);
+// Find the substring in the main string. The "times" argument specifies the number of substrings to
+// return, if multiple exists. Returns NULL if not found, including when "times" exceeds the number of
+// occurrences
+char *strfind(const char *s, const char *sub, int times);
 
 // We can support 32 outstanding calls to the convert function
 #define CONVERT_BUFFER_COUNT 32
@@ -270,6 +275,7 @@ inline static int conf_find_uint64_mandatory(conf_t *conf, const char *key) {
   return conf_find_uint64_range(conf, key, 0UL, 0UL, CONF_NONE);
 }
 
+int conf_find_comma_list_str(conf_t *conf, const char *key, char ***list, int *count);
 // Parses a comma list of numbers into uint64_t. Return 1 if key is found. List and count are used to return the list
 // This function allocates memory from the heap and transfers ownership to the caller
 int conf_find_comma_list_uint64(conf_t *conf, const char *key, uint64_t **list, int *count);

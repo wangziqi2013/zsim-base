@@ -2,6 +2,27 @@
 #include "2DOC.h"
 #include "third_party/compression.h"
 
+//* Thesaurus
+
+#ifdef THESAURUS_LSH
+#include "Thesaurus_hash_data.cpp"
+#else 
+inline static uint32_t Thesaurus_hash_data(int32_t *data) {
+  return 0;
+}
+#endif
+
+// Initialize to all-NULL, meaning no LSH is present
+dmap_entry_struct_t *Thesaurus_base_table[4096] = {NULL, };
+
+//* SIMD file inclusion
+
+#ifdef INTEL_ISA
+
+#include "BDI_comp_SIMD.cpp"
+
+#endif
+
 //* BDI
 
 // Indexed using BDI types. Note that the first two entries are not used
@@ -187,7 +208,11 @@ int BDI_comp(void *out_buf, void *in_buf) {
     BDI_param_t *param = &BDI_types[type];
     assert(param != NULL);
     // This function returns the run time type of the compression scheme
+#ifdef INTEL_ISA
     ret = BDI_comp_AVX2(out_buf, in_buf, param, 0);
+#else
+    ret = BDI_comp_scalar(out_buf, in_buf, param, 0);
+#endif
     //printf("i %d type %d ret %d\n", i, type, ret);
     // Use the first one that can actually compress the input
     if(ret != BDI_TYPE_INVALID) {
@@ -211,7 +236,11 @@ int BDI_get_comp_size(void *in_buf) {
     param = &BDI_types[type];
     assert(param != NULL);
     // dry_run == 1, out_buf == NULL
+#ifdef INTEL_ISA
     ret = BDI_comp_AVX2(NULL, in_buf, param, 1);
+#else
+    ret = BDI_comp_scalar(NULL, in_buf, param, 1);
+#endif
     // Use the first one that can actually compress the input
     // If any of the compression param succeeds, ret will not be BDI_TYPE_INVALID
     if(ret != BDI_TYPE_INVALID) {
@@ -227,7 +256,11 @@ void BDI_decomp(void *out_buf, void *in_buf, int type) {
   assert(type >= BDI_TYPE_BEGIN && type < BDI_TYPE_END);
   BDI_param_t *param = &BDI_types[type];
   assert(param != NULL);
+#ifdef INTEL_ISA
   BDI_decomp_AVX2(out_buf, in_buf, param);
+#else 
+  BDI_decomp_scalar(out_buf, in_buf, param);
+#endif
   return;
 }
 
@@ -368,7 +401,7 @@ const char *FPC_type_names[8] = {
 // Also bits must be less than or equal to 64 bits; src must also be 64 bit aligned
 // Returns the new dest_offset
 // Note: Higher bits of the last word are undefined. Do not rely on them being cleared
-int FPC_pack_bits(void *dest, int dest_offset, uint64_t *src, int bits) {
+int FPC_pack_bits_normal(void *dest, int dest_offset, uint64_t *src, int bits) {
   assert(FPC_BIT_COPY_GRANULARITY == 64);
   assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
   int dest_word_index = dest_offset / FPC_BIT_COPY_GRANULARITY;
@@ -395,37 +428,11 @@ int FPC_pack_bits(void *dest, int dest_offset, uint64_t *src, int bits) {
   return dest_offset + bits;
 }
 
-// Using BMI bit extraction interface
-// dest_offset is the bit offset into the dest buffer, which can be arbitrary large
-// bits in the number of bits to be appended at dest_offset, which must be <= 64
-int FPC_pack_bits_bmi(void *_dest, int dest_offset, uint64_t *src, int bits) {
-  assert(FPC_BIT_COPY_GRANULARITY == 64);
-  assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
-  int dest_word_index = dest_offset / FPC_BIT_COPY_GRANULARITY;
-  int dest_word_offset = dest_offset % FPC_BIT_COPY_GRANULARITY;
-  int dest_remains = FPC_BIT_COPY_GRANULARITY - dest_word_offset;
-  uint64_t *dest = (uint64_t *)_dest;
-  dest[dest_word_index] = (
-    bit_extract64(dest[dest_word_index], 0, dest_word_offset) | // This clears higher bits
-    (bit_extract64(*src, 0, bits) << dest_word_offset)  // bits can be larger than actual
-  );
-  // Move to the next word. This will also set high bits to zero
-  int delta = bits - dest_remains;
-  if(delta > 0) {
-    dest[dest_word_index + 1] = bit_extract64(*src, dest_remains, delta);
-  }
-  return dest_offset + bits;
-}
-
-// Use immediate number (numeric literals) instead of the source
-inline static int FPC_pack_bits_imm(void *dest, int dest_offset, uint64_t src, int bits) {
-  return FPC_pack_bits_bmi(dest, dest_offset, &src, bits);
-}
 
 // The reverse of the pack function. This function only handles byte-aligned dest buffer, and only supports
 // less than or equal to 64 bit reads
 // Note: dest should be pre-initialized to zero, higher bits are not guaranteed to be cleared
-int FPC_unpack_bits(uint64_t *dest, void *src, int src_offset, int bits) {
+int FPC_unpack_bits_normal(uint64_t *dest, void *src, int src_offset, int bits) {
   assert(FPC_BIT_COPY_GRANULARITY == 64);
   assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
   int src_word_index = src_offset / FPC_BIT_COPY_GRANULARITY;
@@ -451,6 +458,30 @@ int FPC_unpack_bits(uint64_t *dest, void *src, int src_offset, int bits) {
   return src_offset + bits;
 }
 
+#ifdef INTEL_ISA
+
+// Using BMI bit extraction interface
+// dest_offset is the bit offset into the dest buffer, which can be arbitrary large
+// bits in the number of bits to be appended at dest_offset, which must be <= 64
+int FPC_pack_bits_bmi(void *_dest, int dest_offset, uint64_t *src, int bits) {
+  assert(FPC_BIT_COPY_GRANULARITY == 64);
+  assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
+  int dest_word_index = dest_offset / FPC_BIT_COPY_GRANULARITY;
+  int dest_word_offset = dest_offset % FPC_BIT_COPY_GRANULARITY;
+  int dest_remains = FPC_BIT_COPY_GRANULARITY - dest_word_offset;
+  uint64_t *dest = (uint64_t *)_dest;
+  dest[dest_word_index] = (
+    bit_extract64(dest[dest_word_index], 0, dest_word_offset) | // This clears higher bits
+    (bit_extract64(*src, 0, bits) << dest_word_offset)  // bits can be larger than actual
+  );
+  // Move to the next word. This will also set high bits to zero
+  int delta = bits - dest_remains;
+  if(delta > 0) {
+    dest[dest_word_index + 1] = bit_extract64(*src, dest_remains, delta);
+  }
+  return dest_offset + bits;
+}
+
 int FPC_unpack_bits_bmi(uint64_t *dest, void *_src, int src_offset, int bits) {
   assert(FPC_BIT_COPY_GRANULARITY == 64);
   assert(bits > 0 && bits <= FPC_BIT_COPY_GRANULARITY);
@@ -467,6 +498,13 @@ int FPC_unpack_bits_bmi(uint64_t *dest, void *_src, int src_offset, int bits) {
     *dest |= (bit_extract64(src[src_word_index + 1], 0, delta) << src_remains);
   }
   return src_offset + bits;
+}
+
+#endif
+
+// Use immediate number (numeric literals) instead of the source
+inline static int FPC_pack_bits_imm(void *dest, int dest_offset, uint64_t src, int bits) {
+  return FPC_pack_bits(dest, dest_offset, &src, bits);
 }
 
 // Returns compressed size in bits
@@ -493,8 +531,8 @@ int FPC_comp(void *out_buf, void *_in_buf) {
       if(zero_count == 7 || (i == iter - 1) || (in_buf[i + 1] != 0)) {
         type = 0UL;
         data = (uint64_t)zero_count;
-        offset = FPC_pack_bits_bmi(out_buf, offset, &type, 3);
-        offset = FPC_pack_bits_bmi(out_buf, offset, &data, 3);
+        offset = FPC_pack_bits(out_buf, offset, &type, 3);
+        offset = FPC_pack_bits(out_buf, offset, &data, 3);
         zero_count = 0; // Not necessary but let it be for readability
         state = FPC_STATE_NORMAL;
       }
@@ -526,8 +564,8 @@ int FPC_comp(void *out_buf, void *_in_buf) {
     }
     // Always write 3 bit type and some data according to the lookup table
     assert(type < 8);
-    offset = FPC_pack_bits_bmi(out_buf, offset, &type, 3);
-    offset = FPC_pack_bits_bmi(out_buf, offset, &data, FPC_data_bits[type]);
+    offset = FPC_pack_bits(out_buf, offset, &type, 3);
+    offset = FPC_pack_bits(out_buf, offset, &data, FPC_data_bits[type]);
   }
   return offset;
 }
@@ -601,9 +639,9 @@ void FPC_decomp(void *_out_buf, void *in_buf) {
   while(count < iter) {
     uint64_t type, _data;
     uint32_t data;
-    offset = FPC_unpack_bits_bmi(&type, in_buf, offset, 3);
+    offset = FPC_unpack_bits(&type, in_buf, offset, 3);
     assert(type < 8UL);
-    offset = FPC_unpack_bits_bmi(&_data, in_buf, offset, FPC_data_bits[type]);
+    offset = FPC_unpack_bits(&_data, in_buf, offset, FPC_data_bits[type]);
     data = (uint32_t)_data; // Avoid type cast below
     switch(type) {
       case 0: for(int i = 0;i < (int)data;i++) out_buf[count++] = 0; break;
@@ -664,9 +702,9 @@ void FPC_print_compressed(void *in_buf) {
   while(count < iter) {
     uint64_t type, _data;
     uint32_t data;
-    offset = FPC_unpack_bits_bmi(&type, in_buf, offset, 3);
+    offset = FPC_unpack_bits(&type, in_buf, offset, 3);
     assert(type < 8UL);
-    offset = FPC_unpack_bits_bmi(&_data, in_buf, offset, FPC_data_bits[type]);
+    offset = FPC_unpack_bits(&_data, in_buf, offset, FPC_data_bits[type]);
     data = (uint32_t)_data; // Avoid type cast below
     data_bits += FPC_data_bits[type];
     total_bits += (FPC_data_bits[type] + 3);
@@ -716,14 +754,20 @@ void FPC_print_compressed(void *in_buf) {
 
 //* CPACK
 
-int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output) {
+const char *CPACK_type_names[6] = {
+  "zzzz", "zzzx", "mmmm", "mmmx", "mmxx", "xxxx",
+};
+
+int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output, CPACK_type_stat_t *type_stat) {
   if(word == 0) {
     // Case zzzz, code 2'b00
     *output = 0;
+    type_stat->zzzz++;
     return 2;
   } else if((word & 0xFFFFFF00) == 0) {
     // Case zzzx, code 4'0111 + lowest byte
     *output = (((uint64_t)word & 0xFFUL) << 4) | 0x7UL;
+    type_stat->zzzx++;
     return 12;
   }
   assert(dict->count >= 0 && dict->count <= CPACK_DICT_COUNT);
@@ -735,6 +779,7 @@ int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output) {
       // case mmmm, code 2'b10 + 4-bit index
       // Special case: This is always the min, so we can return immediately
       *output = ((uint64_t)i << 2) | 0x2UL;
+      type_stat->mmmm++;
       return 6;
     } else if((data & 0xFFFFFF00) == (word & 0xFFFFFF00)) {
       // case mmmx, code 4'1011 + 4-bit index + 1-byte low
@@ -751,10 +796,16 @@ int CPACK_search(CPACK_dict_t *dict, uint32_t word, uint64_t *output) {
     }
   }
   if(min_bits != 32) {
+    if(min_bits == 16) {
+      type_stat->mmmx++;
+    } else if(min_bits == 24) {
+      type_stat->mmxx++;
+    }
     return min_bits;
   }
   // Case xxxx, code 2'b01 + 4 byte
   *output = ((uint64_t)word << 2) | 0x1UL;
+  type_stat->xxxx++;
   return 34;
 }
 
@@ -763,13 +814,15 @@ int CPACK_comp(void *out_buf, void *_in_buf) {
   int bits = 0;
   CPACK_dict_t dict;
   CPACK_dict_invalidate(&dict);
+  CPACK_type_stat_t dummy_stat; // Will not be used
+  memset(&dummy_stat, 0x00, sizeof(CPACK_type_stat_t));
   for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output;
     // Find a match
     uint32_t word = *in_buf;
-    int ret = CPACK_search(&dict, word, &output);
+    int ret = CPACK_search(&dict, word, &output, &dummy_stat);
     //printf("ret %d\n", ret);
-    FPC_pack_bits_bmi(out_buf, bits, &output, ret);
+    FPC_pack_bits(out_buf, bits, &output, ret);
     bits += ret;
     // Insert the word into the dictionary, if word fails zero pattern matching
     // Hack: If it fails the encoded length is 2 or 12
@@ -793,7 +846,7 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
     // This is cleared if the recovered word is zero matched
     int need_insert = 1;
     // 34 bits is the maximum compressed size of a word
-    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    FPC_unpack_bits(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; break;
       case 1: bits += 34; word = (uint32_t)(output >> 2); break;
@@ -831,7 +884,7 @@ void CPACK_decomp(void *_out_buf, void *in_buf) {
   return;
 }
 
-int CPACK_get_comp_size_bits(void *_in_buf) {
+int _CPACK_get_comp_size_bits(void *_in_buf, CPACK_type_stat_t *type_stat) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
   CPACK_dict_t dict;
@@ -839,7 +892,7 @@ int CPACK_get_comp_size_bits(void *_in_buf) {
   for(int i = 0;i < CPACK_WORD_COUNT;i++) {
     uint64_t output;
     uint32_t word = *in_buf;
-    int ret = CPACK_search(&dict, word, &output);
+    int ret = CPACK_search(&dict, word, &output, type_stat);
     (void)output;
     bits += ret;
     if(ret != 2 && ret != 12) {
@@ -859,7 +912,7 @@ void CPACK_print_compressed(void *in_buf) {
     uint32_t word;
     int need_insert = 1;
     int code;
-    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    FPC_unpack_bits(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
       case 1: bits += 34; word = (uint32_t)(output >> 2); code = 1; break;
@@ -1107,7 +1160,7 @@ int __MBD_comp(void *out_buf, void *_in_buf, int size, MBD_dict_t *dict) {
     uint32_t word = *in_buf;
     int ret = MBD_search(dict, word, &output);
     //printf("ret %d\n", ret);
-    FPC_pack_bits_bmi(out_buf, bits, &output, ret);
+    FPC_pack_bits(out_buf, bits, &output, ret);
     bits += ret;
     // Return value 2 means that it is zero
     if(ret != 2) {
@@ -1133,7 +1186,7 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
     // This is cleared if the recovered word is zero matched
     int need_insert = 1;
     // 34 bits is the maximum compressed size of a word
-    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    FPC_unpack_bits(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; break;
       case 1: {
@@ -1192,6 +1245,7 @@ void _MBD_decomp(void *_out_buf, void *in_buf, int size) {
 // This function processes a block consisting of 32-bit words. Input size must be aligned
 // This function allows passing a customized dictionary object, which can be used as a pre-filled
 // dict or for collecting stats
+// zero_count counts the number of zeros in the input stream; ignored if NULL
 int __MBD_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict) {
   uint32_t *in_buf = (uint32_t *)_in_buf;
   int bits = 0;
@@ -1204,8 +1258,8 @@ int __MBD_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict) {
     int ret = MBD_search(dict, word, &output);
     (void)output;
     bits += ret;
-    // Return value 2 means that it is zero
     if(ret != 2) {
+      // Do not insert zero into the dict (ret == 2 indicating zero)
       MBD_dict_insert(dict, word);
     }
     in_buf++;
@@ -1226,7 +1280,7 @@ void _MBD_print_compressed(void *in_buf, int size) {
     // This is cleared if the recovered word is zero matched
     int need_insert = 1;
     // 34 bits is the maximum compressed size of a word
-    FPC_unpack_bits_bmi(&output, in_buf, bits, 34);
+    FPC_unpack_bits(&output, in_buf, bits, 34);
     switch((int)output & 0x3) {
       case 0: bits += 2; word = 0; need_insert = 0; code = 0; break;
       case 1: {
@@ -1786,24 +1840,26 @@ const char *ocache_shape_names[4] = {
   "None", "4_1", "1_4", "2_2",
 };
 
-const char *ocache_MBD_type_names[3] = {
-  "MBDv0", "MBDv2", "MBDv4",
+const char *ocache_MBD_type_names[4] = {
+  "MBDv0", "MBDv2", "MBDv4", "MBD_Thesaurus",
 };
 
-ocache_t *ocache_init(int size, int way_count) {
+ocache_t *ocache_init(int size, int data_way_count, int tag_way_count) {
   // First allocate the cache control part, and then slots using realloc
   ocache_t *ocache = (ocache_t *)malloc(sizeof(ocache_t));
   SYSEXPECT(ocache != NULL);
+  // This also clears stats
   memset(ocache, 0x00, sizeof(ocache_t));
   // Report error if args are invalid; Call this before using arguments
-  ocache_init_param(ocache, size, way_count);
-  int alloc_size = sizeof(ocache_t) + sizeof(ocache_entry_t) * ocache->line_count;
+  ocache_init_param(ocache, size, data_way_count, tag_way_count);
+  // Use tag line count
+  int alloc_size = sizeof(ocache_t) + sizeof(ocache_entry_t) * ocache->tag_line_count;
   // The control part is preserved
   ocache = (ocache_t *)realloc(ocache, alloc_size);
   SYSEXPECT(ocache != NULL);
   // All LRU and state bits will be set to zero
-  memset(ocache->data, 0x00, sizeof(ocache_entry_t) * ocache->line_count);
-  for(int i = 0;i < ocache->line_count;i++) {
+  memset(ocache->data, 0x00, sizeof(ocache_entry_t) * ocache->tag_line_count);
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     ocache_entry_inv(&ocache->data[i]);
   }
   ocache->level = OCACHE_LEVEL_NONE;
@@ -1833,23 +1889,31 @@ void ocache_free(ocache_t *ocache) {
 // other params are automatically derived
 // Latency is configured elsewhere
 // This function sets:
-//   size, line_count, way_count, set_count, size_bits, indices[]
-void ocache_init_param(ocache_t *ocache, int size, int way_count) {
-  if(size <= 0 || way_count < 1) {
-    error_exit("Illegal size/way combination: %d/%d\n", size, way_count);
+//   size, line_count, data_way_count, tag_way_count, set_count, size_bits, indices[]
+void ocache_init_param(ocache_t *ocache, int size, int data_way_count, int tag_way_count) {
+  if(size <= 0 || data_way_count < 1 || tag_way_count < 1) {
+    error_exit("Illegal size/data way/tag way combination: %d/%d/%d\n", 
+      size, data_way_count, tag_way_count);
   }
   ocache->size = size;
-  ocache->way_count = way_count;
-  ocache->set_size = (int)UTIL_CACHE_LINE_SIZE * way_count; // Number of bytes in a set's storage
+  ocache->data_way_count = data_way_count;
+  ocache->tag_way_count = tag_way_count;
+  // Number of bytes in a set's storage, use data way count
+  // This is implicitly for data, not for set, since it is in bytes
+  ocache->set_size = (int)UTIL_CACHE_LINE_SIZE * data_way_count; 
   if(size % UTIL_CACHE_LINE_SIZE != 0) {
     error_exit("Size must be a multiple of %d (see %lu)\n", size, UTIL_CACHE_LINE_SIZE);
   }
-  ocache->line_count = size / UTIL_CACHE_LINE_SIZE;
-  if(ocache->line_count % ocache->way_count != 0) {
-    error_exit("Cache line count must be a multiple of ways (%d %% %d == 0)\n",
-      ocache->line_count, ocache->way_count);
+  ocache->data_line_count = size / UTIL_CACHE_LINE_SIZE;
+  // This computes data store size, so use data way count
+  if(ocache->data_line_count % ocache->data_way_count != 0) {
+    error_exit("Cache line count must be a multiple of data ways (%d %% %d == 0)\n",
+      ocache->data_line_count, ocache->data_way_count);
   }
-  ocache->set_count = ocache->line_count / ocache->way_count;
+  // Same, line count is derived from data way count, so use the same
+  // This is the same for data and tag, so only one variable
+  ocache->set_count = ocache->data_line_count / ocache->data_way_count;
+  ocache->tag_line_count = ocache->set_count * tag_way_count;
   if(popcount_int32(ocache->set_count) != 1) {
     error_exit("The number of sets must be a power of two (see %d)\n", ocache->set_count);
   }
@@ -1927,25 +1991,41 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
   }
   if(streq(name, "BDI") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_cb);
+    ocache->access_hit_cb = ocache_access_hit_BDI_cb;
   } else if(streq(name, "BDI_third_party") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_BDI_third_party_cb);
+    ocache->access_hit_cb = ocache_access_hit_BDI_cb;
   } else if(streq(name, "FPC") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_cb);
+    ocache->access_hit_cb = ocache_access_hit_FPC_cb;
   } else if(streq(name, "FPC_third_party") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_FPC_third_party_cb);
+    ocache->access_hit_cb = ocache_access_hit_FPC_cb;
   } else if(streq(name, "CPACK") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_CPACK_cb);
+    ocache->access_hit_cb = ocache_access_hit_CPACK_cb;
   } else if(streq(name, "MBD") == 1 || streq(name, "MBDv0") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->access_hit_cb = ocache_access_hit_MBD_cb;
     ocache->MBD_type = OCACHE_MBD_V0;
   } else if(streq(name, "MBDv2") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->access_hit_cb = ocache_access_hit_MBD_cb;
     ocache->MBD_type = OCACHE_MBD_V2;
   } else if(streq(name, "MBDv4") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->access_hit_cb = ocache_access_hit_MBD_cb;
     ocache->MBD_type = OCACHE_MBD_V4;
+  } else if(streq(name, "MBD_Thesaurus") == 1) {
+#ifndef THESAURUS_LSH
+    error_exit("Macro THESAURUS_LSH is not defined, Thesaurus is disabled\n");
+#endif
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
+    ocache->access_hit_cb = ocache_access_hit_MBD_cb;
+    ocache->MBD_type = OCACHE_MBD_Thesaurus;
   } else if(streq(name, "None") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
+    ocache->access_hit_cb = ocache_access_hit_None_cb;
   } else {
     error_exit("Unknown ocache compression type: \"%s\"\n", name);
   }
@@ -2096,8 +2176,9 @@ ocache_entry_t *ocache_get_set_begin(ocache_t *ocache, uint64_t oid, uint64_t ad
   assert((addr & (UTIL_CACHE_LINE_SIZE - 1)) == 0UL);
   int index = ocache_get_set_index(ocache, oid, addr, shape);
   assert(index >= 0 && index < ocache->set_count);
-  ocache_entry_t *entry = ocache->data + ocache->way_count * index;
-  assert(entry >= ocache->data && entry < ocache->data + ocache->line_count);
+  // Use tag way count since we iterate over tags
+  ocache_entry_t *entry = ocache->data + ocache->tag_way_count * index;
+  assert(entry >= ocache->data && entry < ocache->data + ocache->tag_line_count);
   return entry;
 }
 
@@ -2132,9 +2213,10 @@ int ocache_get_sb_index(ocache_t *ocache, ocache_entry_t *entry, uint64_t oid, u
       }
     } break;
     default: {
+      // Use tag way count since this is tag offset
       printf("entry ptr %p offset (index) %d OID 0x%lX addr 0x%lX set %d\n", 
         entry, (int)(entry - ocache->data), oid, addr, 
-        (int)(entry - ocache->data) / ocache->way_count);
+        (int)(entry - ocache->data) / ocache->tag_way_count);
       assert(0);
       error_exit("Invalid super block shape: %d\n", entry->shape);
     } break;
@@ -2242,7 +2324,8 @@ void _ocache_lookup(
   uint64_t lru_min = -1UL;
   ocache_entry_t *lru_entry = NULL;
   ocache_entry_t *entry = ocache_get_set_begin(ocache, oid, addr, shape);
-  for(int i = 0;i < ocache->way_count;i++) {
+  // Use tag way count
+  for(int i = 0;i < ocache->tag_way_count;i++) {
     if(entry->shape == OCACHE_SHAPE_NONE) {
       // Case 1: Normal hit on an uncompressed line
       if(entry->oid == oid && entry->addr == addr && ocache_entry_is_valid(entry, 0)) {
@@ -2423,7 +2506,7 @@ int ocache_get_compressed_size_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t
   if(entry == NULL) {
     error_exit("Entry for CPACK compression is not found\n");
   }
-  int bits = CPACK_get_comp_size_bits(entry->data);
+  int bits = _CPACK_get_comp_size_bits(entry->data, &ocache->CPACK_type_stat);
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     ocache->CPACK_fail_count++;
     ocache->CPACK_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
@@ -2455,12 +2538,23 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
     base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
   } else if(ocache->MBD_type == OCACHE_MBD_V2) {
     base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+  } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+    assert(oid == 0UL);
+    uint32_t lsh = Thesaurus_hash_data((int32_t *)entry->data);
+    assert(lsh < (sizeof(Thesaurus_base_table) / sizeof(void *)));
+    // If there is already an entry, then use it; Otherwise ignore this and just perform normal compression
+    if(Thesaurus_base_table[lsh] != NULL) {
+      base_addr = Thesaurus_base_table[lsh]->addr;
+    }
+    Thesaurus_base_table[lsh] = entry; // Evict on every compression attempt to keep it "fresh"
   }
-  // For MBDv0 this is never executed
+  // For MBDv0 this branch is never executed
   if(base_addr != addr) {
     dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
     if(base_entry != NULL) {
-      __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict);
+      __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict); // Ignore zero count in base
+      // Invalidate stat, but keep the content
+      MBD_dict_invalidate_stat(&dict);
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
         ocache->MBD_insert_base_miss++;
         // Access bcache if it is initialized
@@ -2484,12 +2578,21 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->MBD_zero_count += dict.zero_count;
   ocache->MBD_uncomp_count += dict.uncomp_count;
   ocache->MBD_match_count += dict.match_count;
-  ocache->MBD_dict_insert_count += dict.insert_count;
-  ocache->MBD_dict_insert_dup_count += dict.insert_dup_count;
   ocache->MBD_delta_size_dist[0] += dict.delta_size_dist[0];
   ocache->MBD_delta_size_dist[1] += dict.delta_size_dist[1];
   ocache->MBD_delta_size_dist[2] += dict.delta_size_dist[2];
   ocache->MBD_delta_size_dist[3] += dict.delta_size_dist[3];
+  ocache->MBD_dict_insert_count += dict.insert_count;
+  ocache->MBD_dict_insert_dup_count += dict.insert_dup_count;
+  // Number of bit diff from original MBD line
+  // 16 -> zero mask bits; dict.zero_count * 2 -> bits of zero code word
+  // This can be negative
+  int bits_delta = 16 - (dict.zero_count * 2);
+  ocache->MBD_bits_delta_sum += (int64_t)bits_delta;
+  bits += bits_delta;
+  // 2-byte zero mask - OK this is a simplification; Without mask we may have slightly more lines
+  // that can succeed here. But these lines will be 62 and 63 byte lines, which barely give anything
+  // So we just ignore these lines
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     ocache->MBD_fail_count++;
     ocache->MBD_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
@@ -2503,41 +2606,6 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
   ocache->MBD_size_counts[(bytes - 1) / 8]++;
   return bytes;
-}
-
-// This function is called by cc_simple_access() when an access hits an LLC line
-// This function checks whether the base line is present in the LLC
-void ocache_llc_read_hit_MBD(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
-  uint64_t base_addr = addr;
-  if(ocache->MBD_type == OCACHE_MBD_V4) {
-    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
-  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
-    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
-  }
-  // For MBDv0 this is never executed
-  if(base_addr != addr) {
-    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
-    if(base_entry != NULL) {
-      if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
-        ocache->MBD_read_base_is_missing++;
-        if(ocache->bcache != NULL) {
-          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
-          if(bcache_hit == 1) {
-            ocache->MBD_read_bcache_hit++;
-          } else {
-            ocache->MBD_read_bcache_miss++;
-          } 
-        }
-      } else {
-        ocache->MBD_read_base_is_present++;
-      }
-    }
-  } else {
-    // Just accessing the base itself
-    ocache->MBD_read_base_is_present++;
-  }
-  (void)shape;
-  return;
 }
 
 // This function implements vertical compression policy
@@ -2661,6 +2729,81 @@ int ocache_get_compressed_size_BDI_third_party_cb(ocache_t *ocache, uint64_t oid
   ocache->BDI_after_size_sum += comp_size;
   ocache->BDI_size_counts[(comp_size - 1) / 8]++;
   return comp_size;
+}
+
+uint64_t ocache_access_hit_BDI_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  return OCACHE_BDI_DECOMP_LATENCY;
+}
+
+uint64_t ocache_access_hit_FPC_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  return OCACHE_FPC_DECOMP_LATENCY;
+}
+
+uint64_t ocache_access_hit_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  return OCACHE_CPACK_DECOMP_LATENCY;
+}
+
+// This function is called by coherence controllers when an access hits an LLC line
+// This function checks whether the base line is present in the LLC
+// Returns extra cycles the read will incur
+uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  uint64_t base_addr = addr;
+  if(ocache->MBD_type == OCACHE_MBD_V4) {
+    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
+  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
+    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+  } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+    assert(oid == 0UL);
+  }
+  // For MBDv0 and Thesaurus this is never executed
+  if(base_addr != addr) {
+    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
+    if(base_entry != NULL) {
+      if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
+        ocache->MBD_read_base_is_missing++;
+        if(ocache->bcache != NULL) {
+          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
+          if(bcache_hit == 1) {
+            ocache->MBD_read_bcache_hit++;
+          } else {
+            ocache->MBD_read_bcache_miss++;
+          } 
+        }
+      } else {
+        ocache->MBD_read_base_is_present++;
+      }
+    }
+  } else {
+    // Just accessing the base itself
+    ocache->MBD_read_base_is_present++;
+  }
+  (void)shape;
+  // Get data
+  dmap_entry_t *dmap_entry = dmap_find(ocache->dmap, oid, addr);
+  // Count number of zeros to determine cycles
+  ocache->MBD_decomp_count++;
+  int zero_count = 0;
+  for(int i = 0;i < 16;i++) {
+    uint32_t word = ((uint32_t *)dmap_entry->data)[i];
+    zero_count += (word == 0);
+  }
+  ocache->MBD_decomp_zero_count += zero_count;
+  // Base is 8 cycles
+  uint64_t cycles = (uint64_t)((16 - zero_count + 1) / 2);
+  // Lower bound 2 cycles
+  if(cycles < 2) {
+    cycles = 2;
+  }
+  ocache->MBD_decomp_cycle_sum += cycles;
+  return cycles;
+}
+
+uint64_t ocache_access_hit_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  return 0;
 }
 
 // Helper function called by ocache_insert() 
@@ -2900,7 +3043,8 @@ static void ocache_insert_helper_evict_valid_lru(
     ocache_entry_t *valid_lru_entry = NULL; // Must be a valid entry having the smallest LRU
     uint64_t min_lru = -1UL;
     ocache_entry_t *entry = ocache_get_set_begin(ocache, oid, addr, shape);
-    for(int i = 0;i < ocache->way_count;i++) {
+    // Use tag way count
+    for(int i = 0;i < ocache->tag_way_count;i++) {
       if(ocache_entry_is_all_invalid(entry) == 0) {
         assert(entry->lru != 0UL);
         if(entry->lru < min_lru) {
@@ -3293,10 +3437,10 @@ ocache_entry_t *ocache_get_mru(ocache_t *ocache, int set_index) {
   if(set_index < 0 || set_index >= ocache->set_count) {
     error_exit("Invalid set_index: %d\n", set_index);
   }
-  ocache_entry_t *entry = ocache->data + set_index * ocache->way_count;
+  ocache_entry_t *entry = ocache->data + set_index * ocache->tag_way_count;
   ocache_entry_t *max_entry = entry;
   uint64_t max_lru = entry->lru;
-  for(int i = 0;i < ocache->way_count;i++) {
+  for(int i = 0;i < ocache->tag_way_count;i++) {
     if(entry->lru > max_lru) {
       max_lru = entry->lru;
       max_entry = entry;
@@ -3311,7 +3455,7 @@ ocache_entry_t *ocache_get_mru_global(ocache_t *ocache) {
   ocache_entry_t *entry = ocache->data;
   ocache_entry_t *max_entry = entry;
   uint64_t max_lru = entry->lru;
-  for(int i = 0;i < ocache->line_count;i++) {
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     if(entry->lru > max_lru) {
       max_lru = entry->lru;
       max_entry = entry;
@@ -3323,7 +3467,7 @@ ocache_entry_t *ocache_get_mru_global(ocache_t *ocache) {
 
 void ocache_reset(ocache_t *ocache) {
   // Invalidate lines
-  for(int i = 0;i < ocache->line_count;i++) {
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     ocache_entry_inv(ocache->data + i);
   }
   // Byte size since the type is uint8_t
@@ -3342,6 +3486,8 @@ void ocache_refresh_stat(ocache_t *ocache) {
   ocache->sb_logical_line_count = 0UL;
   ocache->sb_logical_line_size_sum = 0UL;
   ocache->sb_aligned_logical_line_size_sum = 0UL;
+  ocache->base_missing_sb_count = 0UL;
+  ocache->base_found_sb_count = 0UL;
   ocache->no_shape_line_count = 0UL;
   ocache->sb_4_1_count = 0UL;
   ocache->sb_1_4_count = 0UL;
@@ -3349,7 +3495,7 @@ void ocache_refresh_stat(ocache_t *ocache) {
   memset(ocache->size_histogram, 0x00, sizeof(ocache->size_histogram));
   memset(ocache->sb_logical_line_count_dist, 0x00, sizeof(ocache->sb_logical_line_count_dist));
   //
-  for(int i = 0;i < ocache->line_count;i++) {
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     // Only do it when the line is valid
     if(ocache_entry_is_all_invalid(entry) == 0) {
       if(entry->shape == OCACHE_SHAPE_NONE) {
@@ -3362,6 +3508,11 @@ void ocache_refresh_stat(ocache_t *ocache) {
         ocache->logical_line_count += lines; // Multiple logical lines per slot
         ocache->sb_slot_count++;
         ocache->sb_logical_line_count += lines;
+        if(ocache_entry_is_valid(entry, 0) == 1) {
+          ocache->base_found_sb_count++;
+        } else {
+          ocache->base_missing_sb_count++;
+        }
         assert(lines >= 1 && lines <= 4);
         // Subtract by one to make to [0, 3]
         ocache->sb_logical_line_count_dist[lines - 1]++;
@@ -3404,6 +3555,8 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
   snapshot->sb_logical_line_count = ocache->sb_logical_line_count;
   snapshot->sb_logical_line_size_sum = ocache->sb_logical_line_size_sum;
   snapshot->sb_aligned_logical_line_size_sum = ocache->sb_aligned_logical_line_size_sum;
+  snapshot->base_missing_sb_count = ocache->base_missing_sb_count;
+  snapshot->base_found_sb_count = ocache->base_found_sb_count;
   snapshot->no_shape_line_count = ocache->no_shape_line_count;
   snapshot->sb_4_1_count = ocache->sb_4_1_count;
   snapshot->sb_1_4_count = ocache->sb_1_4_count;
@@ -3419,19 +3572,19 @@ void ocache_append_stat_snapshot(ocache_t *ocache) {
 // Saves snapshots into a text file
 // The format is as follows:
 // Each entry of the snapshot is one line, comma separated list
-// Fields are: 
-//   logical_line_count, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, 
-//   sb_aligned_logical_line_size_sum
-//   sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count
-//   1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64
 // This function does not create or write any file if there is no snapshot
 void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
   FILE *fp = fopen(filename, "w");
   SYSEXPECT(fp != NULL);
-  fprintf(fp, "logical_line_count, effective_size, sb_slot_count, sb_logical_line_count, sb_logical_line_size_sum, "
+  fprintf(fp, "logical_line_count, "
+              "effective_size, "
+              "sb_slot_count, sb_logical_line_count, "
+              "sb_logical_line_size_sum, "
               "data_occupancy (unaligned), "
               "sb_aligned_logical_line_size_sum, "
               "data_occupancy (aligned), "
+              "base_missing_sb_count, base_found_sb_count, "
+              "base_missing_ratio, "
               "sb_4_1_count, sb_1_4_count, sb_2_2_count, no_shape_line_count, "
               // Size distribution
               "1-8, 9-16, 17-24, 25-32, 33-40, 41-48, 49-56, 57-64, "
@@ -3439,21 +3592,25 @@ void ocache_save_stat_snapshot(ocache_t *ocache, const char *filename) {
               "singleton, pair, trio, quad\n");
   ocache_stat_snapshot_t *snapshot = ocache->stat_snapshot_head;
   while(snapshot != NULL) {
-    fprintf(fp, "%lu, "
-                "%.2lf, "
-                "%lu, %lu, "
-                "%lu, "
-                "%.2lf, "
-                "%lu, "
-                "%.2lf, "
-                "%lu, %lu, %lu, %lu",
+    fprintf(fp, "%lu, "    // logical line count
+                "%.2lf, "  // Effective size
+                "%lu, %lu, " // sb slot count, sb line count
+                "%lu, "    // Unaligned line size sum
+                "%.2lf, "  // Unaligned occupancy
+                "%lu, "    // Aligned line size sum
+                "%.2lf, "  // Aligned occupancy
+                "%lu, %lu, " // Base missing/found count
+                "%.2lf, "  // Base missing ratio
+                "%lu, %lu, %lu, %lu", // sb type count
       snapshot->logical_line_count, 
-      (double)snapshot->logical_line_count / (double)ocache->line_count,
+      (double)snapshot->logical_line_count / (double)ocache->data_line_count, // Use data line count here for uncomp
       snapshot->sb_slot_count, snapshot->sb_logical_line_count,
       snapshot->sb_logical_line_size_sum,
-      100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
+      100.0 * (double)snapshot->sb_logical_line_size_sum / ((double)ocache->data_line_count * UTIL_CACHE_LINE_SIZE),
       snapshot->sb_aligned_logical_line_size_sum,
-      100.0 * (double)ocache->sb_aligned_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
+      100.0 * (double)snapshot->sb_aligned_logical_line_size_sum / ((double)ocache->data_line_count * UTIL_CACHE_LINE_SIZE),
+      snapshot->base_missing_sb_count, snapshot->base_found_sb_count, 
+      100.0 * (double)snapshot->base_missing_sb_count / (double)snapshot->sb_slot_count,
       snapshot->sb_4_1_count, snapshot->sb_1_4_count, snapshot->sb_2_2_count, snapshot->no_shape_line_count);
     // Then print histogram elements, note that we prepend a comma before the number
     for(int i = 0;i < 8;i++) {
@@ -3479,7 +3636,7 @@ int ocache_inv_range(ocache_t *ocache, uint64_t addr_lo, uint64_t addr_hi) {
   }
   ocache_entry_t *curr = ocache->data;
   int count = 0;
-  for(int i = 0;i < ocache->line_count;i++) {
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     // Only check address if the entry has at least one valid entry
     // Note that since super block addresses are all aligned to block size,
     // if the base address is in the range, the entire block must also be in the range
@@ -3500,7 +3657,7 @@ int ocache_inv_range(ocache_t *ocache, uint64_t addr_lo, uint64_t addr_hi) {
 int ocache_inv_all(ocache_t *ocache) {
   ocache_entry_t *curr = ocache->data;
   int count = 0;
-  for(int i = 0;i < ocache->line_count;i++) {
+  for(int i = 0;i < ocache->tag_line_count;i++) {
     if(ocache_entry_is_all_invalid(curr) == 0) {
       ocache_entry_inv(curr);
       count++;
@@ -3538,7 +3695,7 @@ int ocache_get_line_size(ocache_t *ocache, uint64_t oid, uint64_t addr, int shap
 int ocache_get_valid_tag_count(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
   int count = 0;
   ocache_entry_t *curr = ocache_get_set_begin(ocache, oid, addr, shape);
-  for(int i = 0;i < ocache->way_count;i++) {
+  for(int i = 0;i < ocache->tag_way_count;i++) {
     if(ocache_entry_is_all_invalid(curr) == 0) {
       count++;
     }
@@ -3548,10 +3705,10 @@ int ocache_get_valid_tag_count(ocache_t *ocache, uint64_t oid, uint64_t addr, in
 }
 
 void ocache_set_print(ocache_t *ocache, int set) {
-  ocache_entry_t *curr = ocache->data + set * ocache->way_count;
+  ocache_entry_t *curr = ocache->data + set * ocache->tag_way_count;
   printf("---------- level %d name %s set %d ----------\n", 
     ocache->level, ocache->name ? ocache->name : "N/A", set);
-  for(int i = 0;i < ocache->way_count;i++) {
+  for(int i = 0;i < ocache->tag_way_count;i++) {
     if(ocache_entry_is_all_invalid(curr) == 1) {
       assert(curr->lru == 0);
       curr++; // There was a bug...
@@ -3581,9 +3738,15 @@ void ocache_set_print(ocache_t *ocache, int set) {
 
 void ocache_conf_print(ocache_t *ocache) {
   printf("---------- ocache_t conf ----------\n");
-  printf("name \"%s\" level %d size %d bytes lines %d sets %d ways %d set size %d bytes\n", 
-    ocache->name ? ocache->name : "[No Name]", ocache->level, ocache->size, ocache->line_count, 
-    ocache->set_count, ocache->way_count, ocache->set_size);
+  printf("name \"%s\" level %d size %d bytes "
+         "data lines %d tag lines %d "
+         "sets %d "
+         "data ways %d tag ways %d set size %d bytes\n", 
+    ocache->name ? ocache->name : "[No Name]", ocache->level, ocache->size, 
+    ocache->data_line_count, ocache->tag_line_count,
+    ocache->set_count, 
+    ocache->data_way_count, ocache->tag_way_count, 
+    ocache->set_size);
   printf("use_shape %d dmap %p line size %lu\n", ocache->use_shape, ocache->dmap, UTIL_CACHE_LINE_SIZE);
   for(int i = 0;i < OCACHE_SHAPE_COUNT;i++) {
     printf("name \"%s\" addr {mask 0x%lX shift %d} OID {mask 0x%lX shift %d}\n", 
@@ -3737,6 +3900,17 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum,
       100.0 * (ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->CPACK_uncomp_size_sum + ocache->CPACK_after_size_sum));
+    printf("CPACK types ");
+    uint64_t CPACK_type_total = 0UL;
+    for(int i = 0;i < 6;i++) {
+      CPACK_type_total += ocache->CPACK_type_stat.type_counts[i];
+    }
+    for(int i = 0;i < 6;i++) {
+      printf("[%s] %lu (%.2lf%%) ", 
+        CPACK_type_names[i], ocache->CPACK_type_stat.type_counts[i],
+        100.0 * (double)ocache->CPACK_type_stat.type_counts[i] / (double)CPACK_type_total);
+    }
+    putchar('\n');
     printf("CPACK size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->CPACK_size_counts[i]);
@@ -3762,6 +3936,14 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->comp_attempt_size_sum, ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum,
       100.0 * (ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum) / (double)ocache->comp_attempt_size_sum,
       (double)ocache->comp_attempt_size_sum / (double)(ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum));
+    printf("MBD decomp %lu cycles %lu (avg %.2lf) zeros %lu (avg %.2lf) zero hits %lu (%.2lf%%)\n",
+      ocache->MBD_decomp_count, 
+      ocache->MBD_decomp_cycle_sum, (double)ocache->MBD_decomp_cycle_sum / (double)ocache->MBD_decomp_count,
+      ocache->MBD_decomp_zero_count, (double)ocache->MBD_decomp_zero_count / (double)ocache->MBD_decomp_count,
+      ocache->MBD_decomp_hit_zero_count, 100.0 * (double)ocache->MBD_decomp_hit_zero_count / (double)ocache->MBD_decomp_count);
+    printf("MBD zero opt bits delta %ld (avg %.2lf)\n", 
+      ocache->MBD_bits_delta_sum,
+      (double)ocache->MBD_bits_delta_sum / (double)ocache->comp_attempt_count);
     printf("MBD insert base hit %lu missing %lu (base hit percentage %.2lf%%)\n",
       ocache->MBD_insert_base_hit, ocache->MBD_insert_base_miss,
       100.0 * ocache->MBD_insert_base_hit / 
@@ -3821,6 +4003,8 @@ void ocache_stat_print(ocache_t *ocache) {
     ocache->sb_logical_line_count += curr->sb_logical_line_count;
     ocache->sb_logical_line_size_sum += curr->sb_logical_line_size_sum;
     ocache->sb_aligned_logical_line_size_sum += curr->sb_aligned_logical_line_size_sum;
+    ocache->base_missing_sb_count += curr->base_missing_sb_count;
+    ocache->base_found_sb_count += curr->base_found_sb_count;
     ocache->sb_4_1_count += curr->sb_4_1_count;
     ocache->sb_1_4_count += curr->sb_1_4_count;
     ocache->sb_2_2_count += curr->sb_2_2_count;
@@ -3840,6 +4024,8 @@ void ocache_stat_print(ocache_t *ocache) {
   ocache->sb_logical_line_count /= stat_snapshot_count;
   ocache->sb_logical_line_size_sum /= stat_snapshot_count;
   ocache->sb_aligned_logical_line_size_sum /= stat_snapshot_count;
+  ocache->base_missing_sb_count /= stat_snapshot_count;
+  ocache->base_found_sb_count /= stat_snapshot_count;
   ocache->sb_4_1_count /= stat_snapshot_count;
   ocache->sb_1_4_count /= stat_snapshot_count;
   ocache->sb_2_2_count /= stat_snapshot_count;
@@ -3854,13 +4040,18 @@ void ocache_stat_print(ocache_t *ocache) {
   printf("Logical lines %lu (%.2lfx uncomp) sb %lu sb logical lines %lu (avg. %.2lf lines per sb)"
          " sb line size %lu (data occupancy %.2lf%%) aligned sb line size %lu (aligned data occupancy %.2lf%%)\n",
     ocache->logical_line_count, 
-    (double)ocache->logical_line_count / (double)ocache->line_count,
+    (double)ocache->logical_line_count / (double)ocache->data_line_count,
     ocache->sb_slot_count, ocache->sb_logical_line_count,
     (double)ocache->sb_logical_line_count / (double)ocache->sb_slot_count,
     ocache->sb_logical_line_size_sum,
-    100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE),
+    100.0 * (double)ocache->sb_logical_line_size_sum / ((double)ocache->data_line_count * UTIL_CACHE_LINE_SIZE),
     ocache->sb_aligned_logical_line_size_sum,
-    100.0 * (double)ocache->sb_aligned_logical_line_size_sum / ((double)ocache->line_count * UTIL_CACHE_LINE_SIZE));
+    100.0 * (double)ocache->sb_aligned_logical_line_size_sum / ((double)ocache->data_line_count * UTIL_CACHE_LINE_SIZE));
+  printf("Base missing SB %lu (%.2lf%%) found %lu (%.2lf%%)\n",
+    ocache->base_missing_sb_count, 
+    100.0 * (double)ocache->base_missing_sb_count / (double)ocache->sb_slot_count,
+    ocache->base_found_sb_count,
+    100.0 * (double)ocache->base_found_sb_count / (double)ocache->sb_slot_count);
   printf("[4-1] %lu [1-4] %lu [2-2] %lu [no shape] %lu\n", 
     ocache->sb_4_1_count, ocache->sb_1_4_count, ocache->sb_2_2_count, ocache->no_shape_line_count);
   printf("Size histogram: ");
@@ -4041,7 +4232,7 @@ static int scache_get_compressed_size_CPACK_cb(scache_t *scache, uint64_t addr) 
   if(dmap_entry == NULL) {
     error_exit("Data to be compressed cannot be found on addr 0x%lX\n", addr);
   }
-  int bits = CPACK_get_comp_size_bits(dmap_entry->data);
+  int bits = _CPACK_get_comp_size_bits(dmap_entry->data, &scache->CPACK_type_stat);
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     scache->CPACK_fail_count++;
     scache->CPACK_uncomp_size += UTIL_CACHE_LINE_SIZE;
@@ -4086,6 +4277,32 @@ static int scache_get_compressed_size_None_cb(scache_t *scache, uint64_t addr) {
   return (int)UTIL_CACHE_LINE_SIZE;
 }
 
+static uint64_t scache_access_hit_BDI_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  return SCACHE_BDI_DECOMP_LATENCY;
+}
+
+static uint64_t scache_access_hit_FPC_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  return SCACHE_FPC_DECOMP_LATENCY;
+}
+
+static uint64_t scache_access_hit_CPACK_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  return SCACHE_CPACK_DECOMP_LATENCY;
+}
+
+static uint64_t scache_access_hit_MBD_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  error_exit("Not supported\n");
+  return 0UL;
+}
+
+static uint64_t scache_access_hit_None_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  return 0UL;
+}
+
 // This is called by external callers; The other method that directly specifies the function is called 
 // by test code for instrumenting compression algorithm
 void scache_set_compression_type(scache_t *scache, const char *name) {
@@ -4094,14 +4311,20 @@ void scache_set_compression_type(scache_t *scache, const char *name) {
   }
   if(streq(name, "BDI") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_BDI_cb;
+    scache->access_hit_cb = scache_access_hit_BDI_cb;
   } else if(streq(name, "FPC") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_FPC_cb;
+    scache->access_hit_cb = scache_access_hit_FPC_cb;
   } else if(streq(name, "CPACK") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_CPACK_cb;
+    scache->access_hit_cb = scache_access_hit_CPACK_cb;
   } else if(streq(name, "MBD") == 1) {
+    error_exit("scache with MBD is not supported yet (need to sync with ocache_t's call backs)\n");
     scache->get_compressed_size_cb = scache_get_compressed_size_MBD_cb;
+    scache->access_hit_cb = scache_access_hit_MBD_cb;
   } else if(streq(name, "None") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_None_cb;
+    scache->access_hit_cb = scache_access_hit_None_cb;
   } else {
     error_exit("Unknown compression type name: \"%s\"\n", name);
   }
@@ -4491,6 +4714,11 @@ void scache_stat_print(scache_t *scache) {
       scache->CPACK_attempt_size, scache->CPACK_uncomp_size + scache->CPACK_after_size,
       100.0 * (scache->CPACK_uncomp_size + scache->CPACK_after_size) / (double)scache->CPACK_attempt_size,
       (double)scache->CPACK_attempt_size / (double)(scache->CPACK_uncomp_size + scache->CPACK_after_size));
+    printf("CPACK types ");
+    for(int i = 0;i < 6;i++) {
+      printf("[%s] %lu ", CPACK_type_names[i], scache->CPACK_type_stat.type_counts[i]);
+    }
+    putchar('\n');
     printf("Size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->CPACK_size_counts[i]);
@@ -4616,7 +4844,7 @@ void dram_free(dram_t *dram) {
 uint64_t dram_access(dram_t *dram, uint64_t cycle, uint64_t oid, uint64_t addr, int latency) {
   int index = dram_gen_bank_index(dram, oid, addr);
   assert(index >= 0 && index < dram->bank_count);
-  if(dram->banks[index] < cycle) {
+  if(dram->banks[index] <= cycle) {
     // The bank is available at this moment, just serve the request immediately
     cycle += latency;
     dram->uncontended_access_count++;
@@ -4742,6 +4970,8 @@ void cc_common_free_stats(cc_common_t *commons) {
 
 // end_level indicates the level that the access hits, must not be DRAM
 // end_cycle is the return value of the access function
+// Note: LLC may have variable access latency, but since it is the last level, the value is still accurate
+// as we just add the rest after subtracting L1 + L2 to LLC
 void cc_common_update_access_cycles(
   cc_common_t *commons, int id, int is_store, int end_level, uint64_t begin_cycle, uint64_t end_cycle) {
   assert(end_level >= MESI_CACHE_BEGIN && end_level < MESI_CACHE_END);
@@ -5164,11 +5394,16 @@ uint64_t cc_scache_load(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr) 
     cycle += cc->commons.cache_latencies[cache];
     // Simulate cache lookup to update LRU
     scache_op_result_t lookup_result;
-    scache_lookup(cc_scache_get_core_cache(cc, cache, id), addr, &lookup_result);
+    scache_t *scache = cc_scache_get_core_cache(cc, cache, id);
+    scache_lookup(scache, addr, &lookup_result);
     // If hit, exit the loop, or miss all levels and exit loop naturally
     if(lookup_result.state == SCACHE_HIT) {
       (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_LOAD_HIT))++;
       end_level = cache; // If hit DRAM this will never be set, so use the default value set on init
+      if(cache == MESI_CACHE_LLC) {
+        uint64_t extra_cycles = scache->access_hit_cb(scache, addr);
+        cycle += extra_cycles;
+      }
       break;
     }
     (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_LOAD_MISS))++;
@@ -5328,7 +5563,8 @@ uint64_t cc_scache_store(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr)
     (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_STORE))++;
     cycle += cc->commons.cache_latencies[cache];
     scache_op_result_t lookup_result;
-    scache_lookup(cc_scache_get_core_cache(cc, cache, id), addr, &lookup_result);
+    scache_t *scache = cc_scache_get_core_cache(cc, cache, id);
+    scache_lookup(scache, addr, &lookup_result);
     int MESI_state = MESI_entry->states[cache];
     if(lookup_result.state == SCACHE_HIT) {
       // Save entries in the cache for future updates (do not insert if line already exists)
@@ -5338,6 +5574,10 @@ uint64_t cc_scache_store(cc_scache_t *cc, int id, uint64_t cycle, uint64_t addr)
       if(cache == MESI_CACHE_LLC || MESI_state == MESI_STATE_E || MESI_state == MESI_STATE_M) {
         (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_STORE_HIT))++;
         end_level = cache;
+        if(cache == MESI_CACHE_LLC) {
+          uint64_t extra_cycles = scache->access_hit_cb(scache, addr);
+          cycle += extra_cycles;
+        }
         break;
       }
     }
@@ -5513,8 +5753,9 @@ void cc_ocache_init_cores(cc_ocache_t *cc, int core_count) {
   return;
 }
 
-void cc_ocache_init_llc(cc_ocache_t *cc, int size, int physical_way_count, int latency, const char *algorithm) {
-  cc->shared_llc = ocache_init(size, physical_way_count);
+void cc_ocache_init_llc(
+  cc_ocache_t *cc, int size, int physical_way_count, int tag_way_count, int latency, const char *algorithm) {
+  cc->shared_llc = ocache_init(size, physical_way_count, tag_way_count);
   assert(cc->cores != NULL);
   for(int i = 0;i < cc->commons.core_count;i++) {
     cc->cores[i].llc = cc->shared_llc;
@@ -5534,7 +5775,7 @@ void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, i
   assert(cc->cores != NULL);
   assert(cache == MESI_CACHE_L1 || cache == MESI_CACHE_L2);
   for(int i = 0;i < core_count;i++) {
-    ocache_t *ocache = ocache_init(size, way_count);
+    ocache_t *ocache = ocache_init(size, way_count, way_count);
     cc->cores[i].ocaches[cache] = ocache;
     // Disable compression
     ocache_set_compression_type(ocache, "None");
@@ -5560,7 +5801,7 @@ void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, i
 //   cc.ocache.core_count
 //   cc.ocache.l1.size cc.ocache.l1.way_count cc.ocache.l1.latency
 //   cc.ocache.l2.size cc.ocache.l2.way_count cc.ocache.l2.latency
-//   cc.ocache.llc.size cc.ocache.llc.physical_way_count cc.ocache.llc.latency
+//   cc.ocache.llc.size cc.ocache.llc.physical_way_count cc.ocache.llc.tag_way_count (optional) cc.ocache.llc.latency
 //   cc.ocache.llc.insert_type ("sb", "seg"), optional
 //   cc.ocache.llc.bcache.line_count cc.ocache.llc.bcache.way_count cc.ocache.llc.bcache.shape
 //   cc.ocache.default_shape (4_1, 1_4, 2_2, None)
@@ -5585,10 +5826,16 @@ cc_ocache_t *cc_ocache_init_conf(conf_t *conf) {
     conf_find_int32_range(conf, "cc.ocache.llc.size", (int)UTIL_CACHE_LINE_SIZE, CONF_INT32_MAX, CONF_RANGE);
   int llc_physical_way_count = \
     conf_find_int32_range(conf, "cc.ocache.llc.physical_way_count", 1, CONF_INT32_MAX, CONF_RANGE);
+  int llc_tag_way_count = llc_physical_way_count;
+  int llc_tag_way_count_found = \
+    conf_find_int32(conf, "cc.ocache.llc.tag_way_count", &llc_tag_way_count);
+  if(llc_tag_way_count_found == 0) {
+    llc_tag_way_count = llc_physical_way_count;
+  }
   int llc_latency = \
     conf_find_int32_range(conf, "cc.ocache.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
   const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.ocache.llc.algorithm");
-  cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_latency, llc_algorithm);
+  cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_tag_way_count, llc_latency, llc_algorithm);
   // insert type, optional
   char *insert_type_str;
   int insert_type_found = conf_find_str(conf, "cc.ocache.llc.insert_type", &insert_type_str);
@@ -5921,12 +6168,17 @@ uint64_t cc_ocache_load(cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, u
       pmap_entry_t *pmap_entry = pmap_find(cc->commons.dmap, addr);
       shape = (pmap_entry == NULL) ? cc->default_shape : pmap_entry->shape;
     }
-    ocache_lookup_read(cc_ocache_get_core_cache(cc, cache, id), oid, addr, shape, &lookup_result);
+    ocache_t *ocache = cc_ocache_get_core_cache(cc, cache, id);
+    ocache_lookup_read(ocache, oid, addr, shape, &lookup_result);
     // This is exclusive to ocache: May hit full or compressed lines
     if(lookup_result.state != OCACHE_MISS) {
       assert(lookup_result.state == OCACHE_HIT_NORMAL || lookup_result.state == OCACHE_HIT_COMPRESSED);
       (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_LOAD_HIT))++;
       end_level = cache;
+      if(cache == MESI_CACHE_LLC) {
+        uint64_t extra_cycles = ocache->access_hit_cb(ocache, oid, addr, shape);
+        cycle += extra_cycles;
+      }
       break;
     }
     (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_LOAD_MISS))++;
@@ -6092,7 +6344,8 @@ uint64_t cc_ocache_store(cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, 
       pmap_entry_t *pmap_entry = pmap_find(cc->commons.dmap, addr);
       shape = (pmap_entry == NULL) ? cc->default_shape : pmap_entry->shape;
     }
-    ocache_lookup_read(cc_ocache_get_core_cache(cc, cache, id), oid, addr, shape, &lookup_result);
+    ocache_t *ocache = cc_ocache_get_core_cache(cc, cache, id);
+    ocache_lookup_read(ocache, oid, addr, shape, &lookup_result);
     int MESI_state = MESI_entry->states[cache];
     if(lookup_result.state != OCACHE_MISS) {
       assert(lookup_result.state == OCACHE_HIT_NORMAL || lookup_result.state == OCACHE_HIT_COMPRESSED);
@@ -6100,6 +6353,10 @@ uint64_t cc_ocache_store(cc_ocache_t *cc, int id, uint64_t cycle, uint64_t oid, 
       if(cache == MESI_CACHE_LLC || MESI_state == MESI_STATE_E || MESI_state == MESI_STATE_M) {
         (*cc_common_get_stat_ptr(&cc->commons, cache, id, CC_STAT_STORE_HIT))++;
         end_level = cache;
+        if(cache == MESI_CACHE_LLC) {
+          uint64_t extra_cycles = ocache->access_hit_cb(ocache, oid, addr, shape);
+          cycle += extra_cycles;
+        }
         break;
       }
     }
@@ -6283,7 +6540,8 @@ cc_simple_t *cc_simple_init_conf(conf_t *conf) {
   cc->commons.l1_latency = l1_latency;
   cc->commons.l1_size = l1_size;
   cc->commons.l1_way_count = l1_way_count;
-  cc->cores[0].l1 = ocache_init(l1_size, l1_way_count);
+  // Same tag and data ways
+  cc->cores[0].l1 = ocache_init(l1_size, l1_way_count, l1_way_count); 
   // L2
   int l2_size = conf_find_int32_range(conf, "cc.simple.l2.size", (int)UTIL_CACHE_LINE_SIZE, CONF_INT32_MAX, CONF_RANGE);
   int l2_way_count = conf_find_int32_range(conf, "cc.simple.l2.way_count", 1, CONF_INT32_MAX, CONF_RANGE);
@@ -6291,19 +6549,26 @@ cc_simple_t *cc_simple_init_conf(conf_t *conf) {
   cc->commons.l2_latency = l2_latency;
   cc->commons.l2_size = l2_size;
   cc->commons.l2_way_count = l2_way_count;
-  cc->cores[0].l2 = ocache_init(l2_size, l2_way_count);
+  // Same tag and data ways
+  cc->cores[0].l2 = ocache_init(l2_size, l2_way_count, l2_way_count);
   // LLC
   int llc_size = \
     conf_find_int32_range(conf, "cc.simple.llc.size", (int)UTIL_CACHE_LINE_SIZE, CONF_INT32_MAX, CONF_RANGE);
   int llc_physical_way_count = \
     conf_find_int32_range(conf, "cc.simple.llc.physical_way_count", 1, CONF_INT32_MAX, CONF_RANGE);
+  int llc_tag_way_count = llc_physical_way_count;
+  int llc_tag_way_count_found = \
+    conf_find_int32(conf, "cc.simple.llc.tag_way_count", &llc_tag_way_count);
+  if(llc_tag_way_count_found == 0) {
+    llc_tag_way_count = llc_physical_way_count;
+  }
   int llc_latency = \
     conf_find_int32_range(conf, "cc.simple.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
   const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.simple.llc.algorithm");
   cc->commons.llc_latency = llc_latency;
   cc->commons.llc_size = llc_size;
   cc->commons.llc_physical_way_count = llc_physical_way_count;
-  cc->cores[0].llc = ocache_init(llc_size, llc_physical_way_count);
+  cc->cores[0].llc = ocache_init(llc_size, llc_physical_way_count, llc_tag_way_count);
   cc->shared_llc = cc->cores[0].llc;
   ocache_set_level(cc->shared_llc, MESI_CACHE_LLC);
   ocache_set_name(cc->shared_llc, "Shared LLC (cc_simple)");
@@ -6549,7 +6814,8 @@ uint64_t cc_simple_access(cc_simple_t *cc, int id, uint64_t cycle, uint64_t oid,
       ocache_lookup_read(ocache, oid, addr, shape, &lookup_result);
       // Update stat for ocache object (for MBD)
       if(lookup_result.state != OCACHE_MISS) {
-        ocache_llc_read_hit_MBD(ocache, oid, addr, shape);
+        uint64_t extra_cycles = ocache->access_hit_cb(ocache, oid, addr, shape);
+        cycle += extra_cycles;
       }
     }
     // Note that the state can either be HIT NORMAL or HIT COMPRESSED
@@ -7335,12 +7601,16 @@ void main_zsim_info_free(main_zsim_info_t *info) {
 // Read configuration file
 // main.max_inst_count - The simulation upper bound
 // main.start_inst_count - The simulation starting point
+// main.interval_count - Number of simulation intervals (i.e., sim + skip instructions)
+// main.interval_skip_inst_count - Number of instructions to skip as the second half of the interval
 // main.result_suffix - Result dir suffix for distinction
+// main.result_top_level_dir - Chdir to this before writing result into their own dirs
 // main.app_name - Will appear in result dir name
 // main.addr_1d_to_2d_type - Type of addr mapping
 // main.result_dir_has_timestamp - Whether the result dir has a timestamp
 // main.ignore_magic_op_start_sim
-// main.chdir
+// main.chdir - Change working dir to this before starting the binary
+// main.chdir_is_rel - Whether chdir is relative. If true, and chdir does not begin with '/' then use env WORKLOAD_PATH
 main_param_t *main_param_init(conf_t *conf) {
   main_param_t *param = (main_param_t *)malloc(sizeof(main_param_t));
   SYSEXPECT(param != NULL);
@@ -7360,6 +7630,8 @@ main_param_t *main_param_init(conf_t *conf) {
     param->interval_count = 1;
     param->interval_skip_inst_count = 0UL;
   }
+  // Derive stat snapshot inst count (0 means never)
+  param->stat_snapshot_inst_count = param->interval_count * param->max_inst_count / 100UL;
   // Read result suffix, optional
   char *result_suffix = NULL;
   int result_suffix_found = conf_find_str(conf, "main.result_suffix", &result_suffix);
@@ -7371,6 +7643,16 @@ main_param_t *main_param_init(conf_t *conf) {
   } else {
     param->result_suffix = NULL;
   } 
+  // Read result top level dir (optional)
+  int result_top_level_dir_found;
+  char *result_top_level_dir;
+  result_top_level_dir_found = conf_find_str(conf, "main.result_top_level_dir", &result_top_level_dir);
+  if(result_top_level_dir_found == 1) {
+    param->result_top_level_dir = strclone(result_top_level_dir);
+  } else {
+    param->result_top_level_dir = NULL;
+  }
+  // Read app name (optional)
   char *app_name = NULL;
   int app_name_found = conf_find_str(conf, "main.app_name", &app_name);
   if(app_name_found == 1) {
@@ -7409,11 +7691,32 @@ main_param_t *main_param_init(conf_t *conf) {
   } else {
     param->chdir = strclone(chdir_str);
   }
+  int chdir_rel_found = conf_find_bool(conf, "main.chdir_is_rel", &param->chdir_is_rel);
+  if(chdir_rel_found == 0) {
+    param->chdir_is_rel = 0;
+  }
+  // Whether chdir path is relative or absolute
+  if(param->chdir_is_rel == 1) {
+    if(param->chdir != NULL && param->chdir[0] == '/') {
+      error_exit("Chdir path must not start with '/' while being relative (see \"%s\")\n",
+        param->chdir);
+    } else if(param->chdir == NULL) {
+      printf("[zsim] main.chdir_is_rel is found, but chdir is not specified\n");
+    }
+    // If NULL then just ignore it when chdir later
+    param->env_workload_path = getenv("WORKLOAD_PATH");
+    if(param->env_workload_path == NULL) {
+      printf("[main] Warn: main.chdir_is_rel is set, but env WORKLOAD_PATH is not found\n");
+    }
+  } else {
+    param->env_workload_path = NULL;
+  }
   return param;
 }
 
 void main_param_free(main_param_t *param) {
   if(param->result_suffix != NULL) free(param->result_suffix);
+  if(param->result_top_level_dir != NULL) free(param->result_top_level_dir);
   if(param->app_name != NULL) free(param->app_name);
   if(param->addr_1d_to_2d_type != NULL) free(param->addr_1d_to_2d_type);
   if(param->chdir != NULL) free(param->chdir);
@@ -7423,9 +7726,12 @@ void main_param_free(main_param_t *param) {
 
 void main_param_conf_print(main_param_t *param) {
   printf("Inst count max %lu start %lu\n", param->max_inst_count, param->start_inst_count);
-  printf("Intrvals %d skip count %lu\n", param->interval_count, param->interval_skip_inst_count);
+  printf("Intrvals %d skip count %lu (stat snapshot inst %lu)\n", 
+    param->interval_count, param->interval_skip_inst_count,
+    param->stat_snapshot_inst_count);
   //
   if(param->result_suffix != NULL) printf("Result suffix: \"%s\"\n", param->result_suffix);
+  if(param->result_top_level_dir != NULL) printf("Top-level result dir: \"%s\"\n", param->result_top_level_dir);
   if(param->app_name != NULL) printf("App name: \"%s\"\n", param->app_name);
   // Addr xtat type
   printf("Addr 1d-to-2d type: ");
@@ -7442,6 +7748,9 @@ void main_param_conf_print(main_param_t *param) {
     param->ignore_magic_op_start_sim == 1 ? "IGNORED" : "FOLLOWED");
   if(param->chdir != NULL) {
     printf("Change to directory: \"%s\"\n", param->chdir);
+    if(param->env_workload_path != NULL) {
+      printf("  Rel path prefix: \"%s\"\n", param->env_workload_path);
+    }
   } else {
     printf("Not using main.chdir\n");
   }
@@ -7457,14 +7766,7 @@ void main_param_conf_print(main_param_t *param) {
 //   dram.read_latency
 //   dram.write_latency
 //   ---
-//   main.max_inst_count
-//   main.start_inst_count
-//   main.result_suffix
-//   main.app_name
-//   main.addr_1d_to_2d_type ( = none / addr_map / 4_1)
-//   main.result_dir_has_timestamp
-//   main.ignore_magic_op_start_sim
-//   main.chdir
+//   param-related parameters (see main_param_init)
 main_t *main_init_conf(conf_t *conf) {
   main_t *main = (main_t *)malloc(sizeof(main_t));
   SYSEXPECT(main != NULL);
@@ -7515,6 +7817,20 @@ main_t *main_init(const char *conf_filename) {
   return main;
 }
 
+void main_add_slave(main_t *main, main_t *slave) {
+  if(slave->slave_count != 0) {
+    error_exit("A main object must not be master and slave at the same time\n");
+  }
+  slave->next = NULL;
+  main_t *curr = main;
+  while(curr->next != NULL) {
+    curr = curr->next;
+  }
+  curr->next = slave;
+  main->slave_count++;
+  return;
+}
+
 void main_free(main_t *main) {
   // Free components
   main_latency_list_free(main->latency_list);
@@ -7543,11 +7859,25 @@ void main_chdir(main_t *main) {
   assert(main->param->chdir != NULL);
   main->saved_cwd = get_current_dir_name();
   SYSEXPECT(main->saved_cwd != NULL);
-  int chdir_ret = chdir(main->param->chdir);
+  int chdir_ret;
+  if(main->param->env_workload_path != NULL) {
+    printf("[main] Chdir using rel path\n");
+    char *full_chdir_path = \
+      (char *)malloc(strlen(main->param->chdir) + strlen(main->param->env_workload_path) + 16);
+    SYSEXPECT(full_chdir_path != NULL);
+    strcpy(full_chdir_path, main->param->env_workload_path);
+    strcat(full_chdir_path, "/");
+    strcat(full_chdir_path, main->param->chdir);
+    chdir_ret = chdir(full_chdir_path);
+    free(full_chdir_path);
+  } else {
+    printf("[main] Chdir using abs path\n");
+    chdir_ret = chdir(main->param->chdir);
+  }
   SYSEXPECT(chdir_ret == 0);
   char *test = get_current_dir_name();
-  printf("Switched working dir to: \"%s\"\n", test);
-  printf("  ...from \"%s\"\n", main->saved_cwd);
+  printf("[main] Switched working dir to: \"%s\"\n", test);
+  printf("[main]   ...from \"%s\"\n", main->saved_cwd);
   free(test);
   return;
 }
@@ -7575,16 +7905,30 @@ void main_sim_end(main_t *main) {
     main->sim_end_cb(main, main->sim_end_cb_arg);
   }
   main_stat_print(main);
+  int chdir_ret;
   // Switch back to previous working dir
   if(main->saved_cwd != NULL) {
-    int chdir_ret = chdir(main->saved_cwd);
+    chdir_ret = chdir(main->saved_cwd);
     SYSEXPECT(chdir_ret == 0);
   }
-  // Save stat snapshots to text files
+  // If there is a different top level result dir than the current one, then switch to it
+  char *saved_cwd = NULL;
+  if(main->param->result_top_level_dir != NULL) {
+    saved_cwd = get_current_dir_name(); // This is malloc'ed by the library
+    // First check if the dir is there, if not then mkdir
+    struct stat st;
+    if(stat(main->param->result_top_level_dir, &st) == -1) {
+      int mkdir_ret = mkdir(main->param->result_top_level_dir, 0700);
+      SYSEXPECT(mkdir_ret == 0);
+    }
+    chdir_ret = chdir(main->param->result_top_level_dir);
+    SYSEXPECT(chdir_ret == 0);
+  }
+  // Generate save directory name
   char save_dir[MAIN_RESULT_DIR_SIZE];
   main_gen_result_dir_name(main, save_dir);
   // Check whether the buf is overflown
-  if(strlen(save_dir) > 1022) {
+  if(strlen(save_dir) > (MAIN_RESULT_DIR_SIZE - 2)) {
     error_exit("Dir name buffer too large; Stack overflows\n");
   }
   // First create the directory for saving
@@ -7597,6 +7941,12 @@ void main_sim_end(main_t *main) {
   strcat(save_dir, "/");
   oc_save_stat_snapshot(main->oc, save_dir);
   main_save_conf_stat(main, save_dir);
+  // Switch back to the working dir
+  if(saved_cwd != NULL) {
+    chdir_ret = chdir(saved_cwd);
+    SYSEXPECT(chdir_ret == 0);
+    free(saved_cwd);
+  }
   // Just terminate here under non-debug mode
 #ifndef UNIT_TEST
   exit(0);
@@ -7635,61 +7985,17 @@ void main_gen_result_dir_name(main_t *main, char *buf) {
 
 // Called by the simulator to report current inst and cycle count to the main class, such that it
 // determines whether the simulation should come to an end
-/*
 void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
   assert(inst >= main->last_inst_count);
   assert(cycle >= main->last_cycle_count);
-  main->last_inst_count = inst;
-  main->last_cycle_count = cycle;
-  uint64_t actual_end_inst_count = main->param->start_inst_count + main->param->max_inst_count;
-  if(inst < main->param->start_inst_count) {
-    // Have not started simulation, just compute progress of waiting
-    // Reuse progress variable
-    int progress = (int)(100.0 * (double)inst / (double)main->param->start_inst_count);
-    if(progress != main->progress) {
-      printf("\rWait: %d%%", progress);
-      fflush(stdout); // Make sure we can see it
-      main->progress = progress;
-      // Start warmup at 90% wait progress
-      if(progress >= 90 && main->warmup == 0) {
-        main->warmup = 1;
-      }
-    }
-  } else if(inst >= actual_end_inst_count) {
-    main->progress = 100; // Indicating finished
-    // Print stats and exit the program
-    main_sim_end(main);
-  } else {
-    // Set started flag and reset progress
-    if(main->started == 0) {
-      main->started = 1;
-      main->warmup = 0;
-      main->progress = 0;
-      main->start_cycle_count = cycle;
-      main->begin_time = time(NULL);
-    }
-    int progress = (int)(100.0 * (double) \
-      (inst - main->param->start_inst_count) / (double)main->param->max_inst_count
-    );
-    if(progress != main->progress) {
-      // This is wierd (i.e., really short instruction count or really large BB)
-      if(progress - main->progress != 1) {
-        printf("Warning: progress advanced by more than one (before %d after %d)\n", main->progress, progress);
-      }
-      // Take a snapshot for all components when progress advances by one
+  // Stat snapshot
+  if(main->started == 1) {
+    main->since_last_stat_snapshot_inst_count += (inst - main->last_inst_count);
+    if(main->since_last_stat_snapshot_inst_count >= main->param->stat_snapshot_inst_count) {
+      main->since_last_stat_snapshot_inst_count = 0;
       oc_append_stat_snapshot(main->oc);
-      printf("\rProgress: %d%%", progress);
-      fflush(stdout); // Make sure we can see it
-      main->progress = progress;
     }
   }
-  return;
-}
-*/
-
-void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
-  assert(inst >= main->last_inst_count);
-  assert(cycle >= main->last_cycle_count);
   main->last_inst_count = inst;
   main->last_cycle_count = cycle;
   if(inst < main->next_toggle_inst_count) {
@@ -7776,6 +8082,7 @@ void main_1d_to_2d_auto_vertical_4_1_cb(main_t *main, uint64_t addr_1d, uint64_t
 
 // Populate dmap before mem operations takes place
 // Insert entry into dmap, if these entries are first inserted, then copy data from aligned_addr
+// Returns the dmap entry of the 2D address
 void main_mem_op_before(main_t *main, 
   uint64_t addr_1d_aligned, uint64_t oid_2d, uint64_t addr_2d_aligned, int line_count) {
   dmap_t *dmap = oc_get_dmap(main->oc);
@@ -7806,15 +8113,17 @@ void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_u
 // Calls main_read and main_write() after preparing for memory operations
 // Return finish cycle of the operation
 // This function is called from zsim pipeline simulation phase after a basic block has been finished
-uint64_t main_mem_op(main_t *main, uint64_t cycle) {
+// Note that this is the master-slave version: Input cycle and output cycles are an array
+void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
   // If sim has not started, just return in the same cycle (fast-forward)
   if(main->started == 0) {
-    return cycle;
+    //*out_cycles = *in_cycles;
+    error_exit("This function should not be called when started is zero\n");
+    return;
   }
-  int index = main->mem_op_index;
-  main->mem_op_index++;
+  int op_index = main->mem_op_index++;
   // This function also checks bound
-  main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, index);
+  main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, op_index);
   // This is potentially unaligned, which is directly taken from the application's trace
   uint64_t addr_1d = entry->addr;
   int op = entry->op;
@@ -7827,22 +8136,34 @@ uint64_t main_mem_op(main_t *main, uint64_t cycle) {
   main_gen_aligned_line_addr(main, addr_1d, size, &addr_1d_aligned, &line_count);
   // Use this to generate the exact 2D address to be accessed
   int addr_1d_offset = addr_1d - addr_1d_aligned;
+  assert(addr_1d_offset >= 0 && addr_1d_offset < (int)UTIL_CACHE_LINE_SIZE);
   uint64_t oid_2d, addr_2d_aligned;
-  // First translate address
+  // First translate address - this is shared by all slaves
   main->addr_1d_to_2d_cb(main, addr_1d_aligned, &oid_2d, &addr_2d_aligned);
   uint64_t addr_2d_unaligned = addr_2d_aligned + addr_1d_offset;
   // Calling before function to populate data map
   main_mem_op_before(main, addr_1d_aligned, oid_2d, addr_2d_aligned, line_count);
+  int index = 0;
   // Then call coherence controller
   if(op == MAIN_READ) {
-    cycle = oc_load(main->oc, 0, cycle, oid_2d, addr_2d_aligned, line_count);
+    main_t *curr = main;
+    do {
+      out_cycles[index] = oc_load(curr->oc, 0, in_cycles[index], oid_2d, addr_2d_aligned, line_count);
+      curr = curr->next;
+      index++;
+    } while(curr != NULL);
   } else {
-    // Pass data as argument to update dmap
-    // This function also updates the dmap
-    cycle = oc_store(main->oc, 0, cycle, oid_2d, addr_2d_aligned, line_count);
+    main_t *curr = main;
+    do {
+      out_cycles[index] = oc_store(curr->oc, 0, in_cycles[index], oid_2d, addr_2d_aligned, line_count);
+      curr = curr->next;
+      index++;
+    } while(curr != NULL);
+    // Only update dmap with the newest data after calling all slaves
     main_mem_op_after(main, op, oid_2d, addr_2d_unaligned, size, data);
   }
-  return cycle;
+  assert(index == main->slave_count);
+  return;
 }
 
 void main_add_info(main_t *main, const char *key, const char *value) {
@@ -7979,6 +8300,7 @@ void main_stat_print(main_t *main) {
   printf("  Sim time: %lu seconds (throughput %.2lf inst/sec)\n",
     main->end_time - main->begin_time,
     (double)main->sim_inst_count / (double)(main->end_time - main->begin_time));
+  printf("Slave count %d (this is %s)\n", main->slave_count, main->slave_count ? "slave" : "master");
   printf("oc:\n");
   oc_stat_print(main->oc);
   printf("addr map:\n");

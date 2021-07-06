@@ -52,6 +52,28 @@ char *strclone(const char *s) {
   return ret;
 }
 
+char *strnclone(const char *s, int n) {
+  char *ret = (char *)malloc(n + 1);
+  SYSEXPECT(ret != NULL);
+  strncpy(ret, s, n); // This will NOT auto-pad '\0' if src is longer than n
+  ret[n] = '\0';
+  return ret;
+}
+
+// Undefined if times <= 0
+char *strfind(const char *s, const char *sub, int times) {
+  assert(times > 0);
+  while(1) {
+    s = strstr(s, sub);
+    if(s == NULL || times == 1) {
+      break;
+    }
+    times--;
+    s++;
+  }
+  return (char *)s;
+}
+
 convertq_t convert_queue;
 
 // Removes trailing zeros for floating point numbers; Integers remain the same
@@ -545,6 +567,53 @@ uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uin
   if(options & CONF_RANGE) assert_uint64_range(num, low, high, key);
   if(options & CONF_POWER2) assert_uint64_power2(num, key);
   return num;
+}
+
+int conf_find_comma_list_str(conf_t *conf, const char *key, char ***list, int *count) {
+  conf_node_t *node = conf_find(conf, key);
+  *count = 0;
+  if(node == NULL) {
+    *list = NULL;
+    return 0;
+  }
+  // Count number of commas
+  int comma_count = 0;
+  char *s = node->value;
+  while(*s != '\0') {
+    if(*s == ',') {
+      comma_count++;
+    }
+    s++;
+  }
+  *count = comma_count + 1;
+  *list = (char **)malloc(sizeof(char *) * (*count));
+  SYSEXPECT(list != NULL);
+  s = node->value;
+  for(int i = 0;i < *count;i++) {
+    // Space before string
+    s = conf_str_skip_space(s);
+    // Until comma or space
+    char *end = s;
+    while(*end != '\0' && *end != ',') {
+      end++;
+    }
+    char *value_end = end;
+    while(value_end > s && isspace(*(value_end - 1))) {
+      value_end--;
+    }
+    if(value_end == s) {
+      error_exit("Empty string in the comma list (line %d index %d)\n", node->line, i);
+    }
+    // The substring is [s, end)
+    (*list)[i] = strnclone(s, value_end - s);
+    s = end;
+    // Skip comma, if not the last one
+    if(i != *count - 1) {
+      assert(*s == ',');
+      s++;
+    }
+  }
+  return 1;
 }
 
 // If key not found, set list and count to NULL and return 0
