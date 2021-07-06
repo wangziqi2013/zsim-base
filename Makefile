@@ -21,9 +21,6 @@ WORKLOAD_PATH_2006=/home/ziqiw/data_disk_2/SPEC2006/benchspec/CPU2006
 perlbench_2006:
 	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/perlbench_2006/perlbench_2006.cfg
 
-libquantum_2006:
-	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/libquantum_2006/libquantum_2006.cfg
-
 bzip2_2006:
 	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/bzip2_2006/bzip2_2006.cfg
 
@@ -81,8 +78,8 @@ sjeng_2006:
 gemsFDTD_2006:
 	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/gemsFDTD_2006/gemsFDTD_2006.cfg
 
-libquamtum_2006:
-	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/libquamtum_2006/libquamtum_2006.cfg
+libquantum_2006:
+	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/libquantum_2006/libquantum_2006.cfg
 
 h264ref_2006:
 	-WORKLOAD_PATH=$(WORKLOAD_PATH_2006) ./build/release/zsim ./tests/2DOC/SPEC2006/h264ref_2006/h264ref_2006.cfg
