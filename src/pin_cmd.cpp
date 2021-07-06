@@ -143,7 +143,7 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
                 printf("[zsim] WORKLOAD_PATH is given, but process command is absolute path; Ignore\n");
             }
             if(input[0] != '/') {
-                int free_input = 1;
+                free_input = 1;
                 if(free_cmd == 0) {
                     printf("[zsim] Using relative workload path: \"%s\"\n", workloadPath);
                 }
@@ -152,7 +152,7 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
                 strcpy(input2, workloadPath);
                 strcat(input2, "/");
                 strcat(input2, input);
-                cmd = (const char *)input2;
+                input = (const char *)input2;
             } else {
                 printf("[zsim] WORKLOAD_PATH is given, but process input is absolute path; Ignore\n");
             }

@@ -185,7 +185,11 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                 curCycle = main_mem_op(zinfo->main, curCycle);
             } break;
             case UOP_STORE: {
+                // Store should not block execution
                 curCycle = main_mem_op(zinfo->main, curCycle);
+                // Stores still drive the memory system, but latency is irrelevant
+                //main_mem_op(zinfo->main, curCycle); 
+                //cyrCycle++;
             } break;
             default: {
                 curCycle++;
