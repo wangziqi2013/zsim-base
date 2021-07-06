@@ -12,12 +12,13 @@ cc.simple.l2.latency = 11
 cc.simple.llc.size = 1048576
 cc.simple.llc.physical_way_count = 8
 cc.simple.llc.latency = 30
-cc.simple.llc.algorithm = FPC
+cc.simple.llc.algorithm = MBDv0
 
+# Segmented cache data store
 cc.simple.llc.insert_type = seg
 
 cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
 
-main.result_suffix = simple_FPC_1_4_seg
+main.result_suffix = simple_MBDv0_1_4_seg

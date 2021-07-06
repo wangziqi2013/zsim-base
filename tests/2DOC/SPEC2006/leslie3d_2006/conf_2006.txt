@@ -9,8 +9,9 @@ main.max_inst_count = 10B
 main.start_inst_count = 100B
 main.ignore_magic_op_start_sim = 1
 
-main.app_name = leslie_2006
+main.app_name = leslie3d_2006
 main.result_dir_has_timestamp = 0
 
 main.chdir = 437.leslie3d/data/ref/input/
 main.chdir_is_rel = 1
+main.result_top_level_dir = results_2006

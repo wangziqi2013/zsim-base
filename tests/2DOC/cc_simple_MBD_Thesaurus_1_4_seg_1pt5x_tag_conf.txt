@@ -11,13 +11,20 @@ cc.simple.l2.latency = 11
 # 1MB
 cc.simple.llc.size = 1048576
 cc.simple.llc.physical_way_count = 8
+cc.simple.llc.tag_way_count = 12
 cc.simple.llc.latency = 30
-cc.simple.llc.algorithm = FPC
+cc.simple.llc.algorithm = MBD_Thesaurus
 
+# Segmented cache data store
 cc.simple.llc.insert_type = seg
+
+# Base cache, 64-set, 8-way, 512 lines in total, 32KB storage
+cc.simple.llc.bcache.line_count = 4096
+cc.simple.llc.bcache.way_count = 8
+cc.simple.llc.bcache.shape = 1_4
 
 cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
 
-main.result_suffix = simple_FPC_1_4_seg
+main.result_suffix = simple_MBD_Thesaurus_1pt5x_tag_1_4_seg

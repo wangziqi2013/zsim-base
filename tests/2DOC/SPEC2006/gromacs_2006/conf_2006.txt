@@ -14,3 +14,4 @@ main.result_dir_has_timestamp = 0
 
 main.chdir = 435.gromacs/data/ref/input/
 main.chdir_is_rel = 1
+main.result_top_level_dir = results_2006

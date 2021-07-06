@@ -16,3 +16,4 @@ main.ignore_magic_op_start_sim = 1
 
 main.chdir = 511.povray_r/data/all/input
 main.chdir_is_rel = 1
+main.result_top_level_dir = results_2017_rate

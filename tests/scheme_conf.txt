@@ -1,0 +1,1 @@
+%include tests/2DOC/cc_simple_BDI_1_4_seg_conf.txt

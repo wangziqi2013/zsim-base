@@ -5,8 +5,8 @@ dram.bank_count = 16
 dram.read_latency = 300
 dram.write_latency = 300
 
-main.max_inst_count = 10B
-main.start_inst_count = 100B
+main.max_inst_count = 10M
+main.start_inst_count = 100M
 main.ignore_magic_op_start_sim = 1
 
 main.app_name = namd_2006
@@ -14,3 +14,4 @@ main.result_dir_has_timestamp = 0
 
 main.chdir = 444.namd/data/all/input/
 main.chdir_is_rel = 1
+main.result_top_level_dir = results_2006
