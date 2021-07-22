@@ -10,5 +10,6 @@ bin/*
 dram-stat-dump-*
 write_test
 result_*
+results_*
 workloads/*
 simpoint/*
