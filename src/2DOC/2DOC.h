@@ -100,6 +100,8 @@ extern int BDI_comp_order[6];     // Order of types we try for compression
 #define BDI_2_1         7
 #define BDI_TYPE_END    8
 
+#define BDI_DECOMP_LATENCY    2
+
 // Helper function that writes/reads the base of the given size into the output buffer
 void *BDI_comp_write_base(void *out_buf, uint64_t base, int word_size);
 uint64_t BDI_decomp_read_base(void **in_buf, int word_size);
@@ -150,6 +152,7 @@ int zero_comp(void *in_buf);
 
 //* FPC
 
+#define FPC_DECOMP_LATENCY       5
 #define FPC_STATE_NORMAL         0
 #define FPC_STATE_ZERO_RUN       1
 #define FPC_BIT_COPY_GRANULARITY 64
@@ -219,8 +222,9 @@ void FPC_print_packed_bits(uint64_t *buf, int begin_offset, int bits);
 
 //* CPACK
 
-#define CPACK_DICT_COUNT  16    // Number of entries in the dictionary
-#define CPACK_WORD_COUNT 16    // Number of 32-bit words in a block to be compressed
+#define CPACK_DECOMP_LATENCY    9
+#define CPACK_DICT_COUNT        16    // Number of entries in the dictionary
+#define CPACK_WORD_COUNT        16    // Number of 32-bit words in a block to be compressed
 
 typedef struct {
   int count;                      // Number of valid entries
@@ -294,14 +298,31 @@ void CPACK_print_compressed(void *in_buf);
 
 // Whether dict uses LRU
 //#define MBD_DICT_LRU          1
-#define MBD_COLLECT_STAT      1
 
-#define MBD_RESERVED_COUNT    1
+#define MBD_ZERO              0
+#define MBD_MATCH             1
+#define MBD_UNCOMP            2
+// delta + 4'bindex + 4'b11xx
+#define MBD_DELTA_4           3
+#define MBD_DELTA_8           4
+#define MBD_DELTA_12          5
+#define MBD_DELTA_16          6
+// small + 4'b00xx
+#define MBD_SMALL_4           7
+#define MBD_SMALL_8           8
+#define MBD_SMALL_12          9
+#define MBD_SMALL_16          10
+
+// Bits of code word types
+extern int MBD_bits[11];
 
 typedef struct {
   int count;
   int next_slot_index;
   uint32_t data[MBD_DICT_COUNT];
+  int8_t cycle[MBD_DICT_COUNT]; // The cycle in which the corresponding data entry is available
+  int8_t types[MBD_DICT_COUNT]; // An array of types per dict entry; Filled by comp algo, not search function
+  int word_type;                // This is set by MBD_search() which is the type of the code word
 #ifdef MBD_DICT_LRU
   // Doubly linked list pointers
   int next[MBD_DICT_COUNT];
@@ -309,17 +330,20 @@ typedef struct {
   int head_index; // MRU index
   int tail_index; // LRU index
 #endif
-#ifdef MBD_COLLECT_STAT 
   // Statistics about a compression instance
   uint8_t stat_begin[0];
-  uint32_t delta_size_dist[4]; // 4, 8, 12, 16 bits
-  uint32_t zero_count;
-  uint32_t uncomp_count;
-  uint32_t match_count;
-  uint32_t insert_count;     // Number of dict inserts
-  uint32_t insert_dup_count; // Whether insert pushes a value that already exists
+  uint8_t delta_size_dist[4];   // 4, 8, 12, 16 bits
+  uint8_t small_size_dist[4];   // 4, 8, 12, 16 bits
+  uint8_t zero_count;
+  uint8_t uncomp_count;
+  uint8_t match_count;
+  uint8_t insert_count;          // Number of dict inserts
+  uint8_t forward_count;         // Number of entries from ref block when processing a target block
+  uint8_t forward_uncomp_count;  // Number of forwards that are exact matches
+  uint8_t forward_stalled_count; // Number of forwards that require stall
+  uint8_t stalled_cycle_count;   // Used for opt1; Only updated for target block
+  uint8_t cycle_count;           // Total number of cycles for compression with zero optimization, with stalls
   uint8_t stat_end[0];
-#endif
 } MBD_dict_t;
 
 // Initially there is one entry, which is zero
@@ -327,33 +351,40 @@ inline static void MBD_dict_invalidate(MBD_dict_t *dict) {
   dict->count = 1;
   dict->next_slot_index = 1;
   dict->data[0] = 0;
+  dict->cycle[0] = -1;
 #ifdef MBD_DICT_LRU
   // Point to the first slot
   dict->head_index = dict->tail_index = 0;
-  // Initialize linked list for first slot (onnly element)
+  // Initialize linked list for first slot (only element)
   dict->next[0] = dict->prev[0] = -1;
 #endif
-#ifdef MBD_COLLECT_STAT 
   memset(dict->stat_begin, 0x00, dict->stat_end - dict->stat_begin);
-#endif
   return;
 }
 
-
 // Clears the stat of the dict, but keeps the content
 inline static void MBD_dict_invalidate_stat(MBD_dict_t *dict) {
-#ifdef MBD_COLLECT_STAT 
   memset(dict->stat_begin, 0x00, dict->stat_end - dict->stat_begin);
-#else
-  (void)dict;
-#endif
   return;
 } 
 
+// This function is called before processing the target block, which resets the next slot to 1, if
+// the dict is full (this is unlikely though, since we do not insert zero into the dict)
+inline static void MBD_dict_reset_next_slot_index(MBD_dict_t *dict) {
+  if(dict->next_slot_index == 2 && dict->count == MBD_DICT_COUNT) {
+    dict->next_slot_index = 1;
+  }
+  return;
+}
+
 // Move index to LRU; Called on compression and decompression when an entry is hit for comp / used for decomp
 void MBD_update_LRU(MBD_dict_t *dict, int index);
-void MBD_dict_insert(MBD_dict_t *dict, uint32_t data);
+// Insert the data word into the dict. This function has two versions: LRU and FIFO
+// Returns the index of the array it is inserted into
+int MBD_dict_insert(MBD_dict_t *dict, uint32_t data);
 
+// Find the shortest encoding of a given word, 4, 8, 12, 16 bits only
+int MBD_find_shortest_encoding(uint32_t word);
 // Same intf as CPACK, but performs min-delta search
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output);
 
@@ -384,6 +415,54 @@ inline static void MBD_print_compressed(void *in_buf) {
 } 
 inline static int MBD_get_comp_size_bits(void *_in_buf) {
   return _MBD_get_comp_size_bits(_in_buf, UTIL_CACHE_LINE_SIZE);
+}
+
+//* MBD_opt0
+//* MBD_opt1
+//* MBD_opt2
+//* MBD_opt3
+// These are the optimized version of MBD 
+// opt0: Double word compression + zero optimization
+// opt1: Zero optimization + speculative decomp
+
+// Whether or not the current block is the reference block; If not set then it is target block
+#define MBD_REF_BLOCK        0x00000001
+
+#define MBD_OPT0_THROUGHPUT  2
+
+// Number of non-zero words per cycle
+#define MBD_OPT1_THROUGHPUT  MBD_OPT0_THROUGHPUT
+// Number of run-ahead cycles
+#define MBD_OPT1_RUNAHEAD    2
+
+#define MBD_OPT3_THROUGHPUT  MBD_OPT1_THROUGHPUT
+#define MBD_OPT3_RUNAHEAD    MBD_OPT1_RUNAHEAD
+
+#define MBD_OPTION_IS_REF(x) (((x) & MBD_REF_BLOCK) != 0)
+
+// 2-word parallel comp (and decomp, the timings are identical) and zero optimization
+int __MBD_opt0_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict);
+// If options has MBD_IS_REF, then do not compute stalled cycle, but the dict will track the cycle in which
+// each element is inserted; If IS_REF is not set, then the stalled cycle stat will be updated
+int __MBD_opt1_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options);
+// Ref block is compressed with BDI, and the dict is still generated. Target blocks are compressed using opt0
+int __MBD_opt2_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options);
+// Do not hardcode zero as the first dict entry; Use 4'b0000, 4'b0001, 4'b0010, 4'b0011 to indicate small values
+// Also uses runahead compression
+int __MBD_opt3_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options);
+
+// Need a dedicated search function
+int MBD_opt3_search(MBD_dict_t *dict, uint32_t word, uint64_t *output);
+
+// Does not reserve the first entry as zero
+inline static void MBD_opt3_dict_invalidate(MBD_dict_t *dict) {
+  dict->count = 0;
+  dict->next_slot_index = 0;
+#ifdef MBD_DICT_LRU
+  error_exit("MBD OPT3 does not support LRU dictionary replacement\n");
+#endif
+  memset(dict->stat_begin, 0x00, dict->stat_end - dict->stat_begin);
+  return;
 }
 
 //* MESI_t - Abstract coherence controller, decoupled from cache implementation
@@ -536,9 +615,17 @@ typedef struct dmap_entry_struct_t {
   union {
     // This is for per-cache line information
     struct {
-      // This will will init'ed to zero
+      // This will be initialized to zero
       uint8_t data[UTIL_CACHE_LINE_SIZE]; // Data, always uncompressed, and updated from the simulator writes
       MESI_entry_t MESI_entry; // MESI state machine
+      // The following two are set during compression, and used on read hits
+      // Comp and decomp are symmetric
+      uint8_t decomp_cycle_count;         // This takes the two cycle lower bound into consideration
+      uint8_t decomp_stalled_cycle_count;
+      uint8_t zero_count;
+      uint8_t forward_count;              // Number of words from the ref block
+      uint8_t forward_uncomp_count;       // Number of forwards that come from an uncompressed word
+      uint8_t forward_stalled_count;      // Number of words forwarded that caused forwarding
     };
     // This is for per-page information
     struct {
@@ -880,9 +967,21 @@ inline static void ocache_entry_dup(ocache_entry_t *dest, ocache_entry_t *src) {
 #define OCACHE_MBD_V4                    2
 #define OCACHE_MBD_Thesaurus             3
 
-#define OCACHE_BDI_DECOMP_LATENCY        2
-#define OCACHE_FPC_DECOMP_LATENCY        5
-#define OCACHE_CPACK_DECOMP_LATENCY      9
+// MBD optimization type (this is orthogonal to V0/2/4 or Thesaurus)
+#define OCACHE_MBD_OPT_NONE              0
+#define OCACHE_MBD_OPT0                  1
+#define OCACHE_MBD_OPT1                  2
+#define OCACHE_MBD_OPT2                  3
+#define OCACHE_MBD_OPT3                  4
+
+// Eviction optimization type
+#define OCACHE_EVICT_OPT_NONE            0
+#define OCACHE_EVICT_OPT0                1
+#define OCACHE_EVICT_OPT1                2
+
+#define OCACHE_BDI_DECOMP_LATENCY        BDI_DECOMP_LATENCY
+#define OCACHE_FPC_DECOMP_LATENCY        FPC_DECOMP_LATENCY
+#define OCACHE_CPACK_DECOMP_LATENCY      CPACK_DECOMP_LATENCY
 
 // Maximum number of SBs evicted on an insert
 #define OCACHE_MAX_EVICT_ENTRY          16
@@ -965,6 +1064,7 @@ typedef struct ocache_struct_t {
   uint64_t lru_counter;      // Use this to implement LRU
   // Insert call back function; Select SB-based data store or segmented data store by assigning this function
   ocache_insert_cb_t insert_cb;
+  int evict_opt_type;        // Eviction optimization type
   // This one derives decompression latency and perform other post-hit actions
   ocache_access_hit_cb_t access_hit_cb;
   // dmap_t object for compression
@@ -974,6 +1074,7 @@ typedef struct ocache_struct_t {
   ocache_stat_snapshot_t *stat_snapshot_head; // Head of the snapshot linked list
   ocache_stat_snapshot_t *stat_snapshot_tail; // Tail of the snapshot linked list
   int MBD_type;              // OCACHE_MBD_V0, _V2, _V4
+  int MBD_opt_type;          // OCACHE_MBD_OPT_NONE or OCACHE_MBD_OPT1/2/3...
   bcache_t *bcache;          // Base cache, used to reduce requests to DRAM for base blocks
   // Statistics
   uint8_t stat_begin[0];              // Makes the begin address of stat region
@@ -981,9 +1082,11 @@ typedef struct ocache_struct_t {
   uint64_t insert_count;              // Number of inserts
   uint64_t insert_sb_hit_count;       // The SB is already present in the set
   uint64_t insert_sb_miss_count;      // The SB is missing in the set
-  uint64_t insert_evict_tag_count;    // Number of evicts due to tag contention
-  uint64_t insert_evict_data_count;   // Number of evicts due to data contention
-  uint64_t insert_evict_partial_evict_saved_line_count; // Number of lines saved by partial evict
+  uint64_t insert_evict_data_contention_count; 
+  uint64_t insert_evict_data_contention_line_count;  // Number of lines evicted (clean + dirty)
+  uint64_t insert_evict_data_contention_iter_count;  // Number of iterations in picking the tags during data contention
+  uint64_t insert_evict_data_contention_iter_line_count; // Number of lines scanned (some are *NOT* evicted)
+  uint64_t insert_evict_tag_contention_count; 
   // General stat
   uint64_t comp_attempt_count;       // Number of compression attempts
   uint64_t comp_attempt_size_sum;         // All attempted lines (corresponds to comp_attempt_count)
@@ -1045,11 +1148,11 @@ typedef struct ocache_struct_t {
   int64_t  MBD_bits_delta_sum;     // Delta in number of bits with/without zero value optimization
   uint64_t MBD_size_counts[8];
   uint64_t MBD_delta_size_dist[4]; // 4, 8, 12, 16 bits
+  uint64_t MBD_small_size_dist[4]; // 4, 8, 12, 16 bits
   uint64_t MBD_zero_count;
-  uint64_t MBD_uncomp_count;
+  uint64_t MBD_uncomp_count;               // Uncompressed word count
   uint64_t MBD_match_count;
-  uint64_t MBD_dict_insert_count;       // Number of dict inserts
-  uint64_t MBD_dict_insert_dup_count;   // Number of dict insert duplicated values
+  uint64_t MBD_dict_insert_count;          // Number of dict inserts
   uint64_t MBD_insert_base_hit;  // Number of times base is present
   uint64_t MBD_insert_base_miss;  // Number of times base is missing
   uint64_t MBD_insert_bcache_hit;
@@ -1058,10 +1161,17 @@ typedef struct ocache_struct_t {
   uint64_t MBD_read_base_is_missing;    // This is set by cc_simple
   uint64_t MBD_read_bcache_hit;
   uint64_t MBD_read_bcache_miss;
+  // The following is updated at ocache block hit cb ocache_access_hit_MBD_cb
   uint64_t MBD_decomp_count;            // Number of read decomp requests
-  uint64_t MBD_decomp_cycle_sum;        // Total number of cycles spent on decomp
+  uint64_t MBD_decomp_cycle_count;      // Total number of cycles spent on decomp
+  uint64_t MBD_decomp_cycle_dist[17];   // Distribution of decomp cycles (run-ahead + decomp for target)
   uint64_t MBD_decomp_zero_count;       // Total number of zeros seen during decompression
   uint64_t MBD_decomp_hit_zero_count;   // Hit zero, direct return of the critical word
+  uint64_t MBD_decomp_forward_count;         // Number of dict entries that forward value from ref to target
+  uint64_t MBD_decomp_forward_uncomp_count;  // Number of dict entries that caused stall
+  uint64_t MBD_decomp_forward_stalled_count; // Number of dict entries that caused stall
+  uint64_t MBD_decomp_stalled_cycle_count;   // Total number of cycles stalled during decomp of the target block
+  uint64_t MBD_decomp_stalled_cycle_dist[7]; // Distribution of stalled cycles per decomp
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -1104,6 +1214,10 @@ inline static void ocache_set_insert_cb(ocache_t *ocache, ocache_insert_cb_t cb)
 void ocache_set_insert_type(ocache_t *ocache, const char *name);
 // "BDI", "None"
 void ocache_set_compression_type(ocache_t *ocache, const char *name);
+// Sets MBD optimization type; Ignored if not MBD or incompatible
+void ocache_set_MBD_opt_type(ocache_t *ocache, const char *name);
+void ocache_set_evict_opt_type(ocache_t *ocache, const char *name);
+
 void ocache_init_bcache(ocache_t *ocache, int line_count, int way_count, const char *shape_str);
 
 uint64_t ocache_gen_addr(ocache_t *ocache, uint64_t tag, uint64_t set_id, int shape);

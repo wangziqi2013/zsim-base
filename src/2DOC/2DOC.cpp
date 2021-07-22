@@ -124,7 +124,7 @@ int BDI_comp_scalar(void *out_buf, void *in_buf, BDI_param_t *param, int dry_run
   uint64_t temp[32]; // Expand them to 64-bit integers
   int iter = UTIL_CACHE_LINE_SIZE / word_size; // Number of elements
   BDI_unpack(temp, in_buf, word_size, iter); // Unpack the input to uint64_t integers
-  // Whether BDI explicit basd has been found (should be the first value not compressed with implicit base)
+  // Whether BDI explicit base has been found (should be the first value not compressed with implicit base)
   int base_assigned = 0; 
   uint64_t base = -1UL;  // Explicit base value
   uint64_t small_value_bitmap = 0x0UL; // 1 means the value is compressed with implicit zero base
@@ -198,7 +198,7 @@ void BDI_decomp_scalar(void *out_buf, void *in_buf, BDI_param_t *param) {
 
 // Return value is BDI type, not the macro
 int BDI_comp(void *out_buf, void *in_buf) {
-  // 6 different BDIs to try
+  // 6 different BDI to try
   int iter = (int)(sizeof(BDI_comp_order) / sizeof(int));
   assert(iter == 6); 
   int ret;
@@ -953,6 +953,12 @@ void CPACK_print_compressed(void *in_buf) {
 
 //* MBD
 
+int MBD_bits[11] = {
+  2, 6, 34, // zero match uncomp
+  12, 16, 20, 24, // Delta 4, 8, 12, 16
+  8, 12, 16, 20,  // Small 4, 8, 12, 16
+};
+
 #ifdef MBD_DICT_LRU
 
 // Move index to LRU; Called on compression and decompression when an entry is hit for comp / used for decomp
@@ -982,13 +988,12 @@ void MBD_update_LRU(MBD_dict_t *dict, int index) {
   return;
 }
 
-void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
+int MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
   // If there is already one, then just promote it to LRU
   for(int i = 0;i < dict->count;i++) {
     if(dict->data[i] == data) {
-      dict->insert_dup_count++;
       MBD_update_LRU(dict, i);
-      return;
+      return i;
     }
   }
   dict->insert_count++;
@@ -1023,7 +1028,7 @@ void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
     dict->prev[index] = -1;
     dict->head_index = index;
   }
-  return;
+  return index;
 }
 
 #else 
@@ -1034,17 +1039,8 @@ void MBD_update_LRU(MBD_dict_t *dict, int index) {
   return;
 }
 
-void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
-  // Do not insert duplicated values; Start searching from index 1
-#ifdef MBD_COLLECT_STAT 
+int MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
   dict->insert_count++;
-  for(int i = 1;i < dict->count;i++) {
-    if(dict->data[i] == data) {
-      dict->insert_dup_count++;
-      break;
-    }
-  }
-#endif
   if(dict->next_slot_index == MBD_DICT_COUNT) {
     dict->next_slot_index = 1; // Does not overwrite zero
   }
@@ -1053,98 +1049,107 @@ void MBD_dict_insert(MBD_dict_t *dict, uint32_t data) {
   if(dict->count != MBD_DICT_COUNT) {
     dict->count++;
   }
-  return;
+  return index;
 }
 
 #endif
+
+// Given a 32-bit word, find the shortest encoding that preserves its value
+// Return value is # of bits
+// If could not find it then return 0
+int MBD_find_shortest_encoding(uint32_t word) {
+  uint32_t masked_delta;
+  masked_delta = word & ~0x7U;
+  if(masked_delta == 0 || masked_delta == ~0x7U) {
+    return 4;
+  }
+  masked_delta = word & ~0x7FU;
+  if(masked_delta == 0 || masked_delta == ~0x7FU) {
+    return 8;
+  }
+  masked_delta = word & ~0x7FFU;
+  if(masked_delta == 0 || masked_delta == ~0x7FFU) {
+    return 12;
+  } 
+  masked_delta = word & ~0x7FFFU;
+  if(masked_delta == 0 || masked_delta == ~0x7FFFU) {
+    return 16;
+  }
+  return 0; 
+}
 
 int MBD_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
   if(word == 0) {
     // All zero, code 2'b00
     *output = 0;
-#ifdef MBD_COLLECT_STAT 
     dict->zero_count++;
-#endif
+    dict->word_type = MBD_ZERO;
     return 2;
   }
   assert(dict->count >= 1 && dict->count <= MBD_DICT_COUNT);
   // Generate the best result
-  int min_bits = 32;
-  int min_index = -1;
+  int min_bits = 34;
+  int min_index;        // Minimum ref entry, if it is a delta
+  uint32_t min_word;    // Minimum encoding word
+  int is_min_delta = 1; // Whether minimum word is a delta or small value
+  int bits;
   for(int i = 0;i < dict->count;i++) {
     uint32_t data = dict->data[i];
     if(data == word) {
       //printf("Hit dict index %d (count %d)\n", i, dict->count);
-      // Direct match, code 2'b01 + 3-bit index
+      // Direct match, code 2'b01 + 3/4-bit index
       // Special case: This is always the min, so we can return immediately
       *output = ((uint64_t)i << 2) | 0x1UL;
-#ifdef MBD_COLLECT_STAT 
       dict->match_count++;
-#endif
+      dict->word_type = MBD_MATCH;
       MBD_update_LRU(dict, i);
       return 2 + MBD_DICT_INDEX_BITS;
     }
     uint32_t delta = word - data;
-    uint32_t masked_delta;
-    masked_delta = delta & ~0x7U;
-    if(masked_delta == 0 || masked_delta == ~0x7U) {
-      if(min_bits > 8 + MBD_DICT_INDEX_BITS) {
-        // 4-bit delta, code 4'0011 + 3-bit index + 4-bit delta
-        *output = ((delta & 0xF) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x3UL;
-        min_bits = 8 + MBD_DICT_INDEX_BITS;
+    bits = MBD_find_shortest_encoding(delta);
+    if(bits != 0) {
+      int delta_bits = bits + 4 + MBD_DICT_INDEX_BITS;
+      if(delta_bits < min_bits) {
+        min_bits = delta_bits;
         min_index = i;
-      }
-    } else {
-      masked_delta = delta & ~0x7FU;
-      if(masked_delta == 0 || masked_delta == ~0x7FU) {
-        if(min_bits > 12 + MBD_DICT_INDEX_BITS) {
-          // 8-bit delta, code 4'0111 + 3-bit index + 8-bit delta
-          *output = ((delta & 0xFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0x7UL;
-          min_bits = 12 + MBD_DICT_INDEX_BITS;
-          min_index = i;
-        }
-      } else {
-        masked_delta = delta & ~0x7FFU;
-        if(masked_delta == 0 || masked_delta == ~0x7FFU) {
-          if(min_bits > 16 + MBD_DICT_INDEX_BITS) {
-            // 12-bit delta, code 4'1011 + 3-bit index + 12-bit delta
-            *output = ((delta & 0xFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xBUL;
-            min_bits = 16 + MBD_DICT_INDEX_BITS;
-            min_index = i;
-          }
-        } else {
-          masked_delta = delta & ~0x7FFFU;
-          if(masked_delta == 0 || masked_delta == ~0x7FFFU) {
-            if(min_bits > 20 + MBD_DICT_INDEX_BITS) {
-              // 16-bit delta, code 4'1111 + 3-bit index + 16-bit delta
-              *output = ((delta & 0xFFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)i << 4) | 0xFUL;
-              min_bits = 20 + MBD_DICT_INDEX_BITS;
-              min_index = i;
-            }
-          }
-        }
+        min_word = delta;
       }
     }
-  }
-  if(min_bits != 32) {
-#ifdef MBD_COLLECT_STAT 
-    switch(min_bits) {
-      case 8 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[0]++; break;
-      case 12 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[1]++; break;
-      case 16 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[2]++; break;
-      case 20 + MBD_DICT_INDEX_BITS: dict->delta_size_dist[3]++; break;
-      default: assert(0); break;
+  } // loop through valid words in the dict
+  if(min_bits != 34) {
+    if(is_min_delta == 1) {
+      switch(min_bits) {
+        case 8 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xF) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0x3UL;
+          dict->delta_size_dist[0]++; 
+          dict->word_type = MBD_DELTA_4;
+        } break;
+        case 12 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0x7UL;
+          dict->delta_size_dist[1]++; 
+          dict->word_type = MBD_DELTA_8;
+        } break;
+        case 16 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0xBUL;
+          dict->delta_size_dist[2]++; 
+          dict->word_type = MBD_DELTA_12;
+        } break;
+        case 20 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0xFUL;
+          dict->delta_size_dist[3]++; 
+          dict->word_type = MBD_DELTA_16;
+        } break;
+        default: assert(0); break;
+      }
     }
-#endif
     MBD_update_LRU(dict, min_index);
     return min_bits;
   }
   // Uncompressable, code 2'b10 + 4 byte
   *output = ((uint64_t)word << 2) | 0x2UL;
   //printf("Miss dict count %d\n", dict->count);
-#ifdef MBD_COLLECT_STAT 
   dict->uncomp_count++;
-#endif
+  dict->word_type = MBD_UNCOMP;
   return 34;
 }
 
@@ -1264,6 +1269,8 @@ int __MBD_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict) {
     }
     in_buf++;
   }
+  // Hardcode the cycle count to eight without zero optimization
+  dict->cycle_count = 8;
   return bits;
 }
 
@@ -1338,6 +1345,361 @@ void _MBD_print_compressed(void *in_buf, int size) {
     printf("Index %d code 0x%X word %u (0x%X)\n", i, code, word, word);
   }
   return;
+}
+
+//* MBD_opt0
+
+int __MBD_opt0_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  assert(size > 0 && size % 4 == 0);
+  int count = size >> 2;
+  // Number of non-zero words in the current cycle
+  int non_zero_count = 0;
+  // This is relative to currently decompressed line, not considering the two cycles run-ahead
+  int current_cycle = 0;
+  for(int i = 0;i < count;i++) {
+    uint64_t output;
+    // Find a match
+    uint32_t word = *in_buf;
+    int ret = MBD_search(dict, word, &output);
+    (void)output;
+    // Zeros will not be inserted into the dict, and will not be in the output stream
+    if(dict->word_type != MBD_ZERO) {
+      bits += ret;
+      non_zero_count++;
+      // Each two non-zero words will take one cycle (2 words / cycle throughput without zeros)
+      if(non_zero_count == MBD_OPT0_THROUGHPUT) {
+        current_cycle++;
+        non_zero_count = 0;
+      }
+      MBD_dict_insert(dict, word);
+    }
+    in_buf++;
+  }
+  //printf("non-z count %d\n", non_zero_count);
+  if(non_zero_count != 0) {
+    current_cycle++;
+  }
+  dict->cycle_count = current_cycle;
+  // 16 is the size of the zero optimization mask
+  return bits + 16;
+}
+
+//* MBD_opt1
+
+// Note that this returns the actual number of bits, with zero optimization
+// cycles already have the runahead added
+int __MBD_opt1_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  assert(size > 0 && size % 4 == 0);
+  int count = size >> 2;
+  // Number of non-zero words in the current cycle
+  int non_zero_count = 0;
+  // This is relative to currently decompressed line, not considering the two cycles run-ahead
+  int current_cycle = 0;
+  for(int i = 0;i < count;i++) {
+    uint64_t output;
+    uint32_t word = *in_buf;
+    // This will set word_type as the type of code word it will generate
+    int ret = MBD_search(dict, word, &output);
+    // Zeros will not be inserted into the dict, and will not be in the output stream
+    if(dict->word_type != MBD_ZERO) {
+      // Only update cycle for reference block
+      if(MBD_OPTION_IS_REF(options)) {
+        int insert_index = MBD_dict_insert(dict, word);
+        assert(insert_index >= 1 && insert_index < MBD_DICT_COUNT);
+        dict->cycle[insert_index] = current_cycle;
+      } else {
+        // Get the index that hits the dict, if it is a dict hit
+        int dict_hit_index;
+        int source_cycle;
+        if(dict->word_type != MBD_UNCOMP) {
+          if(dict->word_type == MBD_MATCH) {
+            // Exact match: 3/4-bit index + 2'b10
+            dict_hit_index = (int)(output >> 2) & ((1 << MBD_DICT_INDEX_BITS) - 1);
+          } else {
+            // Deltas: 3/4-bit index + 4'bxxxx
+            dict_hit_index = (int)(output >> 4) & ((1 << MBD_DICT_INDEX_BITS) - 1);
+          }
+          assert(dict_hit_index >= 0 && dict_hit_index < MBD_DICT_COUNT);
+          // The cycle that the dict entry to be referred to is available
+          // -1 means it is always ready (generated by the current process)
+          source_cycle = dict->cycle[dict_hit_index];
+        } else {
+          // Uncompressed word, just skip forwarding detection
+          source_cycle = -1;
+        } 
+        // If hits zero then does not matter because zeroth element is hardwired
+        if(dict_hit_index != 0 && source_cycle != -1) {
+          // A forward from ref to target happens
+          dict->forward_count++;
+          // We use the same cycle scale as the ref block's cycle
+          // If the source is available in the future of the drain (i.e., source cycle > drain cycle)
+          int cycle_diff = (source_cycle + 1) - (current_cycle + MBD_OPT1_RUNAHEAD);
+          if(cycle_diff > 0) {
+            dict->stalled_cycle_count += cycle_diff;
+            dict->forward_stalled_count++;
+            current_cycle += cycle_diff;
+            // Also reset the non-zero count, since as advanted to a new cycle, and the new cycle 
+            // just processed the current word (++ will be performed below, so set it to zero)
+            non_zero_count = 0;
+          }
+        }
+        // Only insert after resolving the source entry (insert_index may be identical to dict_hit_index which
+        // will incur inaccuracy in the simulation)
+        int insert_index = MBD_dict_insert(dict, word);
+        // For target block, the entry is always available, so it is -1
+        dict->cycle[insert_index] = -1;
+      }
+      bits += ret;
+      non_zero_count++;
+      // Each two non-zero words will take one cycle (2 words / cycle throughput without zeros)
+      if(non_zero_count == MBD_OPT1_THROUGHPUT) {
+        current_cycle++;
+        non_zero_count = 0;
+      }
+    }
+    in_buf++;
+  }
+  //printf("non-z count %d\n", non_zero_count);
+  if(non_zero_count != 0) {
+    current_cycle++;
+  }
+  if(MBD_OPTION_IS_REF(options) == 0) {
+    current_cycle += MBD_OPT1_RUNAHEAD;
+  }
+  dict->cycle_count = current_cycle;
+  // 16 is the size of the zero optimization mask
+  return bits + 16;
+}
+
+//* MBD_opt2
+
+// Cycles already have the BDI latency added
+int __MBD_opt2_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options) {
+  int bits;
+  if(MBD_OPTION_IS_REF(options)) {
+    // This function returns BDI type or invalid type
+    int bdi_type = BDI_get_comp_size(_in_buf);
+    assert(bdi_type == BDI_TYPE_INVALID || (bdi_type >= BDI_TYPE_BEGIN && bdi_type < BDI_TYPE_END));
+    // BDI types store byte size
+    bits = (bdi_type == BDI_TYPE_INVALID) ? \
+      ((int)UTIL_CACHE_LINE_SIZE * 8) : BDI_types[bdi_type].compressed_size * 8;
+    // This trains the dict, but we do not use its compressed size
+    __MBD_opt0_get_comp_size_bits(_in_buf, size, dict);
+    // Ref block compressed and decompressed with BDI latency
+    dict->cycle_count = BDI_DECOMP_LATENCY;
+  } else {
+    // Compress with the given dictionary using opt0; This will also set cycle_count
+    bits = __MBD_opt0_get_comp_size_bits(_in_buf, size, dict);
+    dict->cycle_count += BDI_DECOMP_LATENCY;
+  }
+  return bits;
+}
+
+//* MBD_opt3
+
+int MBD_opt3_search(MBD_dict_t *dict, uint32_t word, uint64_t *output) {
+  if(word == 0) {
+    *output = 0;
+    dict->zero_count++;
+    dict->word_type = MBD_ZERO;
+    return 2;
+  }
+  assert(dict->count >= 0 && dict->count <= MBD_DICT_COUNT);
+  int min_bits = 34;
+  int min_index = 0;    // Minimum ref entry, if it is a delta
+  uint32_t min_word;    // Minimum encoding word
+  int is_min_delta = 1; // Whether minimum word is a delta or small value
+  int bits;
+  // Test for small values (small values have higher priority than deltas on the same bits)
+  bits = MBD_find_shortest_encoding(word);
+  if(bits != 0) {
+    min_bits = bits + 4;
+    min_word = word;
+    is_min_delta = 0;
+  }
+  for(int i = 0;i < dict->count;i++) {
+    uint32_t data = dict->data[i];
+    if(data == word) {
+      *output = ((uint64_t)i << 2) | 0x1UL;
+      dict->match_count++;
+      dict->word_type = MBD_MATCH;
+      MBD_update_LRU(dict, i);
+      return 2 + MBD_DICT_INDEX_BITS;
+    }
+    uint32_t delta = word - data;
+    bits = MBD_find_shortest_encoding(delta);
+    if(bits != 0) {
+      int delta_bits = bits + 4 + MBD_DICT_INDEX_BITS;
+      if(delta_bits < min_bits) {
+        min_bits = delta_bits;
+        min_index = i;
+        min_word = delta;
+      }
+    }
+  } // loop through valid words in the dict
+  if(min_bits != 34) {
+    if(is_min_delta == 1) {
+      switch(min_bits) {
+        case 8 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xF) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0x3UL;
+          dict->delta_size_dist[0]++; 
+          dict->word_type = MBD_DELTA_4;
+        } break;
+        case 12 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0x7UL;
+          dict->delta_size_dist[1]++; 
+          dict->word_type = MBD_DELTA_8;
+        } break;
+        case 16 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0xBUL;
+          dict->delta_size_dist[2]++; 
+          dict->word_type = MBD_DELTA_12;
+        } break;
+        case 20 + MBD_DICT_INDEX_BITS: {
+          *output = ((min_word & 0xFFFFU) << (MBD_DICT_INDEX_BITS + 4)) | ((uint64_t)min_index << 4) | 0xFUL;
+          dict->delta_size_dist[3]++; 
+          dict->word_type = MBD_DELTA_16;
+        } break;
+        default: assert(0); break;
+      }
+    } else {
+      switch(min_bits) {
+        case 8: {
+          *output = ((min_word & 0xF) << 4) | 0x0UL;
+          dict->small_size_dist[0]++; 
+          dict->word_type = MBD_SMALL_4;
+        } break;
+        case 12: {
+          *output = ((min_word & 0xFFU) << 4) | 0x4UL;
+          dict->small_size_dist[1]++; 
+          dict->word_type = MBD_SMALL_8;
+        } break;
+        case 16: {
+          *output = ((min_word & 0xFFFU) << 4) | 0x8UL;
+          dict->small_size_dist[2]++; 
+          dict->word_type = MBD_SMALL_12;
+        } break;
+        case 20: {
+          *output = ((min_word & 0xFFFFU) << 4) | 0xCUL;
+          dict->small_size_dist[3]++; 
+          dict->word_type = MBD_SMALL_16;
+        } break;
+        default: assert(0); break;
+      }
+    }
+    MBD_update_LRU(dict, min_index);
+    return min_bits;
+  }
+  *output = ((uint64_t)word << 2) | 0x2UL;
+  dict->uncomp_count++;
+  dict->word_type = MBD_UNCOMP;
+  return 34;
+}
+
+int __MBD_opt3_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int options) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  int bits = 0;
+  assert(size > 0 && size % 4 == 0);
+  int count = size >> 2;
+  // Number of non-zero words in the current cycle
+  int non_zero_count = 0;
+  // This is relative to currently decompressed line, not considering the two cycles run-ahead
+  int current_cycle = 0;
+  for(int i = 0;i < count;i++) {
+    uint64_t output;
+    // Find a match
+    uint32_t word = *in_buf;
+    int ret = MBD_opt3_search(dict, word, &output);
+    // Zeros will not be inserted into the dict, and will not be in the output stream
+    if(dict->word_type != MBD_ZERO) {
+      // Only update cycle for reference block
+      if(MBD_OPTION_IS_REF(options)) {
+        int insert_index = MBD_dict_insert(dict, word);
+        assert(insert_index >= 0 && insert_index < MBD_DICT_COUNT);
+        dict->cycle[insert_index] = current_cycle;
+        dict->types[insert_index] = dict->word_type;
+      } else {
+        // Get the index that hits the dict, if it is a dict hit
+        int dict_hit_index;
+        int source_cycle = -1;
+        int source_type = -1;
+        switch(dict->word_type) {
+          case MBD_MATCH: {
+            dict_hit_index = (int)(output >> 2) & ((1 << MBD_DICT_INDEX_BITS) - 1);
+            assert(dict_hit_index >= 0 && dict_hit_index < MBD_DICT_COUNT);
+            source_cycle = dict->cycle[dict_hit_index];
+            source_type = dict->types[dict_hit_index];
+          } break;
+          case MBD_DELTA_4: 
+          case MBD_DELTA_8:
+          case MBD_DELTA_12:
+          case MBD_DELTA_16: {
+            // Delta 4/8/12/16: 3/4-bit index + 4'bxxxx
+            dict_hit_index = (int)(output >> 4) & ((1 << MBD_DICT_INDEX_BITS) - 1);
+            assert(dict_hit_index >= 0 && dict_hit_index < MBD_DICT_COUNT);
+            // This can still be -1 to indicate self-forwarding
+            source_cycle = dict->cycle[dict_hit_index];
+            source_type = dict->types[dict_hit_index];
+          } break;
+          case MBD_UNCOMP:
+          case MBD_SMALL_4: 
+          case MBD_SMALL_8:
+          case MBD_SMALL_12:
+          case MBD_SMALL_16: break; // No dependency, source cycle and type are set above
+          default: assert(0); break;
+        }
+        // If hits zero then does not matter because zeroth element is hardwired
+        if(source_cycle != -1) {
+          // A forward from ref to target happens
+          dict->forward_count++;
+          assert(source_type != -1);
+          if(source_type == MBD_UNCOMP) {
+            dict->forward_uncomp_count++;
+          }
+          // We use the same cycle scale as the ref block's cycle
+          // If the source is available in the future of the drain (i.e., source cycle > drain cycle)
+          int cycle_diff = (source_cycle + 1) - (current_cycle + MBD_OPT1_RUNAHEAD);
+          if(cycle_diff > 0) {
+            dict->stalled_cycle_count += cycle_diff;
+            dict->forward_stalled_count++;
+            current_cycle += cycle_diff;
+            // Also reset the non-zero count, since as advanted to a new cycle, and the new cycle 
+            // just processed the current word (++ will be performed below, so set it to zero)
+            non_zero_count = 0;
+          }
+        }
+        // Only insert after resolving the source entry (insert_index may be identical to dict_hit_index which
+        // will incur inaccuracy in the simulation)
+        int insert_index = MBD_dict_insert(dict, word);
+        // For target block, the entry is always available, so it is -1
+        dict->cycle[insert_index] = -1;
+        dict->types[insert_index] = dict->word_type;
+      }
+      bits += ret;
+      non_zero_count++;
+      // Each two non-zero words will take one cycle (2 words / cycle throughput without zeros)
+      if(non_zero_count == MBD_OPT3_THROUGHPUT) {
+        current_cycle++;
+        non_zero_count = 0;
+      }
+    }
+    in_buf++;
+  }
+  //printf("non-z count %d\n", non_zero_count);
+  if(non_zero_count != 0) {
+    current_cycle++;
+  }
+  // Add runahead cycle for target block
+  if(MBD_OPTION_IS_REF(options) == 0) {
+    current_cycle += MBD_OPT3_RUNAHEAD;
+  }
+  dict->cycle_count = current_cycle;
+  // 16 is the size of the zero optimization mask
+  return bits + 16;
 }
 
 //* MESI_t
@@ -2032,6 +2394,39 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
   return;
 }
 
+// Sets MBD optimization type; This is orthogonal to the MBD inter-block comp type
+// The optimization type is ignored if incompatible
+void ocache_set_MBD_opt_type(ocache_t *ocache, const char *name) {
+  if(streq(name, "None") == 1) {
+    ocache->MBD_opt_type = OCACHE_MBD_OPT_NONE;
+  } else if(streq(name, "opt0") == 1 || streq(name, "OPT0") == 1) {
+    ocache->MBD_opt_type = OCACHE_MBD_OPT0;
+  } else if(streq(name, "opt1") == 1 || streq(name, "OPT1") == 1) {
+    ocache->MBD_opt_type = OCACHE_MBD_OPT1;
+  } else if(streq(name, "opt2") == 1 || streq(name, "OPT2") == 1) {
+    ocache->MBD_opt_type = OCACHE_MBD_OPT2;
+  } else if(streq(name, "opt3") == 1 || streq(name, "OPT3") == 1) {
+    ocache->MBD_opt_type = OCACHE_MBD_OPT3;
+  } else {
+    error_exit("Unknown MBD opt type: \"%s\"\n", name);
+  }
+  return;
+}
+
+// Set evict opt type from a string
+void ocache_set_evict_opt_type(ocache_t *ocache, const char *name) {
+  if(streq(name, "None") == 1) {
+    ocache->evict_opt_type = OCACHE_EVICT_OPT_NONE;
+  } else if(streq(name, "opt0") == 1 || streq(name, "OPT0") == 1) {
+    ocache->evict_opt_type = OCACHE_EVICT_OPT0;
+  } else if(streq(name, "opt1") == 1 || streq(name, "OPT1") == 1) {
+    ocache->evict_opt_type = OCACHE_EVICT_OPT1;
+  } else {
+    error_exit("Unknown evict opt type: \"%s\"\n", name);
+  }
+  return;
+}
+
 void ocache_init_bcache(ocache_t *ocache, int line_count, int way_count, const char *shape_str) {
   int shape;
   if(line_count <= 0) {
@@ -2532,7 +2927,12 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   }
   // We use our own dictionary object for collecting stats
   MBD_dict_t dict;
-  MBD_dict_invalidate(&dict);
+  // OPT3 initializes the dictionary differently
+  if(ocache->MBD_opt_type != OCACHE_MBD_OPT3) {
+    MBD_dict_invalidate(&dict);
+  } else {
+    MBD_opt3_dict_invalidate(&dict);
+  }
   uint64_t base_addr = addr;
   if(ocache->MBD_type == OCACHE_MBD_V4) {
     base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
@@ -2552,9 +2952,30 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   if(base_addr != addr) {
     dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
     if(base_entry != NULL) {
-      __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict); // Ignore zero count in base
-      // Invalidate stat, but keep the content
+      // Run comp on the ref block
+      switch(ocache->MBD_opt_type) {
+        case OCACHE_MBD_OPT_NONE: {
+          __MBD_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict); 
+        } break;
+        case OCACHE_MBD_OPT0: {
+          __MBD_opt0_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict); 
+        } break;
+        case OCACHE_MBD_OPT1: {
+          __MBD_opt1_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict, MBD_REF_BLOCK); 
+        } break;
+        case OCACHE_MBD_OPT2: {
+          __MBD_opt2_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict, MBD_REF_BLOCK); 
+        } break;
+        case OCACHE_MBD_OPT3: {
+          __MBD_opt3_get_comp_size_bits(base_entry->data, UTIL_CACHE_LINE_SIZE, &dict, MBD_REF_BLOCK); 
+        } break;
+        default: {
+          error_exit("Unknown MBD opt type: %d\n", ocache->MBD_opt_type);
+        } break;
+      }
+      // Invalidate stat, but keep the dictionary content
       MBD_dict_invalidate_stat(&dict);
+      // Simulate bcache and ref block hit/miss
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
         ocache->MBD_insert_base_miss++;
         // Access bcache if it is initialized
@@ -2573,8 +2994,33 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   } else {
     ocache->MBD_insert_base_hit++;
   }
-  int bits = __MBD_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict);
-  // Update stats
+  // Run comp on target block
+  int bits;
+  switch(ocache->MBD_opt_type) {
+    case OCACHE_MBD_OPT_NONE: {
+      bits = __MBD_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict); 
+    } break;
+    case OCACHE_MBD_OPT0: {
+      bits = __MBD_opt0_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict); 
+    } break;
+    case OCACHE_MBD_OPT1: {
+      // If it is the ref block itself, then just perform normal compression / decompression
+      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      bits = __MBD_opt1_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
+    } break;
+    case OCACHE_MBD_OPT2: {
+      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      bits = __MBD_opt2_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
+    } break;
+    case OCACHE_MBD_OPT3: {
+      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      bits = __MBD_opt3_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
+    } break;
+    default: {
+      error_exit("Unknown MBD opt type: %d\n", ocache->MBD_opt_type);
+    } break;
+  }
+  // Update compression stats
   ocache->MBD_zero_count += dict.zero_count;
   ocache->MBD_uncomp_count += dict.uncomp_count;
   ocache->MBD_match_count += dict.match_count;
@@ -2582,22 +3028,34 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
   ocache->MBD_delta_size_dist[1] += dict.delta_size_dist[1];
   ocache->MBD_delta_size_dist[2] += dict.delta_size_dist[2];
   ocache->MBD_delta_size_dist[3] += dict.delta_size_dist[3];
+  ocache->MBD_small_size_dist[0] += dict.small_size_dist[0];
+  ocache->MBD_small_size_dist[1] += dict.small_size_dist[1];
+  ocache->MBD_small_size_dist[2] += dict.small_size_dist[2];
+  ocache->MBD_small_size_dist[3] += dict.small_size_dist[3];
   ocache->MBD_dict_insert_count += dict.insert_count;
-  ocache->MBD_dict_insert_dup_count += dict.insert_dup_count;
-  // Number of bit diff from original MBD line
-  // 16 -> zero mask bits; dict.zero_count * 2 -> bits of zero code word
-  // This can be negative
-  int bits_delta = 16 - (dict.zero_count * 2);
-  ocache->MBD_bits_delta_sum += (int64_t)bits_delta;
-  bits += bits_delta;
-  // 2-byte zero mask - OK this is a simplification; Without mask we may have slightly more lines
-  // that can succeed here. But these lines will be 62 and 63 byte lines, which barely give anything
-  // So we just ignore these lines
+  // Update decompression stats
+  // Derive decompression cycle based on compression cycles, and store them in the dmap entry
+  // Note that compression and decompression are symmetric, so we can use comp stats for decompression later
+  // Note that we do not need decompression latency on insert (which is when this function is called), 
+  // because insertion happens either on lower level fetch or upper level write back.
+  // In the former case, we just provide the uncompressed block to the upper level. In the latter case,
+  // decompression is not on the critical path.
+  if(ocache->MBD_opt_type == OCACHE_MBD_OPT1 || ocache->MBD_opt_type == OCACHE_MBD_OPT3) { 
+    entry->decomp_stalled_cycle_count = dict.stalled_cycle_count;
+    entry->forward_count = dict.forward_count;
+    entry->forward_stalled_count = dict.forward_stalled_count;
+    entry->forward_uncomp_count = dict.forward_uncomp_count;
+  }
+  // For opt1, this already contains the two cycle runahead for target block
+  entry->decomp_cycle_count = (dict.cycle_count < 2) ? 2 : dict.cycle_count;
+  entry->zero_count = dict.zero_count;
+  // Check whether compression succeeds or not. Below is comp failed branch
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
     ocache->MBD_fail_count++;
     ocache->MBD_uncomp_size_sum += UTIL_CACHE_LINE_SIZE;
     return UTIL_CACHE_LINE_SIZE;
   }
+  // Compression succeeds, compute byte size and update general comp ratio stat
   int bytes = (bits + 7) / 8;
   ocache->MBD_success_count++;
   ocache->MBD_before_size_sum += UTIL_CACHE_LINE_SIZE;
@@ -2758,6 +3216,7 @@ uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
     assert(oid == 0UL);
   }
+  // Simulate bcache hit on read requests
   // For MBDv0 and Thesaurus this is never executed
   if(base_addr != addr) {
     dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
@@ -2783,22 +3242,29 @@ uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   (void)shape;
   // Get data
   dmap_entry_t *dmap_entry = dmap_find(ocache->dmap, oid, addr);
-  // Count number of zeros to determine cycles
+  // One more decompression on cached block hit
   ocache->MBD_decomp_count++;
-  int zero_count = 0;
-  for(int i = 0;i < 16;i++) {
-    uint32_t word = ((uint32_t *)dmap_entry->data)[i];
-    zero_count += (word == 0);
+  // Update stat from the dmap entry directly
+  assert(dmap_entry->decomp_cycle_count >= 2UL);
+  ocache->MBD_decomp_zero_count += dmap_entry->zero_count;
+  ocache->MBD_decomp_cycle_count += dmap_entry->decomp_cycle_count;
+  ocache->MBD_decomp_forward_count += dmap_entry->forward_count;
+  ocache->MBD_decomp_forward_stalled_count += dmap_entry->forward_stalled_count;
+  ocache->MBD_decomp_forward_uncomp_count += dmap_entry->forward_uncomp_count;
+  ocache->MBD_decomp_stalled_cycle_count += dmap_entry->decomp_stalled_cycle_count;
+  // TODO: Zero hits is short circuited
+  // Update dist stat
+  // This must remain between [0, 16], 17 elements
+  if(dmap_entry->decomp_cycle_count > 16) {
+    error_exit("Decompression cycle too large: %u\n", dmap_entry->decomp_cycle_count);
   }
-  ocache->MBD_decomp_zero_count += zero_count;
-  // Base is 8 cycles
-  uint64_t cycles = (uint64_t)((16 - zero_count + 1) / 2);
-  // Lower bound 2 cycles
-  if(cycles < 2) {
-    cycles = 2;
+  ocache->MBD_decomp_cycle_dist[dmap_entry->decomp_cycle_count]++;
+  // [0, 6], 7 elements
+  if(dmap_entry->decomp_stalled_cycle_count > 6) {
+    error_exit("Decompression stalled cycle too large: %u\n", dmap_entry->decomp_stalled_cycle_count);
   }
-  ocache->MBD_decomp_cycle_sum += cycles;
-  return cycles;
+  ocache->MBD_decomp_stalled_cycle_dist[dmap_entry->decomp_stalled_cycle_count]++;
+  return dmap_entry->decomp_cycle_count;
 }
 
 uint64_t ocache_access_hit_None_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
@@ -3021,7 +3487,7 @@ void ocache_insert_sb_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
 
 // Evict a given entry by copying it into the given result object and increment its insert_evict_count by one
 // This function will:
-//   (1) Update total_aligned_size
+//   (1) Update total_aligned_size based on the total aligned size of the entry
 //   (2) Update insert_evict_count
 //   (3) Update insert_evict_entries
 static void ocache_insert_helper_evict(ocache_t *ocache, ocache_entry_t *entry, ocache_op_result_t *result) {
@@ -3037,8 +3503,12 @@ static void ocache_insert_helper_evict(ocache_t *ocache, ocache_entry_t *entry, 
 
 // This is called on data contention
 // This function may only partially evict an SB; The evict order is large to small to minimize number of evictions
+// Evict optimization is added:
+//   (1) For OPT1, if the ref block is evicted, then we evict the entire tag
 static void ocache_insert_helper_evict_valid_lru(
   ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, int aligned_comp_size, ocache_op_result_t *result) {
+  // This is caused by data contention, so increment the counter
+  ocache->insert_evict_data_contention_count++;
   while(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
     ocache_entry_t *valid_lru_entry = NULL; // Must be a valid entry having the smallest LRU
     uint64_t min_lru = -1UL;
@@ -3055,20 +3525,31 @@ static void ocache_insert_helper_evict_valid_lru(
       entry++;
     } // for
     assert(valid_lru_entry != NULL);
-    int count = ocache_entry_get_valid_line_count(valid_lru_entry);
-    assert(count > 0);
+    const int tag_line_count = ocache_entry_get_valid_line_count(valid_lru_entry);
+    assert(tag_line_count > 0);
+    // Number of lines actually selected for eviction for the current tag
+    int evict_line_count = 0;
     // Number of aligned bytes that should be evicted
     int size_delta = \
       result->total_aligned_size + aligned_comp_size - ocache->set_size;
     assert(size_delta > 0);
     // If the entire entry should be evicted, then just use the fast path
-    if(size_delta >= ocache_entry_get_total_aligned_size(valid_lru_entry) || count == 1) {
+    // Three conditions:
+    //   (1) The tag's data combined is just larger than required size
+    //   (2) There is only a single line in the tag
+    //   (3) OPT0 is enabled
+    if(size_delta >= ocache_entry_get_total_aligned_size(valid_lru_entry) || tag_line_count == 1 || \
+       ocache->evict_opt_type == OCACHE_EVICT_OPT0) {
       ocache_insert_helper_evict(ocache, valid_lru_entry, result);
+      evict_line_count = tag_line_count;
     } else {
+      // Copy all entries into the temp entry, and then mark off those that are *NOT* evicted
+      // Then we call tag-level eviction using the temp entry, not the original entry
+      // This greatly simplifies the process, as the tag-level eviction function is destructive
       ocache_entry_t temp;
       ocache_entry_dup(&temp, valid_lru_entry);
       int evict_mask = 0x0; // 0x1, 0x2, 0x4, 0x8 represents the four blocks
-      for(int i = 0;i < count;i++) {
+      for(int i = 0;i < tag_line_count;i++) {
         int largest_size = 0;
         int largest_index = -1;
         // Pick largest line 
@@ -3082,7 +3563,20 @@ static void ocache_insert_helper_evict_valid_lru(
           }
         }
         assert(largest_index != -1);
-        evict_mask |= (0x1 << largest_index);
+        if(largest_index == 0 && ocache->evict_opt_type == OCACHE_EVICT_OPT1) {
+          // If evict OPT1 and the ref block is selected, then evict the entire tag
+          evict_mask = 0xF;
+          // This operation is local and will not affect total aligned size in result object
+          ocache_entry_inv_index(valid_lru_entry, 0);
+          ocache_entry_inv_index(valid_lru_entry, 1);
+          ocache_entry_inv_index(valid_lru_entry, 2);
+          ocache_entry_inv_index(valid_lru_entry, 3);
+          evict_line_count = tag_line_count;
+          break;
+        } else {
+          evict_line_count++;
+          evict_mask |= (0x1 << largest_index);
+        }
         // Clear the entry from LRU entry since as the point we know it will surely be evicted
         ocache_entry_inv_index(valid_lru_entry, largest_index);
         // If after evicting the line we have enough storage then that's it
@@ -3091,7 +3585,7 @@ static void ocache_insert_helper_evict_valid_lru(
         }
         size_delta -= largest_size;
         assert(size_delta > 0);
-      }
+      } // for loop selecting largest line in the tag
       // Clear those that are not evicted (not set in the mask)
       for(int i = 0;i < 4;i++) {
         // If the line is not evicted, then inv from temp
@@ -3102,9 +3596,13 @@ static void ocache_insert_helper_evict_valid_lru(
       }
       // Must use temp, since this function will clear the given entry
       ocache_insert_helper_evict(ocache, &temp, result);
-      ocache->insert_evict_partial_evict_saved_line_count += (count - popcount_int32(evict_mask));
     } // if-else whether to fully or partially evict the entry
-    ocache->insert_evict_data_count++;
+    // Lines that are actually evicted
+    ocache->insert_evict_data_contention_line_count += evict_line_count;
+    // Lines that are scanned during this process but some are not evicted
+    ocache->insert_evict_data_contention_iter_line_count += tag_line_count;
+    // Number of tags scanned
+    ocache->insert_evict_data_contention_iter_count++;
   } // while
   assert(result->insert_evict_count > 0);
   return;
@@ -3182,8 +3680,9 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
       // This is full miss, must claim the LRU entry and init to be the current base addr / shape
       insert_entry = result->lru_entry;
       // Claim a tag entry from LRU. If LRU entry is valid, evict it first; This will change total_aligned_size
+      // Tag contention case
       if(ocache_entry_is_all_invalid(insert_entry) == 0) {
-        ocache->insert_evict_tag_count++;
+        ocache->insert_evict_tag_contention_count++;
         // This will update result->total_aligned_size
         ocache_insert_helper_evict(ocache, insert_entry, result);
         result->state = OCACHE_EVICT; // Eviction for tag
@@ -3196,7 +3695,7 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
       insert_entry->addr = base_addr;
       insert_entry->shape = shape;
     }
-    // If need more storage then evict more entries
+    // If need more storage then evict more entries (data contention after tag contention)
     if(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
       // This will update lookup_result.total_aligned_size
       ocache_insert_helper_evict_valid_lru(ocache, oid, addr, shape, aligned_comp_size, result);
@@ -3753,6 +4252,13 @@ void ocache_conf_print(ocache_t *ocache) {
       ocache_shape_names[i], ocache->indices[i].addr_mask, ocache->indices[i].addr_shift,
       ocache->indices[i].oid_mask, ocache->indices[i].oid_shift);
   }
+  printf("Evict opt type: ");
+  switch(ocache->evict_opt_type) {
+    case OCACHE_EVICT_OPT_NONE: printf("None\n"); break;
+    case OCACHE_EVICT_OPT0: printf("OPT0 (always evict entire tag)\n"); break;
+    case OCACHE_EVICT_OPT1: printf("OPT1 (evict entire tag if base is selected as victim)\n"); break;
+    default: printf("Unknown type (internal error)\n"); break;
+  }
   printf("Algorithm: ");
   if(ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_cb) {
     printf("BDI\n");
@@ -3778,6 +4284,22 @@ void ocache_conf_print(ocache_t *ocache) {
   } else {
     printf("Unknown (debugging?)\n");
   }
+  // MBD optimization
+  printf("MBD opt: ");
+  if(ocache->MBD_opt_type == OCACHE_MBD_OPT_NONE) {
+    printf("None (fixed 8 cycle decomp)\n");
+  } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT0) {
+    printf("OPT0 (zero optimization)\n");
+  } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT1) {
+    printf("OPT1 (zero opt + runahead forwarding)\n");
+  } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT2) {
+    printf("OPT2 (BDI for ref and MBD opt0 for target)\n");
+  } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT3) {
+    printf("OPT3 (new encoding for zero-base small delta + runahead forwarding)\n");
+  } else {
+    printf("Unknown type (internal error)\n");
+  }
+  // Insert type
   printf("Insert type: ");
   if(ocache->insert_cb == ocache_insert_sb_cb) {
     printf("sector cache (super-block based)\n");
@@ -3797,11 +4319,23 @@ void ocache_conf_print(ocache_t *ocache) {
 void ocache_stat_print(ocache_t *ocache) {
   printf("---------- ocache_t stat ----------\n");
   // Insert stat
-  printf("Insert %lu SB hit %lu SB miss %lu (%.2lf%% rate) evict tag %lu data %lu saved %lu\n",
+  printf("Insert %lu SB hit %lu SB miss %lu (%.2lf%% rate)\n",
     ocache->insert_count, ocache->insert_sb_hit_count, ocache->insert_sb_miss_count,
-    100.0 * (double)ocache->insert_sb_hit_count / (double)ocache->insert_count,
-    ocache->insert_evict_tag_count, ocache->insert_evict_data_count,
-    ocache->insert_evict_partial_evict_saved_line_count);
+    100.0 * (double)ocache->insert_sb_hit_count / (double)ocache->insert_count);
+  printf("Evict opt type: ");
+  switch(ocache->evict_opt_type) {
+    case OCACHE_EVICT_OPT_NONE: printf("None\n"); break;
+    case OCACHE_EVICT_OPT0: printf("OPT0 (always evict entire tag)\n"); break;
+    case OCACHE_EVICT_OPT1: printf("OPT1 (evict entire tag if base is selected as victim)\n"); break;
+    default: printf("Unknown type (internal error)\n"); break;
+  }
+  printf("Evict reasons tag %lu data %lu\n", 
+    ocache->insert_evict_tag_contention_count, ocache->insert_evict_data_contention_count);
+  printf("Evict data contention lines %lu (%.2lf%% iter lines) iters %lu iter lines %lu\n",
+    ocache->insert_evict_data_contention_line_count,
+    100.0 * (double)ocache->insert_evict_data_contention_line_count / (double)ocache->insert_evict_data_contention_iter_line_count,
+    ocache->insert_evict_data_contention_iter_count,
+    ocache->insert_evict_data_contention_iter_line_count);
   // Vertical compression stats, only printed for LLC
   if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_BDI_cb || 
      ocache->get_compressed_size_cb == ocache_get_compressed_size_BDI_third_party_cb) {
@@ -3938,12 +4472,68 @@ void ocache_stat_print(ocache_t *ocache) {
       (double)ocache->comp_attempt_size_sum / (double)(ocache->MBD_uncomp_size_sum + ocache->MBD_after_size_sum));
     printf("MBD decomp %lu cycles %lu (avg %.2lf) zeros %lu (avg %.2lf) zero hits %lu (%.2lf%%)\n",
       ocache->MBD_decomp_count, 
-      ocache->MBD_decomp_cycle_sum, (double)ocache->MBD_decomp_cycle_sum / (double)ocache->MBD_decomp_count,
+      ocache->MBD_decomp_cycle_count, (double)ocache->MBD_decomp_cycle_count / (double)ocache->MBD_decomp_count,
       ocache->MBD_decomp_zero_count, (double)ocache->MBD_decomp_zero_count / (double)ocache->MBD_decomp_count,
       ocache->MBD_decomp_hit_zero_count, 100.0 * (double)ocache->MBD_decomp_hit_zero_count / (double)ocache->MBD_decomp_count);
-    printf("MBD zero opt bits delta %ld (avg %.2lf)\n", 
-      ocache->MBD_bits_delta_sum,
-      (double)ocache->MBD_bits_delta_sum / (double)ocache->comp_attempt_count);
+    // cycle distribution
+    int decomp_cycle_dist_begin = 0;
+    int decomp_cycle_dist_end = 16; 
+    // Zero optimization is only computed for opt none
+    if(ocache->MBD_opt_type == OCACHE_MBD_OPT_NONE) {
+      printf("MBD opt type: None\n");
+      // Print dist [2, 8]
+      decomp_cycle_dist_begin = 2;
+      decomp_cycle_dist_end = 9;
+    } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT0) {
+      printf("MBD opt type: OPT0\n");
+      // dist range [2, 8]
+      decomp_cycle_dist_begin = 2;
+      decomp_cycle_dist_end = 9;
+    } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT1 || ocache->MBD_opt_type == OCACHE_MBD_OPT3) {
+      printf("MBD opt type: %s\n", (ocache->MBD_opt_type == OCACHE_MBD_OPT1) ? "OPT1" : "OPT3");
+      printf("MBD forwards %lu (%.2lf%% total words)\n"
+             "    stalled forward %lu (%.2lf%% total forwarded) match %lu (%.2lf%% total forwarded)\n"
+             "    stalled cycles %lu (%.2lf%% total cycles)\n",
+        ocache->MBD_decomp_forward_count, 
+        100.0 * (double)ocache->MBD_decomp_forward_count / ((double)ocache->MBD_decomp_count * 16.0),
+        ocache->MBD_decomp_forward_stalled_count,
+        100.0 * (double)ocache->MBD_decomp_forward_stalled_count / (double)ocache->MBD_decomp_forward_count,
+        ocache->MBD_decomp_forward_uncomp_count,
+        100.0 * (double)ocache->MBD_decomp_forward_uncomp_count / (double)ocache->MBD_decomp_forward_count,
+        ocache->MBD_decomp_stalled_cycle_count,
+        100.0 * (double)ocache->MBD_decomp_stalled_cycle_count / (double)ocache->MBD_decomp_cycle_count);
+      printf("Stalled cycle dist:");
+      uint64_t stalled_cycle_dist_total = 0UL;
+      for(int i = 0;i <= 6;i++) {
+        stalled_cycle_dist_total += ocache->MBD_decomp_stalled_cycle_dist[i];
+      }
+      for(int i = 0;i <= 6;i++) {
+        printf(" [%d] %lu (%.2lf%%)", i, ocache->MBD_decomp_stalled_cycle_dist[i],
+          100.0 * (double)ocache->MBD_decomp_stalled_cycle_dist[i] / (double)stalled_cycle_dist_total);
+      }
+      putchar('\n');
+      // dist range [2, 16]
+      decomp_cycle_dist_begin = 2;
+      decomp_cycle_dist_end = 17;
+    } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT2) {
+      printf("MBD opt type: OPT2\n");
+      // dist range [2, 8]
+      decomp_cycle_dist_begin = 2;
+      decomp_cycle_dist_end = 9;
+    } else {
+      error_exit("Unknown MBD opt type: %d\n", ocache->MBD_opt_type);
+    }
+    printf("MBD decomp cycle dist:");
+    uint64_t decomp_cycle_dist_total = 0UL;
+    for(int i = decomp_cycle_dist_begin;i < decomp_cycle_dist_end;i++) {
+      decomp_cycle_dist_total += ocache->MBD_decomp_cycle_dist[i];
+    }
+    for(int i = decomp_cycle_dist_begin;i < decomp_cycle_dist_end;i++) {
+      printf(" [%d] %lu (%.2lf%%)", i, ocache->MBD_decomp_cycle_dist[i], 
+        100.0 * (double)ocache->MBD_decomp_cycle_dist[i] / (double)decomp_cycle_dist_total);
+    }
+    putchar('\n');
+    // base cache hit/miss
     printf("MBD insert base hit %lu missing %lu (base hit percentage %.2lf%%)\n",
       ocache->MBD_insert_base_hit, ocache->MBD_insert_base_miss,
       100.0 * ocache->MBD_insert_base_hit / 
@@ -3971,19 +4561,24 @@ void ocache_stat_print(ocache_t *ocache) {
     uint64_t MBD_total_case_count = \
       ocache->MBD_zero_count + ocache->MBD_match_count + ocache->MBD_uncomp_count + \
       ocache->MBD_delta_size_dist[0] + ocache->MBD_delta_size_dist[1] + ocache->MBD_delta_size_dist[2] + \
-      ocache->MBD_delta_size_dist[3];
-    printf("MBD Per-word stats [ZERO] %lu (%.2lf%%) [MATCH] %lu (%.2lf%%) [UNCOMP] %lu (%.2lf%%)"
-           " [4-bit] %lu (%.2lf%%) [8-bit] %lu (%.2lf%%) [12-bit] %lu (%.2lf%%) [16-bit] %lu (%.2lf%%)\n",
+      ocache->MBD_delta_size_dist[3] + 
+      ocache->MBD_small_size_dist[0] + ocache->MBD_small_size_dist[1] + ocache->MBD_small_size_dist[2] + \
+      ocache->MBD_small_size_dist[3];
+    printf("MBD Per-word stats [ZERO] %lu (%.2lf%%) [MATCH] %lu (%.2lf%%) [UNCOMP] %lu (%.2lf%%)\n"
+           "    delta [4-bit] %lu (%.2lf%%) [8-bit] %lu (%.2lf%%) [12-bit] %lu (%.2lf%%) [16-bit] %lu (%.2lf%%)\n"
+           "    small [4-bit] %lu (%.2lf%%) [8-bit] %lu (%.2lf%%) [12-bit] %lu (%.2lf%%) [16-bit] %lu (%.2lf%%)\n",
       ocache->MBD_zero_count, 100.0 * (double)ocache->MBD_zero_count / (double)MBD_total_case_count,
       ocache->MBD_match_count, 100.0 * (double)ocache->MBD_match_count / (double)MBD_total_case_count,
       ocache->MBD_uncomp_count, 100.0 * (double)ocache->MBD_uncomp_count / (double)MBD_total_case_count,
       ocache->MBD_delta_size_dist[0], 100.0 * (double)ocache->MBD_delta_size_dist[0] / (double)MBD_total_case_count,
       ocache->MBD_delta_size_dist[1], 100.0 * (double)ocache->MBD_delta_size_dist[1] / (double)MBD_total_case_count,
       ocache->MBD_delta_size_dist[2], 100.0 * (double)ocache->MBD_delta_size_dist[2] / (double)MBD_total_case_count,
-      ocache->MBD_delta_size_dist[3], 100.0 * (double)ocache->MBD_delta_size_dist[3] / (double)MBD_total_case_count);
-    printf("MBD dict inserts %lu dup %lu (%.2lf%% dup)\n", 
-      ocache->MBD_dict_insert_dup_count, ocache->MBD_dict_insert_count, 
-      100.0 * (double)ocache->MBD_dict_insert_dup_count / (double)ocache->MBD_dict_insert_count);
+      ocache->MBD_delta_size_dist[3], 100.0 * (double)ocache->MBD_delta_size_dist[3] / (double)MBD_total_case_count,
+      ocache->MBD_small_size_dist[0], 100.0 * (double)ocache->MBD_small_size_dist[0] / (double)MBD_total_case_count,
+      ocache->MBD_small_size_dist[1], 100.0 * (double)ocache->MBD_small_size_dist[1] / (double)MBD_total_case_count,
+      ocache->MBD_small_size_dist[2], 100.0 * (double)ocache->MBD_small_size_dist[2] / (double)MBD_total_case_count,
+      ocache->MBD_small_size_dist[3], 100.0 * (double)ocache->MBD_small_size_dist[3] / (double)MBD_total_case_count);
+    printf("MBD dict inserts %lu\n", ocache->MBD_dict_insert_count);
     printf("MBD size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->MBD_size_counts[i]);
@@ -4749,7 +5344,7 @@ void scache_stat_print(scache_t *scache) {
     printf("Other (debugging mode?)\n");
   }
   printf("Reads %lu inserts %lu invs %lu (success %lu) downgrades %lu (success %lu)"
-         " evict lines %lu avg (per insert) %lf\n", 
+         " evict lines %lu avg (per insert) %.2lf\n", 
     scache->read_count, scache->insert_count, scache->inv_count, scache->inv_success_count,
     scache->downgrade_count, scache->downgrade_success_count,
     scache->evict_line_count, (double)scache->evict_line_count / (double)scache->insert_count);
@@ -4926,14 +5521,14 @@ void dram_conf_print(dram_t *dram) {
 
 void dram_stat_print(dram_t *dram) {
   printf("---------- dram_t stat ----------\n");
-  printf("Total read %lu (cycles %lu, avg %lf) write %lu (cycles %lu, avg %lf) size %lu\n",
+  printf("Total read %lu (cycles %lu, avg %.2lf) write %lu (cycles %lu, avg %.2lf) size %lu\n",
     dram->total_read_count, dram->total_read_cycle, (double)dram->total_read_cycle / dram->total_read_count,
     dram->total_write_count, dram->total_write_cycle, (double)dram->total_write_cycle / dram->total_write_count,
     dram->total_write_size);
   printf("Curr window read %lu write %lu write size %lu read cycle %lu write cycle %lu\n",
     dram->stat_read_count, dram->stat_write_count, dram->stat_write_size,
     dram->stat_read_cycle, dram->stat_write_cycle);
-  printf("Write SBs %lu lines %lu avg lines %lf\n",
+  printf("Write SBs %lu lines %lu avg lines %.2lf\n",
     dram->total_sb_count, dram->total_sb_line_count,
     (double)dram->total_sb_line_count / dram->total_sb_count);
   printf("Contended %lu (read %lu write %lu) uncontended %lu\n",
@@ -5779,6 +6374,8 @@ void cc_ocache_init_l1_l2(cc_ocache_t *cc, int cache, int size, int way_count, i
     cc->cores[i].ocaches[cache] = ocache;
     // Disable compression
     ocache_set_compression_type(ocache, "None");
+    ocache_set_MBD_opt_type(ocache, "None");
+    ocache_set_evict_opt_type(ocache, "None");
     if(cc->shared_llc != NULL) {
       cc->cores[i].llc = cc->shared_llc;
     }
@@ -5836,6 +6433,24 @@ cc_ocache_t *cc_ocache_init_conf(conf_t *conf) {
     conf_find_int32_range(conf, "cc.ocache.llc.latency", 0, CONF_INT32_MAX, CONF_RANGE);
   const char *llc_algorithm = conf_find_str_mandatory(conf, "cc.ocache.llc.algorithm");
   cc_ocache_init_llc(cc, llc_size, llc_physical_way_count, llc_tag_way_count, llc_latency, llc_algorithm);
+  // LLC MBD optimization type, optional, default to None
+  char *MBD_opt_type_str = NULL;
+  int MBD_opt_type_found = conf_find_str(conf, "cc.ocache.llc.MBD_opt_type", &MBD_opt_type_str);
+  if(MBD_opt_type_found == 1) {
+    assert(MBD_opt_type_str != NULL);
+    ocache_set_MBD_opt_type(cc->shared_llc, MBD_opt_type_str);
+  } else {
+    ocache_set_MBD_opt_type(cc->shared_llc, "None");
+  }
+  // LLC evict optimization type, optional, default to None
+  char *evict_opt_type_str = NULL;
+  int evict_opt_type_found = conf_find_str(conf, "cc.ocache.llc.evict_opt_type", &evict_opt_type_str);
+  if(evict_opt_type_found == 1) {
+    assert(evict_opt_type_str != NULL);
+    ocache_set_evict_opt_type(cc->shared_llc, evict_opt_type_str);
+  } else {
+    ocache_set_evict_opt_type(cc->shared_llc, "None");
+  }
   // insert type, optional
   char *insert_type_str;
   int insert_type_found = conf_find_str(conf, "cc.ocache.llc.insert_type", &insert_type_str);
@@ -6573,6 +7188,24 @@ cc_simple_t *cc_simple_init_conf(conf_t *conf) {
   ocache_set_level(cc->shared_llc, MESI_CACHE_LLC);
   ocache_set_name(cc->shared_llc, "Shared LLC (cc_simple)");
   ocache_set_compression_type(cc->shared_llc, llc_algorithm);
+  // LLC's MBD optimization type, optional, default to None
+  char *MBD_opt_type_str = NULL;
+  int MBD_opt_type_found = conf_find_str(conf, "cc.simple.llc.MBD_opt_type", &MBD_opt_type_str);
+  if(MBD_opt_type_found == 1) {
+    assert(MBD_opt_type_str != NULL);
+    ocache_set_MBD_opt_type(cc->shared_llc, MBD_opt_type_str);
+  } else {
+    ocache_set_MBD_opt_type(cc->shared_llc, "None");
+  }
+  // LLC evict optimization type, optional, default to None
+  char *evict_opt_type_str = NULL;
+  int evict_opt_type_found = conf_find_str(conf, "cc.simple.llc.evict_opt_type", &evict_opt_type_str);
+  if(evict_opt_type_found == 1) {
+    assert(evict_opt_type_str != NULL);
+    ocache_set_evict_opt_type(cc->shared_llc, evict_opt_type_str);
+  } else {
+    ocache_set_evict_opt_type(cc->shared_llc, "None");
+  }
   // insert type, optional
   char *insert_type_str;
   int insert_type_found = conf_find_str(conf, "cc.simple.llc.insert_type", &insert_type_str);
@@ -7502,7 +8135,7 @@ void main_addr_map_stat_print(main_addr_map_t *addr_map) {
   printf("---------- main_addr_map_t stat ----------\n");
   printf("Count entry %d insert %lu find %lu list %lu step %lu\n", 
     addr_map->entry_count, addr_map->insert_count, addr_map->find_count, addr_map->list_count, addr_map->step_count);
-  printf("Avg steps %lf\n", 
+  printf("Avg steps %.2lf\n", 
     (double)addr_map->step_count / (double)(addr_map->insert_count + addr_map->find_count));
   return;
 }
@@ -8290,6 +8923,7 @@ void main_stat_print(main_t *main) {
       main->param->interval_count, main->param->interval_skip_inst_count);
   printf("Last reported inst %lu cycle %lu start cycle %lu\n", 
     main->last_inst_count, main->last_cycle_count, main->start_cycle_count);
+  // Note: Do not make it .2lf because we want IPC to be as precise as possible
   printf("  IPC = %lf\n", (double)main->sim_inst_count / (double)main->sim_cycle_count);
   printf("Total time: %lu seconds (wait+sim throughput %.2lf inst/sec)\n", 
     main->end_time - main->init_time,
