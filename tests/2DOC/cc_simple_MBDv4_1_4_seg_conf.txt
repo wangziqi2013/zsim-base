@@ -26,4 +26,7 @@ cc.simple.core_count = 1
 
 cc.simple.default_shape = 1_4
 
+MBD.runahead = 0
+MBD.throughput = 2
+
 main.result_suffix = simple_MBDv4_1_4_seg

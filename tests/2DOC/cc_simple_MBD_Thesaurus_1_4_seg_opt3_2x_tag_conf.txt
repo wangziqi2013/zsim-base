@@ -11,11 +11,10 @@ cc.simple.l2.latency = 11
 # 1MB
 cc.simple.llc.size = 1048576
 cc.simple.llc.physical_way_count = 8
-cc.simple.llc.tag_way_count = 12
+cc.simple.llc.tag_way_count = 16
 cc.simple.llc.latency = 30
-cc.simple.llc.algorithm = MBDv4
+cc.simple.llc.algorithm = MBD_Thesaurus
 cc.simple.llc.MBD_opt_type = opt3
-cc.simple.llc.evict_opt_type = opt0
 
 # Segmented cache data store
 cc.simple.llc.insert_type = seg
@@ -32,4 +31,4 @@ cc.simple.default_shape = 1_4
 MBD.runahead = 0
 MBD.throughput = 2
 
-main.result_suffix = simple_MBDv4_1_4_seg_opt3_evict_opt0_1pt5x_tag
+main.result_suffix = simple_MBD_Thesaurus_2x_tag_1_4_seg_opt3
