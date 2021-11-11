@@ -1598,6 +1598,59 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
     return EHR_CONTINUE_SEARCH; //we never solve anything at all :P
 }
 
+// Image instrumentation
+
+VOID MallocBefore(ADDRINT size)
+{
+    TraceFile << name << "(" << size << ")" << endl;
+}
+
+VOID MallocAfter(ADDRINT ret)
+{
+    TraceFile << "  returns " << ret << endl;
+}
+
+VOID FreeBefore(ADDRINT size)
+{
+    TraceFile << name << "(" << size << ")" << endl;
+}
+
+VOID Image(IMG img, VOID *v)
+{
+    // Instrument the malloc() and free() functions.  Print the input argument
+    // of each malloc() or free(), and the return value of malloc().
+    //
+    //  Find the malloc() function.
+    RTN mallocRtn = RTN_FindByName(img, "malloc");
+    if(RTN_Valid(mallocRtn)) {
+        RTN_Open(mallocRtn);
+        // Instrument malloc() to print the input argument value and the return value.
+        RTN_InsertCall(mallocRtn, IPOINT_BEFORE, (AFUNPTR)MallocBefore,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_END);
+        RTN_InsertCall(mallocRtn, IPOINT_AFTER, (AFUNPTR)MallocAfter,
+                       IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
+
+        RTN_Close(mallocRtn);
+    } else {
+        printf("Could not find malloc() in the program\n");
+    }
+
+    // Find the free() function.
+    RTN freeRtn = RTN_FindByName(img, "free");
+    if(RTN_Valid(freeRtn)) {
+        RTN_Open(freeRtn);
+        // Instrument free() to print the input argument value.
+        RTN_InsertCall(freeRtn, IPOINT_BEFORE, (AFUNPTR)FreeBefore,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_END);
+        RTN_Close(freeRtn);
+    } else {
+        printf("Could not find free() in the program\n");
+    }
+    return;
+}
+
 /* ===================================================================== */
 
 int main(int argc, char *argv[]) {
