@@ -1600,16 +1600,32 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
 
 // Image instrumentation
 
-VOID MallocBefore(ADDRINT size) {
-    printf("Malloc call %lu bytes\n", size);
+VOID MallocBefore(ADDRINT ip, ADDRINT size) {
+    printf("Malloc @ 0x%lX call, size %lu\n", ip, size);
 }
 
-VOID MallocAfter(ADDRINT ptr) {
-    printf("Malloc returns 0x%lX\n", ptr);
+VOID MallocAfter(ADDRINT ip, ADDRINT ptr) {
+    printf("Malloc @ 0x%lX returns 0x%lX\n", ip, ptr);
 }
 
-VOID FreeBefore(ADDRINT ptr) {
-    printf("Free 0x%lX\n", ptr);
+VOID CallocBefore(ADDRINT ip, ADDRINT items, ADDRINT size) {
+    printf("Calloc @ 0x%lX call, items %lu size %lu\n", ip, items, size);
+}
+
+VOID CallocAfter(ADDRINT ip, ADDRINT ptr) {
+    printf("Calloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+}
+
+VOID ReallocBefore(ADDRINT ip, ADDRINT ptr, ADDRINT size) {
+    printf("Realloc @ 0x%lX call, ptr 0x%lX size %lu\n", ip, ptr, size);
+}
+
+VOID ReallocAfter(ADDRINT ip, ADDRINT ptr) {
+    printf("Realloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+}
+
+VOID FreeBefore(ADDRINT ip, ADDRINT ptr) {
+    printf("Free @ 0x%lX call, ptr 0x%lX\n", ip, ptr);
 }
 
 VOID Image(IMG img, VOID *v)
@@ -1623,14 +1639,54 @@ VOID Image(IMG img, VOID *v)
         RTN_Open(mallocRtn);
         // Instrument malloc() to print the input argument value and the return value.
         RTN_InsertCall(mallocRtn, IPOINT_BEFORE, (AFUNPTR)MallocBefore,
+                       IARG_INST_PTR,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
         RTN_InsertCall(mallocRtn, IPOINT_AFTER, (AFUNPTR)MallocAfter,
+                       IARG_INST_PTR,
                        IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
 
         RTN_Close(mallocRtn);
     } else {
         printf("Could not find malloc() in the program\n");
+    }
+
+    // calloc()
+    RTN callocRtn = RTN_FindByName(img, "calloc");
+    if(RTN_Valid(callocRtn)) {
+        RTN_Open(callocRtn);
+        // Instrument malloc() to print the input argument value and the return value.
+        RTN_InsertCall(callocRtn, IPOINT_BEFORE, (AFUNPTR)CallocBefore,
+                       IARG_INST_PTR,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                       IARG_END);
+        RTN_InsertCall(callocRtn, IPOINT_AFTER, (AFUNPTR)CallocAfter,
+                       IARG_INST_PTR,
+                       IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
+
+        RTN_Close(callocRtn);
+    } else {
+        printf("Could not find calloc() in the program\n");
+    }
+
+    // realloc()
+    RTN reallocRtn = RTN_FindByName(img, "realloc");
+    if(RTN_Valid(reallocRtn)) {
+        RTN_Open(reallocRtn);
+        // Instrument malloc() to print the input argument value and the return value.
+        RTN_InsertCall(reallocRtn, IPOINT_BEFORE, (AFUNPTR)ReallocBefore,
+                       IARG_INST_PTR,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                       IARG_END);
+        RTN_InsertCall(reallocRtn, IPOINT_AFTER, (AFUNPTR)ReallocAfter,
+                       IARG_INST_PTR,
+                       IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
+
+        RTN_Close(reallocRtn);
+    } else {
+        printf("Could not find realloc() in the program\n");
     }
 
     // Find the free() function.
@@ -1639,6 +1695,7 @@ VOID Image(IMG img, VOID *v)
         RTN_Open(freeRtn);
         // Instrument free() to print the input argument value.
         RTN_InsertCall(freeRtn, IPOINT_BEFORE, (AFUNPTR)FreeBefore,
+                       IARG_INST_PTR,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
         RTN_Close(freeRtn);
