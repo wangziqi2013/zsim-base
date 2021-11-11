@@ -1600,19 +1600,16 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
 
 // Image instrumentation
 
-VOID MallocBefore(ADDRINT size)
-{
-    TraceFile << name << "(" << size << ")" << endl;
+VOID MallocBefore(ADDRINT size) {
+    printf("Malloc call %lu bytes\n", size);
 }
 
-VOID MallocAfter(ADDRINT ret)
-{
-    TraceFile << "  returns " << ret << endl;
+VOID MallocAfter(ADDRINT ptr) {
+    printf("Malloc returns 0x%lX\n", ptr);
 }
 
-VOID FreeBefore(ADDRINT size)
-{
-    TraceFile << name << "(" << size << ")" << endl;
+VOID FreeBefore(ADDRINT ptr) {
+    printf("Free 0x%lX\n", ptr);
 }
 
 VOID Image(IMG img, VOID *v)
@@ -1756,6 +1753,7 @@ int main(int argc, char *argv[]) {
 
     //Register instrumentation
     TRACE_AddInstrumentFunction(Trace_normal, 0);
+    IMG_AddInstrumentFunction(Image, 0);
     VdsoInit(); //initialized vDSO patching information (e.g., where all the possible vDSO entry points are)
 
     PIN_AddThreadStartFunction(ThreadStart, 0);
