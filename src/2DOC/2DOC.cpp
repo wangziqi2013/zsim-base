@@ -959,6 +959,33 @@ int MBD_bits[11] = {
   8, 12, 16, 20,  // Small 4, 8, 12, 16
 };
 
+// MBD.runahead
+int MBD_RUNAHEAD = 2;
+// MBD.throughput
+int MBD_THROUGHPUT = 2;
+
+void MBD_init(conf_t *conf) {
+  int found = 0;
+  int value = 0;
+  // Read runahead
+  found = conf_find_int32(conf, "MBD.runahead", &value);
+  if(found == 1) {
+    if(value < 0 || value > 8) {
+      error_exit("Invalid value of MBD.runahead: %d (expecting [0, 8])\n", value);
+    }
+    MBD_RUNAHEAD = value;
+  }
+  // Read throughput
+  found = conf_find_int32(conf, "MBD.throughput", &value);
+  if(found == 1) {
+    if(value < 0 || value > 8) {
+      error_exit("Invalid value of MBD.throughput: %d (expecting [0, 8])\n", value);
+    }
+    MBD_THROUGHPUT = value;
+  }
+  return;
+}
+
 #ifdef MBD_DICT_LRU
 
 // Move index to LRU; Called on compression and decompression when an entry is hit for comp / used for decomp
@@ -3046,7 +3073,7 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
     entry->forward_stalled_count = dict.forward_stalled_count;
     entry->forward_uncomp_count = dict.forward_uncomp_count;
   }
-  // For opt1, this already contains the two cycle runahead for target block
+  // dict.cycle_count already includes the runahead cycles, if any
   entry->decomp_cycle_count = (dict.cycle_count < 2) ? 2 : dict.cycle_count;
   entry->zero_count = dict.zero_count;
   // Check whether compression succeeds or not. Below is comp failed branch
@@ -3245,6 +3272,7 @@ uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   // One more decompression on cached block hit
   ocache->MBD_decomp_count++;
   // Update stat from the dmap entry directly
+  // This is capped at >= 2 by the get compressed size function
   assert(dmap_entry->decomp_cycle_count >= 2UL);
   ocache->MBD_decomp_zero_count += dmap_entry->zero_count;
   ocache->MBD_decomp_cycle_count += dmap_entry->decomp_cycle_count;
@@ -3254,13 +3282,13 @@ uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
   ocache->MBD_decomp_stalled_cycle_count += dmap_entry->decomp_stalled_cycle_count;
   // TODO: Zero hits is short circuited
   // Update dist stat
-  // This must remain between [0, 16], 17 elements
+  // This must remain between [2, 16], 17 elements in the array with first two always being zero
   if(dmap_entry->decomp_cycle_count > 16) {
     error_exit("Decompression cycle too large: %u\n", dmap_entry->decomp_cycle_count);
   }
   ocache->MBD_decomp_cycle_dist[dmap_entry->decomp_cycle_count]++;
-  // [0, 6], 7 elements
-  if(dmap_entry->decomp_stalled_cycle_count > 6) {
+  // [0, 8], 9 elements
+  if(dmap_entry->decomp_stalled_cycle_count > 8) {
     error_exit("Decompression stalled cycle too large: %u\n", dmap_entry->decomp_stalled_cycle_count);
   }
   ocache->MBD_decomp_stalled_cycle_dist[dmap_entry->decomp_stalled_cycle_count]++;
@@ -3642,6 +3670,8 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
     dirty = dirty || ocache_entry_is_dirty(hit_entry, hit_index);
     // Invalidate the entry, i.e., an insert hit is equivalent to removing and re-inserting it
     ocache_entry_inv_index(hit_entry, hit_index);
+    // TODO: TEST WHETHER THE COMPRESSED SIZE OF OTHER BLOCKS CHANGE DUE TO THE INSERTION OF THE BLOCK,
+    // IF THE INSERTION IS A REFERENCE BLOCK
     // Need to update aligned size, which should be done before the invalidation
     result->total_aligned_size -= aligned_old_size;
     if(result->total_aligned_size + aligned_comp_size > ocache->set_size) {
@@ -4271,13 +4301,14 @@ void ocache_conf_print(ocache_t *ocache) {
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_CPACK_cb) {
     printf("CPACK\n");
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_MBD_cb) {
-    printf("MBD (dict size %d bits %d Repl.Algo. %s type %s)\n", 
+    printf("MBD (dict size %d bits %d Repl.Algo. %s runahead %d throughput %d type %s)\n", 
       MBD_DICT_COUNT, MBD_DICT_INDEX_BITS,
       #ifdef MBD_DICT_LRU
         "LRU",
       #else
         "FIFO",
       #endif
+      MBD_RUNAHEAD, MBD_THROUGHPUT,
       ocache_MBD_type_names[ocache->MBD_type]);
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
@@ -4295,7 +4326,7 @@ void ocache_conf_print(ocache_t *ocache) {
   } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT2) {
     printf("OPT2 (BDI for ref and MBD opt0 for target)\n");
   } else if(ocache->MBD_opt_type == OCACHE_MBD_OPT3) {
-    printf("OPT3 (new encoding for zero-base small delta + runahead forwarding)\n");
+    printf("OPT3 (zero opt + runahead forwarding) + new encoding for zero-base small delta\n");
   } else {
     printf("Unknown type (internal error)\n");
   }
@@ -4451,13 +4482,14 @@ void ocache_stat_print(ocache_t *ocache) {
     }
     putchar('\n');
   } else if(ocache->get_compressed_size_cb == &ocache_get_compressed_size_MBD_cb) {
-    printf("MBD dict entries %d bits %d Repl.Algo. %s type %s\n", 
+    printf("MBD dict entries %d bits %d Repl.Algo. %s runahead %d throughput %d type %s\n", 
       MBD_DICT_COUNT, MBD_DICT_INDEX_BITS, 
       #ifdef MBD_DICT_LRU
         "LRU",
       #else
         "FIFO",
       #endif
+      MBD_RUNAHEAD, MBD_THROUGHPUT,
       ocache_MBD_type_names[ocache->MBD_type]);
     printf("MBD attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
       ocache->comp_attempt_count, ocache->MBD_success_count, ocache->MBD_fail_count,
@@ -4477,7 +4509,7 @@ void ocache_stat_print(ocache_t *ocache) {
       ocache->MBD_decomp_hit_zero_count, 100.0 * (double)ocache->MBD_decomp_hit_zero_count / (double)ocache->MBD_decomp_count);
     // cycle distribution
     int decomp_cycle_dist_begin = 0;
-    int decomp_cycle_dist_end = 16; 
+    int decomp_cycle_dist_end = 17; 
     // Zero optimization is only computed for opt none
     if(ocache->MBD_opt_type == OCACHE_MBD_OPT_NONE) {
       printf("MBD opt type: None\n");
@@ -4504,10 +4536,10 @@ void ocache_stat_print(ocache_t *ocache) {
         100.0 * (double)ocache->MBD_decomp_stalled_cycle_count / (double)ocache->MBD_decomp_cycle_count);
       printf("Stalled cycle dist:");
       uint64_t stalled_cycle_dist_total = 0UL;
-      for(int i = 0;i <= 6;i++) {
+      for(int i = 0;i <= 8;i++) {
         stalled_cycle_dist_total += ocache->MBD_decomp_stalled_cycle_dist[i];
       }
-      for(int i = 0;i <= 6;i++) {
+      for(int i = 0;i <= 8;i++) {
         printf(" [%d] %lu (%.2lf%%)", i, ocache->MBD_decomp_stalled_cycle_dist[i],
           100.0 * (double)ocache->MBD_decomp_stalled_cycle_dist[i] / (double)stalled_cycle_dist_total);
       }
@@ -8432,6 +8464,8 @@ main_t *main_init_conf(conf_t *conf) {
   } else {
     error_exit("Unknown 1d-to-2d addr translation type: \"%s\"\n", main->param->addr_1d_to_2d_type);
   }
+  // Initialize global MBD variables as argument - note that this is independent of the algo of LLC
+  MBD_init(conf);
   return main;
 }
 
@@ -8901,6 +8935,9 @@ void main_save_conf_stat(main_t *main, char *prefix) {
 
 void main_conf_print(main_t *main) {
   printf("---------- main_t conf ----------\n");
+  // Print current time
+  time_t curr_time = time(NULL);
+  printf("Current time: %s", ctime(&curr_time));
   // Prints out all variables read from conf file
   main_param_conf_print(main->param);
   printf("conf file name \"%s\"\n", main->conf_filename);
@@ -8934,6 +8971,9 @@ void main_stat_print(main_t *main) {
   printf("  Sim time: %lu seconds (throughput %.2lf inst/sec)\n",
     main->end_time - main->begin_time,
     (double)main->sim_inst_count / (double)(main->end_time - main->begin_time));
+  // Print current time to avoid confusion
+  time_t curr_time = time(NULL);
+  printf("Current time: %s", ctime(&curr_time));
   printf("Slave count %d (this is %s)\n", main->slave_count, main->slave_count ? "slave" : "master");
   printf("oc:\n");
   oc_stat_print(main->oc);

@@ -231,96 +231,220 @@ void conf_init_directive(conf_t *conf, char *buf, int curr_line) {
   return;
 }
 
+// Reads a line from fp and return it in a buffer allocated on the heap
+// This function guarantees an entire line ending with \n or EOF (in which case there is no \n at the end)
+// Caller is responsible for freeing the returned buffer
+// Returns NULL if the read position is at EOF when this function is called. This condition does not 
+// need to be triggered by an attempt to read
+// This function will *NEVER* return a string of length zero
+// This function will convert CRLF to LF, if there is \r\n at the end of the line
+char *conf_fgets(FILE *fp) {
+  int buf_size = CONF_FGETS_INIT_SIZE; // Initial size of the buffer
+  int curr_len = 0;    // Current length of the string in the buffer, including '\n'
+  char *ret = (char *)malloc(buf_size);
+  SYSEXPECT(ret != NULL);
+  // If the previous call sets EOF, quick return here
+  if(feof(fp)) {
+    //printf("Previously triggered EOF\n");
+    free(ret);
+    return NULL;
+  }
+  int first_loop = 1;
+  while(1) {
+    int fp_offset = ftell(fp);
+    // This will trigger EOF if it actually attempts to read past EOF
+    char *fgets_ret = fgets(ret + curr_len, buf_size - curr_len, fp);
+    //printf("buf \"%s\"\n", ret);
+    // This only happens when the fp is right at EOF after the previous loop. fgets() will
+    // attempt to read, which sets EOF without new content.
+    if(fgets_ret == NULL) {
+      // The read position is already at EOF when this function is called
+      if(first_loop == 1) {
+        //printf("First loop EOF\n");
+        free(ret);
+        return NULL;
+      } else {
+        //printf("Later loop EOF\n");
+        // Something has been read from previous iterations
+        break;
+      }
+    }
+    first_loop = 0;
+    // Number of raw bytes read, including '\n'
+    int fp_read_size = ftell(fp) - fp_offset;
+    assert(fp_read_size > 0);
+    curr_len += fp_read_size;
+    // There is always a '\0' appended by fgets()
+    assert(curr_len > 0 && curr_len < buf_size && ret[curr_len] == '\0');
+    // It is an actual '\n', not because the buffer is not big enough
+    if(ret[curr_len - 1] == '\n') {
+      // \r\n is transformed to \n
+      if(curr_len >= 2 && ret[curr_len - 2] == '\r') {
+        ret[curr_len - 2] = '\n';
+        ret[curr_len - 1] = '\0';
+        curr_len--;
+      }
+      break;
+    }
+    buf_size *= 2;
+    // Otherwise, the buffer is not big enough, so we realloc()
+    ret = (char *)realloc(ret, buf_size);
+    SYSEXPECT(ret != NULL);
+  }
+  return ret;
+}
+
+// Removes everything after '#' and returns the length of the new character
+// The return value can be zero
+int conf_remove_comment(char *s) {
+  int len = strlen(s);
+  // Remove comments
+  for(int i = 0;i < len;i++) {
+    // If comment symbol is seen, then the line terminates here
+    if(s[i] == '#') {
+      // Update length as well
+      len = i;
+      s[i] = '\0';
+      break;
+    }
+  }
+  return len;
+}
+
+// Trim left and right spaces and move the content such that the first character 
+// is non-space.
+int conf_trim(char *s) {
+  int len = strlen(s);
+  char *begin = s;
+  // This points to the last character of the current string
+  char *end = s + (len - 1);
+  // Move begin until end of string or non-space
+  while(*begin != '\0' && isspace(*begin)) {
+    begin++;
+  }
+  // Entire string is space
+  if(*begin == '\0') {
+    s[0] = '\0';
+    return 0;
+  }
+  assert(end >= begin);
+  while(end >= begin && isspace(*end)) {
+    end--;
+  }
+  assert(end >= begin);
+  // New length
+  len = end + 1 - begin;
+  // Potentially overlapping memory copy
+  memmove(s, begin, len);
+  s[len] = '\0';
+  return len;
+}
+
+// Reads a logical line, i.e., with spaces trimmed, no comments, and combines line continuation.
+// Line number is incremented for each line read. Each continuation is treated as one line.
+// It is the next line to be read in the input stream
+// This function handles (in this order):
+//   (1) Comments "#"
+//   (2) Spaces before the first and after the last valid character
+//   (3) Empty lines
+//   (4) Escaped new lines "\\\n"
+char *conf_read_line(FILE *fp, int *line_number) {
+  char *ret = NULL;
+  while(1) {
+    char *curr_s = conf_fgets(fp);
+    if(curr_s == NULL) {
+      break;
+    }
+    (*line_number)++;
+    //printf("curr_s \"%s\"\n", curr_s);
+    int len;
+    len = conf_remove_comment(curr_s);
+    int line_cont = 0;
+    // Check line continuation. This must be done before string trimming
+    if(len >= 2 && curr_s[len - 1] == '\n' && curr_s[len - 2] == '\\') {
+      // Also delete the continuation mark
+      curr_s[len - 2] = '\0';
+      line_cont = 1;
+    }
+    len = conf_trim(curr_s);
+    // Skip empty lines
+    if(len == 0) {
+      free(curr_s);
+      if(ret == NULL || line_cont == 1) {
+        // If nothing has been read, just try the next line
+        // Or, there is a line continuation
+        continue;  
+      } else {
+        // Otherwise, we have completed reading
+        break;
+      }
+    }
+    // Append the current line to ret
+    if(ret == NULL) {
+      ret = curr_s;
+    } else {
+      ret = (char *)realloc(ret, strlen(ret) + len + 1);
+      strcat(ret, curr_s);
+    }
+    //printf("line_cont = %d\n", line_cont);
+    // Check for line continuation, \\\n
+    if(line_cont == 0) {
+      break;
+    }
+  }
+  return ret;
+}
+
 conf_t *conf_init(const char *filename) {
   conf_t *conf = conf_init_empty();
   assert(conf->filename == NULL);
   // Passing NULL as the second argument forces the lib call to allocate the buffer using malloc()
   conf->filename = realpath(filename, NULL);
   SYSEXPECT(conf->filename != NULL);
-  char buf[1024];
   FILE *fp = fopen(filename, "r");
   SYSEXPECT(fp != NULL);
-  int curr_line = 0;
-  // Get file size and reset fp
-  fseek(fp, 0, SEEK_END);
-  int sz = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
-  // Note: We used to use feof() here. But feof() only returns true when a non-existing offset is actually read, which 
-  // is not the case for fgets, since this function returns as long as it sees a '\n', which does not read past the EOF
-  while(ftell(fp) < sz) {
-    curr_line++;
-    //printf("%d\n", curr_line);
-    char *fgets_ret = fgets(buf, 1024, fp);   // This will add a '\0' automatically and also append '\n' if there is one
-    (void)fgets_ret; // Required by stricter rule of some compilers
-    //printf("Read line \"%s\"\n", buf);
-    int len = strlen(buf);
-    assert(len < 1024);
-    if(len > 0 && buf[len - 1] != '\n' && !feof(fp)) // Check for lines that do not end with '\n' within first 1023 bytes
-      error_exit("Line %d too long (> 1024 bytes, file \"%s\")\n", curr_line, filename);
-    int empty_line = 1;               // Whether the line content is all space character
-    int first_char = -1;              // First non-space character of the line
-    for(int i = 0;i < len;i++) {
-      if(empty_line && buf[i] == '#') {
-        break;                        // Skip the line if begins with '#'
-      } else if(!isspace(buf[i])) { 
-        first_char = i;
-        empty_line = 0;
-        break;
+  int next_line = 0;
+  while(1) {
+    // Backup this value
+    int curr_line = next_line;
+    // This will set curr_line to the next line to be read
+    char *line = conf_read_line(fp, &next_line);
+    if(line == NULL) {
+      break;
+    }
+    int len = strlen(line);
+    assert(len > 0);
+    if(line[0] == '%') { // Check whether it is directive, which has a "%" before the line
+      conf_init_directive(conf, line, curr_line);
+    } else {
+      int assign_index = -1; // The index of the "=" symbol
+      for(int i = 0;i < len;i++) if(line[i] == '=') assign_index = i;
+      if(assign_index == -1) {
+        //printf("\"%s\"\n", line);
+        error_exit("Did not find \"=\" sign on line %d (file \"%s\")\n", curr_line, filename);
       }
-    }
-    if(empty_line) {
-      continue;
-    } else if(buf[first_char] == '%') { // Check whether it is directive, which has a "%" before the line
-      conf_init_directive(conf, buf + first_char, curr_line);
-      continue;
-    }
-    int assign_index = -1; // The index of the "=" symbol
-    for(int i = 0;i < len;i++) if(buf[i] == '=') assign_index = i;
-    if(assign_index == -1) {
-      error_exit("Did not find \"=\" sign on line %d (file \"%s\")\n", curr_line, filename);
-    }
-    int key_begin = 0, key_end = assign_index - 1;
-    int value_begin = assign_index + 1, value_end = len - 1;
-    assert(key_begin <= key_end);
-    assert(value_begin <= value_end);
-    while(key_begin < key_end && (isspace(buf[key_begin]) || isspace(buf[key_end]))) {
-      if(isspace(buf[key_begin])) key_begin++;
-      if(isspace(buf[key_end])) key_end--;
-    }
-    if(key_begin == key_end && isspace(buf[key_begin])) {
-      error_exit("Empty key on line %d (file \"%s\")\n", curr_line, filename);
-    }
-    assert(key_begin == first_char);
-    // Special processing: Remove everything in the value after '#'
-    for(int i = value_begin;i < value_end;i++) {
-      if(buf[i] == '#') {
-        if(i == value_begin) {
-          error_exit("Comment must not occur after \'=\' (line %d file \"%s\")\n", curr_line, filename);
-        }
-        value_end = i - 1;
-        // Enable the following to print the string between value begin and end
-        /*char t = buf[value_end + 1]; 
-        buf[value_end + 1] = '\0';
-        puts(buf + value_begin);
-        buf[value_end + 1] = t;*/
-        break;
+      // Last character of the key; This could be (line - 1) if the first char of the line is '='
+      char *key_end = line + assign_index - 1;
+      while(key_end >= line && isspace(*key_end)) {
+        key_end--;
       }
+      if(key_end <= line) {
+        error_exit("Missing key on line %d (file \"%s\")\n", curr_line, filename);
+      }
+      // This could point to '\0'
+      char *value_begin = line + assign_index + 1;
+      while(*value_begin != '\0' && isspace(*value_begin)) {
+        value_begin++;
+      }
+      if(*value_begin == '\0') {
+        error_exit("Missing value on line %d (file \"%s\")\n", curr_line, filename);
+      }
+      int key_len = key_end - line + 1;
+      // Do not need +1 here since line + strlen() will stop at the '\0'
+      int value_len = line + len - value_begin;
+      conf_insert(conf, line, value_begin, key_len, value_len, curr_line);
     }
-    while(value_begin < value_end && (isspace(buf[value_begin]) || isspace(buf[value_end]))) {
-      if(isspace(buf[value_begin])) value_begin++;
-      if(isspace(buf[value_end])) value_end--;
-    }
-    if(value_begin == value_end && isspace(buf[value_begin])) { // Crossed and the current value is space
-      error_exit("Empty value on line %d file \"%s\"\n", curr_line, filename);
-    } else if(buf[value_begin] == '\"' || buf[value_begin] == '\'' || 
-              buf[value_end] == '\"' || buf[value_end] == '\'') {
-      error_exit("Value should not start or end with \"\'\" or \"\"\" (line %d file \"%s\")\n", 
-        curr_line, filename);
-    }
-    
-    int key_len = key_end - key_begin + 1;
-    int value_len = value_end - value_begin + 1;
-    conf_insert(conf, buf + key_begin, buf + value_begin, key_len, value_len, curr_line);
+    free(line);
   }
   fclose(fp);
   return conf;
@@ -540,7 +664,7 @@ int conf_find_bool_mandatory(conf_t *conf, const char *key) {
 }
 
 // 1. Key must exist
-// 2. Value must be in the given range, if CONF_RANGE is on
+// 2. Value must be in the given range [low, high], if CONF_RANGE is on
 // 3. Options can carry extra condition such range, as power of two, abbr, etc.
 int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int options) {
   int num;
@@ -554,6 +678,7 @@ int conf_find_int32_range(conf_t *conf, const char *key, int low, int high, int 
   return num;
 }
 
+// The range is given in [low, high], with CONF_RANGE in options
 uint64_t conf_find_uint64_range(conf_t *conf, const char *key, uint64_t low, uint64_t high, int options) {
   uint64_t num;
   if((options & CONF_ABBR) && (options & CONF_SIZE)) {

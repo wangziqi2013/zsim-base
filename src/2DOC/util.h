@@ -216,6 +216,13 @@ static inline void spinlock_wait(volatile spinlock_t *lock) {
 #define CONF_UINT64_MAX (-1UL)
 #define CONF_UINT64_MIN (0UL)
 
+// This defines the initial buffer size of conf_fgets()
+#ifdef UNIT_TEST
+#define CONF_FGETS_INIT_SIZE   4
+#else 
+#define CONF_FGETS_INIT_SIZE   1024
+#endif
+
 typedef struct conf_node_struct_t {
   char *key;
   char *value;    // This can be updated by calling conf_node_update_value()
@@ -242,6 +249,10 @@ inline static char *conf_str_skip_space(char *s) { while(isspace(*s) && *s != '\
 void conf_insert(conf_t *conf, const char *k, const char *v, int klen, int vlen, int line);
 void conf_insert_ext(conf_t *conf, const char *k, const char *v); // Insert external files, line is set to -1
 void conf_init_directive(conf_t *conf, char *buf, int curr_line);
+char *conf_fgets(FILE *fp);
+int conf_remove_comment(char *s);
+int conf_trim(char *s);
+char *conf_read_line(FILE *fp, int *line_number);
 conf_t *conf_init(const char *filename);                    // Open a file and load contents into the conf buffer
 conf_t *conf_init_empty();                                  // Initialize an empty conf object without reading file
 conf_t *conf_init_from_str(const char *s);                  // Initialize from a string

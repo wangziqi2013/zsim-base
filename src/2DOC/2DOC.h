@@ -424,19 +424,27 @@ inline static int MBD_get_comp_size_bits(void *_in_buf) {
 // These are the optimized version of MBD 
 // opt0: Double word compression + zero optimization
 // opt1: Zero optimization + speculative decomp
+// opt2: BDI to compress the ref, and MBD for the rest
+// opt3: Zero optimization + speculative decomp + better encoding with zero base
 
 // Whether or not the current block is the reference block; If not set then it is target block
 #define MBD_REF_BLOCK        0x00000001
 
-#define MBD_OPT0_THROUGHPUT  2
+// This is a configurable value of the runahead amount of parallel MBD, MBD.runahead
+extern int MBD_RUNAHEAD;
+// Runtime configurable value of the throughput, i.e., number of words per cycle for comp and decomp, MBD.throughput
+extern int MBD_THROUGHPUT;
 
-// Number of non-zero words per cycle
-#define MBD_OPT1_THROUGHPUT  MBD_OPT0_THROUGHPUT
-// Number of run-ahead cycles
-#define MBD_OPT1_RUNAHEAD    2
+// Read conf for global parameters. All of them are optional
+void MBD_init(conf_t *conf);
 
-#define MBD_OPT3_THROUGHPUT  MBD_OPT1_THROUGHPUT
-#define MBD_OPT3_RUNAHEAD    MBD_OPT1_RUNAHEAD
+#define MBD_OPT0_THROUGHPUT  MBD_THROUGHPUT
+
+#define MBD_OPT1_THROUGHPUT  MBD_THROUGHPUT
+#define MBD_OPT1_RUNAHEAD    MBD_RUNAHEAD
+
+#define MBD_OPT3_THROUGHPUT  MBD_THROUGHPUT
+#define MBD_OPT3_RUNAHEAD    MBD_RUNAHEAD
 
 #define MBD_OPTION_IS_REF(x) (((x) & MBD_REF_BLOCK) != 0)
 
@@ -1164,14 +1172,14 @@ typedef struct ocache_struct_t {
   // The following is updated at ocache block hit cb ocache_access_hit_MBD_cb
   uint64_t MBD_decomp_count;            // Number of read decomp requests
   uint64_t MBD_decomp_cycle_count;      // Total number of cycles spent on decomp
-  uint64_t MBD_decomp_cycle_dist[17];   // Distribution of decomp cycles (run-ahead + decomp for target)
+  uint64_t MBD_decomp_cycle_dist[17];   // Distribution of decomp cycles (run-ahead + decomp for target), [0, 16]
   uint64_t MBD_decomp_zero_count;       // Total number of zeros seen during decompression
   uint64_t MBD_decomp_hit_zero_count;   // Hit zero, direct return of the critical word
   uint64_t MBD_decomp_forward_count;         // Number of dict entries that forward value from ref to target
   uint64_t MBD_decomp_forward_uncomp_count;  // Number of dict entries that caused stall
   uint64_t MBD_decomp_forward_stalled_count; // Number of dict entries that caused stall
   uint64_t MBD_decomp_stalled_cycle_count;   // Total number of cycles stalled during decomp of the target block
-  uint64_t MBD_decomp_stalled_cycle_dist[7]; // Distribution of stalled cycles per decomp
+  uint64_t MBD_decomp_stalled_cycle_dist[9]; // Distribution of stalled cycles per decomp, [0, 8]
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
