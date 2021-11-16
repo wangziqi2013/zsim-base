@@ -148,6 +148,7 @@ VOID HandleMagicOp_update_2d_addr(THREADID tid, ADDRINT addr_1d, ADDRINT size, A
 VOID HandleMagicOp_update_data(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT data);
 VOID HandleMagicOp_zsim_debug_print_all(THREADID tid);
 VOID HandleMagicOp_zsim_start_sim(THREADID tid);
+VOID HandleMagicOp_zsim_magic_op(THREADID tid, ADDRINT op);
 
 VOID FakeCPUIDPre(THREADID tid, REG eax, REG ecx);
 VOID FakeCPUIDPost(THREADID tid, ADDRINT* eax, ADDRINT* ebx, ADDRINT* ecx, ADDRINT* edx); //REG* eax, REG* ebx, REG* ecx, REG* edx);
@@ -681,6 +682,11 @@ VOID Instruction(INS ins) {
         } else if(INS_OperandReg(ins, 0) == REG_R11 && INS_OperandReg(ins, 1) == REG_R11) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_zsim_start_sim, 
                 IARG_THREAD_ID, 
+                IARG_END);
+        } else if(INS_OperandReg(ins, 0) == REG_R10 && INS_OperandReg(ins, 1) == REG_R10) {
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleMagicOp_zsim_magic_op, 
+                IARG_THREAD_ID, 
+                IARG_REG_VALUE, REG_R10, 
                 IARG_END);
         }
     }
@@ -1376,6 +1382,22 @@ VOID HandleMagicOp_zsim_start_sim(THREADID tid) {
     return;
 }
 
+VOID HandleMagicOp_zsim_magic_op(THREADID tid, ADDRINT _op) {
+    zsim_magic_op_t *op = (zsim_magic_op_t *)_op;
+    switch(op->op) {
+        case ZSIM_MAGIC_OP_HELLO_WORLD: {
+            printf("Hello World from magic op, arg = %lu\n", (uint64_t)op->arg);
+        } break;
+        case ZSIM_MAGIC_OP_PRINT_STR: {
+            printf("%s", (char *)op->arg);
+        } break;
+        default: {
+            printf("Unknow magic op %d with arg 0x%lX\n", op->op, op->arg);
+        } break;
+    }
+    return;
+}
+
 //CPUIID faking
 static uint32_t cpuidEax[MAX_THREADS];
 static uint32_t cpuidEcx[MAX_THREADS];
@@ -1810,7 +1832,8 @@ int main(int argc, char *argv[]) {
 
     //Register instrumentation
     TRACE_AddInstrumentFunction(Trace_normal, 0);
-    IMG_AddInstrumentFunction(Image, 0);
+    // Enable this for malloc()/calloc()/realloc() instrumentation
+    //IMG_AddInstrumentFunction(Image, 0);
     VdsoInit(); //initialized vDSO patching information (e.g., where all the possible vDSO entry points are)
 
     PIN_AddThreadStartFunction(ThreadStart, 0);
