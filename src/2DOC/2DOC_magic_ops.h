@@ -6,6 +6,39 @@
 
 //* zsim - zsim related functions, called by application to communicate with the simulator
 
+// Print hello world with the value of the arg
+#define ZSIM_MAGIC_OP_HELLO_WORLD            0
+// Print a string, and arg points to the string
+#define ZSIM_MAGIC_OP_PRINT_STR              1
+// Allocate a 2D address on the main addr map
+#define ZSIM_MAGOC_OP_ADDR_MAP_ALLOC         10
+
+// The struct that contains full information about the magic op
+typedef struct {
+  int op;
+  void *arg;
+} zsim_magic_op_t;
+
+// This struct is used to pass information from the application to the simulator
+// The application allocates a struct like this, and passes the pointer to zSim using zsim_magic_op()
+typedef struct {
+  int type_id;
+  uint64_t addr_1d;
+  int size;
+} main_addr_map_alloc_data_t;
+
+// General-purpose magic op
+inline static void zsim_magic_op(zsim_magic_op_t *op) {
+  // Write op pointer into R10
+  __asm__ __volatile__("mov %0, %%r10\n\t"
+                     : /* no output */
+                     : "a"(op)
+                     : "%r10");
+  // XOR R10, R10
+  __asm__ __volatile__ (".byte 0x4D, 0x87, 0xDB");
+  return;
+}
+
 // R15 addr; R14 size; R13 shape
 // XCHG R15, R15
 //void zsim_update_shape(uint64_t _addr, int _size, int _shape);
