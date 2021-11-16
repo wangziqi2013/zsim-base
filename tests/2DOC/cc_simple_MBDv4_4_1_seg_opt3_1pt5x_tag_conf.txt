@@ -1,0 +1,37 @@
+oc.cc_type = simple
+
+cc.simple.l1.size = 32768
+cc.simple.l1.way_count = 4
+cc.simple.l1.latency = 4
+
+cc.simple.l2.size = 262144
+cc.simple.l2.way_count = 8
+cc.simple.l2.latency = 11
+
+# 1MB
+cc.simple.llc.size = 1048576
+cc.simple.llc.physical_way_count = 8
+cc.simple.llc.tag_way_count = 12
+cc.simple.llc.latency = 30
+cc.simple.llc.algorithm = MBDv4
+cc.simple.llc.MBD_opt_type = opt3
+
+# Segmented cache data store
+cc.simple.llc.insert_type = seg
+
+# Base cache, 64-set, 8-way, 512 lines in total, 32KB storage
+cc.simple.llc.bcache.line_count = 4096
+cc.simple.llc.bcache.way_count = 8
+cc.simple.llc.bcache.shape = 4_1
+
+cc.simple.core_count = 1
+
+cc.simple.default_shape = 4_1
+
+MBD.runahead = 0
+MBD.throughput = 2
+
+# Use 1d to 2d mapping
+main.addr_1d_to_2d_type = addr_map
+
+main.result_suffix = simple_MBDv4_4_1_seg_opt3_1pt5x_tag
