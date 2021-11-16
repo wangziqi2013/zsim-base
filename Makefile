@@ -196,6 +196,11 @@ roms_r:
 deepsjeng_r:
 	-WORKLOAD_PATH=$(WORKLOAD_PATH_2017) ./build/release/zsim ./tests/2DOC/SPEC2017_rate/deepsjeng_r/deepsjeng_r.cfg
 
+# Workload
+
+linked_list:
+	./build/release/zsim ./tests/2DOC/workload/linked_list/linked_list.cfg
+
 clean:
 	@rm ./.sconsign.dblite
 	@rm -rf ./build
