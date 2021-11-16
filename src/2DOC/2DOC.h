@@ -473,6 +473,33 @@ inline static void MBD_opt3_dict_invalidate(MBD_dict_t *dict) {
   return;
 }
 
+//* Thesaurus
+
+// Thesaurus has a fixed decomp latency - first recover the identical bytes, then non-identical
+#define THESAURUS_DECOMP_LATENCY 2
+
+int Thesaurus_get_comp_size_bits(void *_in_buf, void *_ref_buf, int size);
+int Thesaurus_get_comp_size_bits_AVX2(void *_in_buf, void *_ref_buf, int size);
+
+//* DISH
+
+#define DISH_DECOMP_LATENCY     2
+#define DISH_SUCCESS_BITS       48
+
+// This is the struct we use to pass an external dict object
+typedef struct {
+  int dict_count;
+  uint32_t dict[8];
+} DISH_scheme1_dict_t;
+
+DISH_scheme1_dict_t *DISH_scheme1_dict_init();
+void DISH_scheme1_dict_free(DISH_scheme1_dict_t *dict);
+
+int DISH_search_dict_AVX2(int word, int dict_count, uint32_t *dict);
+int DISH_scheme1_build_dict(uint32_t *ref_buf, int dict_count, uint32_t *dict);
+int DISH_scheme1_get_comp_size_bits(void *_in_buf, int ref_count, void **_ref_buf);
+int DISH_scheme1_get_comp_size_bits_with_dict(void *_in_buf, DISH_scheme1_dict_t *dict);
+
 //* MESI_t - Abstract coherence controller, decoupled from cache implementation
 
 // Maximum number of cores supported by this stucture
@@ -813,6 +840,7 @@ typedef struct ocache_entry_struct_t {
   uint8_t states;    // Valid/dirty bits, lower 4 valid, higher 4 dirty
   int8_t sizes[4];   // Compressed size of block 0, 1, 2, 3; Must be cleared if not valid
   int total_aligned_size; // Sum of aligned sizes of this entry
+  void *extra;       // Extra per-tag data that can be used by different policies
 } ocache_entry_t;
 
 // Returns the number of valid lines
@@ -990,6 +1018,8 @@ inline static void ocache_entry_dup(ocache_entry_t *dest, ocache_entry_t *src) {
 #define OCACHE_BDI_DECOMP_LATENCY        BDI_DECOMP_LATENCY
 #define OCACHE_FPC_DECOMP_LATENCY        FPC_DECOMP_LATENCY
 #define OCACHE_CPACK_DECOMP_LATENCY      CPACK_DECOMP_LATENCY
+#define OCACHE_THESAURUS_DECOMP_LATENCY  THESAURUS_DECOMP_LATENCY
+#define OCACHE_DISH_DECOMP_LATENCY       DISH_DECOMP_LATENCY
 
 // Maximum number of SBs evicted on an insert
 #define OCACHE_MAX_EVICT_ENTRY          16
@@ -1180,6 +1210,12 @@ typedef struct ocache_struct_t {
   uint64_t MBD_decomp_forward_stalled_count; // Number of dict entries that caused stall
   uint64_t MBD_decomp_stalled_cycle_count;   // Total number of cycles stalled during decomp of the target block
   uint64_t MBD_decomp_stalled_cycle_dist[9]; // Distribution of stalled cycles per decomp, [0, 8]
+  // DISH specific statistics
+  uint64_t DISH_success_count;
+  uint64_t DISH_fail_count;
+//  uint64_t DISH_uncomp_size_sum;
+//  uint64_t DISH_before_size_sum;
+//  uint64_t DISH_after_size_sum;
   // Statistics that will be refreshed by ocache_refresh_stat()
   uint64_t logical_line_count;       // Valid logical lines
   uint64_t sb_slot_count;            // Valid super blocks (i.e. slots dedicated to super blocks)
@@ -1307,6 +1343,19 @@ void ocache_insert_seg_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
 
 void ocache_after_insert_adjust(
   ocache_t *ocache, ocache_op_result_t *insert_result, ocache_op_result_t *lookup_result);
+
+//* ocache_DISH DISH implementation
+void ocache_init_DISH(ocache_t *ocache);
+inline static void ocache_entry_inv_DISH(ocache_entry_t *entry) {
+  ((DISH_scheme1_dict_t *)(entry->extra))->dict_count = 0;
+}
+int ocache_get_compressed_size_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+uint64_t ocache_access_hit_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+void ocache_insert_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *result);
+void ocache_entry_print_dict_DISH(ocache_entry_t *entry);
+void ocache_print_dict_DISH(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape);
+
 void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result);
 void ocache_downgrade(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache_op_result_t *result);
 
@@ -1427,8 +1476,9 @@ inline static void scache_entry_dup(scache_entry_t *dest, scache_entry_t *src) {
 #define SCACHE_MAX_EVICT_ENTRY 16
 
 #define SCACHE_BDI_DECOMP_LATENCY        OCACHE_BDI_DECOMP_LATENCY
-#define SCACHE_FPC_DECOMP_LATENCY        OCACHE_BDI_DECOMP_LATENCY
-#define SCACHE_CPACK_DECOMP_LATENCY      OCACHE_BDI_DECOMP_LATENCY
+#define SCACHE_FPC_DECOMP_LATENCY        OCACHE_FPC_DECOMP_LATENCY
+#define SCACHE_CPACK_DECOMP_LATENCY      OCACHE_CPACK_DECOMP_LATENCY
+#define SCACHE_THESAURUS_DECOMP_LATENCY  OCACHE_THESAURUS_DECOMP_LATENCY
 
 // Unified structure for returning operation result
 typedef struct {
@@ -1513,6 +1563,15 @@ typedef struct scache_struct_t {
   uint64_t MBD_before_size;
   uint64_t MBD_after_size;
   uint64_t MBD_size_counts[8];
+  // Statistics - Thesaurus
+  uint64_t Thesaurus_attempt_count;
+  uint64_t Thesaurus_success_count;
+  uint64_t Thesaurus_fail_count;
+  uint64_t Thesaurus_attempt_size;
+  uint64_t Thesaurus_uncomp_size;
+  uint64_t Thesaurus_before_size;
+  uint64_t Thesaurus_after_size;
+  uint64_t Thesaurus_size_counts[16];
   // Statistics - General
   uint64_t uncompressed_count;  // Not compressed
   uint64_t read_count;          // Reads, not including internal lookups
@@ -2223,11 +2282,14 @@ void oc_conf_print(oc_t *oc);
 void oc_stat_print(oc_t *oc); // This will also write DRAM and cache stat dump to a text file
 
 //* main_addr_map_t - A hash table mapping 1D address to 2D address
+// This structure also mimics a 2D overlay aware allocator, and maintains metadata for them
 
 // 1 million initial entries for the addr map (default 1M)
-#define MAIN_ADDR_MAP_INIT_COUNT  (1 * 1024 * 1024)
+#define MAIN_ADDR_MAP_INIT_COUNT   (1 * 1024 * 1024)
+// Maximum number of distinct types supported
+#define MAIN_ADDR_MAP_TYPE_ID_MAX  64
 
-// Entry used by main class addr map
+// Entry used by main class addr map. addr_1d is the key
 typedef struct main_addr_map_entry_struct_t {
   uint64_t addr_1d;
   uint64_t oid_2d;
@@ -2239,14 +2301,30 @@ typedef struct main_addr_map_entry_struct_t {
 main_addr_map_entry_t *main_addr_map_entry_init();
 void main_addr_map_entry_free(main_addr_map_entry_t *entry);
 
+// For address allocation
+typedef struct main_addr_map_alloc_entry_struct_t {
+  int type_id;            // This is the key in the map
+  uint64_t base_addr;     // addr part of the 2D address
+  uint64_t mask;          // OID allocation status (64 OIDs)
+  main_addr_map_alloc_entry_struct_t *next;
+} main_addr_map_alloc_entry_t;
+
+main_addr_map_alloc_entry_t *main_addr_map_alloc_entry_init();
+void main_addr_map_alloc_entry_free(main_addr_map_alloc_entry_t *alloc_entry);
+
 typedef struct {
+  // Indexed by type ID
+  main_addr_map_alloc_entry_t *alloc_entries[MAIN_ADDR_MAP_TYPE_ID_MAX];
   main_addr_map_entry_t *entries[MAIN_ADDR_MAP_INIT_COUNT];
   int entry_count;
-  // Statistics
+  // Addr map statistics
   uint64_t list_count;   // Number of linked lists (i.e., non-empty slots)
   uint64_t step_count;   // Number of pointer tracing (first one is not counted)
   uint64_t insert_count; // Number of insert requests (regardless of whether it succeeds)
   uint64_t find_count;   // Number of find requests
+  // Alloc statistics
+  uint64_t alloc_count;
+  uint64_t free_count;
 } main_addr_map_t;
 
 main_addr_map_t *main_addr_map_init();
@@ -2262,6 +2340,14 @@ void main_addr_map_insert_range(
 // Return the map entry pointer. NULL if not found
 main_addr_map_entry_t *main_addr_map_find(main_addr_map_t *addr_map, uint64_t addr_1d);
 
+// Allocates a 2d address for the type ID, and adds an entry for the given addr_1d
+void main_addr_map_alloc(main_addr_map_t *addr_map, int type_id, uint64_t addr_1d, int size);
+// This is a wrapper function that accepts the main_addr_map_alloc_data_t struct
+inline static void _main_addr_map_alloc(main_addr_map_t *addr_map, main_addr_map_alloc_data_t *data) {
+  main_addr_map_alloc(addr_map, data->type_id, data->addr_1d, data->size);
+}
+
+void main_addr_map_alloc_print(main_addr_map_t *addr_map);
 void main_addr_map_print(main_addr_map_t *addr_map);
 
 void main_addr_map_conf_print(main_addr_map_t *addr_map);

@@ -2,18 +2,22 @@
 #include "2DOC.h"
 #include "third_party/compression.h"
 
-//* Thesaurus
+//* Thesaurus_LSH
 
 #ifdef THESAURUS_LSH
 #include "Thesaurus_hash_data.cpp"
 #else 
+// Use 8-bit words to hash the fingerprint vector
+#define THESAURUS_INPUT_WORD_BITS 0
+// 12 bits in the final fingerprint
+#define THESAURUS_FINGERPRINT_BITS 0
 inline static uint32_t Thesaurus_hash_data(int32_t *data) {
   return 0;
 }
 #endif
 
 // Initialize to all-NULL, meaning no LSH is present
-dmap_entry_struct_t *Thesaurus_base_table[4096] = {NULL, };
+dmap_entry_struct_t *Thesaurus_base_table[1 << THESAURUS_FINGERPRINT_BITS] = {NULL, };
 
 //* SIMD file inclusion
 
@@ -1729,6 +1733,151 @@ int __MBD_opt3_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int
   return bits + 16;
 }
 
+//* Thesaurus
+
+int Thesaurus_get_comp_size_bits(void *_in_buf, void *_ref_buf, int size) {
+  uint8_t *in_buf = (uint8_t *)_in_buf;
+  uint8_t *ref_buf = (uint8_t *)_ref_buf;
+  int bits = 0;
+  assert(size > 0);
+  // Simple delta compression
+  for(int i = 0;i < size;i++) {
+    if(in_buf[i] != ref_buf[i]) {
+      bits += 8;
+      //printf("%d ", i);
+    }
+  }
+  //putchar('\n');
+  // 64-bit fixed map
+  return bits + 64;
+}
+
+int Thesaurus_get_comp_size_bits_AVX2(void *_in_buf, void *_ref_buf, int size) {
+  uint8_t *in_buf = (uint8_t *)_in_buf;
+  uint8_t *ref_buf = (uint8_t *)_ref_buf;
+  int bits = 0;
+  // Only works for 64-byte cache block
+  assert(size == 64);
+  __m256i cmp_result;
+  int mask;
+  // Load both parts of the block
+  __m256i in_lower = _mm256_loadu_si256((__m256i *)in_buf);
+  __m256i ref_lower = _mm256_loadu_si256((__m256i *)ref_buf);
+  // Compare; Equal lane will be set to 0xFF
+  cmp_result = _mm256_cmpeq_epi8(in_lower, ref_lower);
+  // Extract sign bit of each 8 bit lane, and take complement, equal lane will have zero
+  mask = ~(_mm256_movemask_epi8(cmp_result));
+  // Non-equal byte has a 1 bit, so just popcount
+  bits += (popcount_int32(mask) * 8);
+  // Repeat
+  __m256i in_upper = _mm256_loadu_si256((__m256i *)(in_buf + 32));
+  __m256i ref_upper = _mm256_loadu_si256((__m256i *)(ref_buf + 32));
+  // Compare; Equal lane will be set to 0xFF
+  cmp_result = _mm256_cmpeq_epi8(in_upper, ref_upper);
+  // Extract sign bit of each 8 bit lane, and take complement, equal lane will have zero
+  mask = ~(_mm256_movemask_epi8(cmp_result));
+  // Non-equal byte has a 1 bit, so just popcount
+  bits += (popcount_int32(mask) * 8);
+  // 64-bit fixed map
+  return bits + 64;
+}
+
+//* DISH
+
+DISH_scheme1_dict_t *DISH_scheme1_dict_init() {
+  DISH_scheme1_dict_t *dict = (DISH_scheme1_dict_t *)malloc(sizeof(DISH_scheme1_dict_t));
+  SYSEXPECT(dict != NULL);
+  memset(dict, 0x00, sizeof(DISH_scheme1_dict_t));
+  return dict;
+}
+
+void DISH_scheme1_dict_free(DISH_scheme1_dict_t *dict) {
+  free(dict);
+  return;
+}
+
+// If found in dict, then return the index; Otherwise return -1
+int DISH_search_dict_AVX2(int word, int dict_count, uint32_t *dict) {
+  __m256i dict_xmm = _mm256_loadu_si256((__m256i *)dict);
+  __m256i word_xmm = _mm256_set1_epi32(word);
+  // Equal words will set the lane to 0xFFFFFFFF
+  __m256i cmp_result = _mm256_cmpeq_epi32(dict_xmm, word_xmm);
+  // Extract the sign bit per 8-bit byte. This will result in 0xF for each match
+  // Use uint64_t to avoid (0x1 << 32) problem in x86 ALU
+  uint64_t mask = (uint64_t)_mm256_movemask_epi8(cmp_result);
+  // Mask off those not in use
+  mask &= ((0x1UL << (dict_count << 2)) - 1);
+  assert(mask == 0UL || popcount_uint64(mask) == 4);
+  // The return value is 1 + the lowest 1-bit, so we just minus one and it is the hit index
+  int index = ffs_int32((int32_t)mask);
+  return (index == 0) ? -1 : (index >> 2);
+}
+
+// This function is called for scheme 1 dictionary building
+// Returns 0, if the dict is to overflow, and will not continue adding entries
+// Otherwise, return the new size of the dict after processing the full ref_buf
+int DISH_scheme1_build_dict(uint32_t *ref_buf, int dict_count, uint32_t *dict) {
+  for(int i = 0;i < 16;i++) {
+    uint32_t word = ref_buf[i];
+    int index = DISH_search_dict_AVX2(word, dict_count, dict);
+    if(index == -1) {
+      // Check before insert, because the dict can perfectly be of size eight
+      if(dict_count == 8) {
+        return 0;
+      }
+      dict[dict_count++] = word;
+    }
+  }
+  return dict_count;
+}
+
+// This function performs check and returns the compressed size in bits
+// Note that DISH compresses blocks to fixed sized structures, so the return value is either
+// UTIL_CACHE_LINE_SIZE * 8, or the fixed size
+// DISH works by checking whether the given line can be encoded using the full 32-bit words in the given ref buffers
+// and there can be more than one ref buffer
+int DISH_scheme1_get_comp_size_bits(void *_in_buf, int ref_count, void **_ref_buf) {
+  uint32_t dict[8]; // Scheme 1 allows a maximum of 8 dictionary entries
+  // First build the dict by traversing the ref blocks. This should succeed, or otherwise they should not
+  // be used as ref together
+  int dict_count = 0;
+  for(int i = 0;i < ref_count;i++) {
+    uint32_t *ref_buf = (uint32_t *)_ref_buf[i];
+    dict_count = DISH_scheme1_build_dict(ref_buf, dict_count, dict);
+    assert(dict_count >= 0 && dict_count <= 8);
+    if(dict_count == 0) {
+      error_exit("The ref block dictionary is larger than 8 entries\n");
+    }
+  }
+  // Then process the new line
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  // If processing the new line overflows the dict, then compression fails
+  dict_count = DISH_scheme1_build_dict(in_buf, dict_count, dict);
+  assert(dict_count >= 0 && dict_count <= 8);
+  // If compressible, then the result will be total 48 bits (16 words, each 3-bit), i.e., 6 bytes
+  return (dict_count == 0) ? ((int)UTIL_CACHE_LINE_SIZE * 8) : (DISH_SUCCESS_BITS); 
+}
+
+// This function uses an existing dict and dict count, rather than building its own
+int DISH_scheme1_get_comp_size_bits_with_dict(void *_in_buf, DISH_scheme1_dict_t *dict) {
+  uint32_t *in_buf = (uint32_t *)_in_buf;
+  // Make a local copy of the dict since we are going to modify it
+  uint32_t local_dict[8];
+  int local_dict_count = dict->dict_count;
+  memcpy(local_dict, dict->dict, sizeof(uint32_t) * dict->dict_count);
+  // If processing the new line overflows the dict, then compression fails
+  local_dict_count = DISH_scheme1_build_dict(in_buf, local_dict_count, local_dict);
+  assert(local_dict_count >= 0 && local_dict_count <= 8);
+  // This is compressible, so we copy the dict and count back
+  if(local_dict_count != 0) {
+    memcpy(dict->dict, local_dict, sizeof(uint32_t) * local_dict_count);
+    dict->dict_count = local_dict_count;
+    return 16 * 3;
+  }
+  // Not compressible, and do not copy back the dict
+  return ((int)UTIL_CACHE_LINE_SIZE * 8);
+}
+
 //* MESI_t
 
 const char *MESI_state_names[MESI_STATE_END] = {
@@ -2254,12 +2403,19 @@ ocache_t *ocache_init(int size, int data_way_count, int tag_way_count) {
   ocache->level = OCACHE_LEVEL_NONE;
   // LRU entry has this zero, so normal entry should always have one
   ocache->lru_counter = 1UL;
-  // By default, ocache operates as a sector cache
+  // By default, ocache operates as a super-block, YACC-style cache
   ocache->insert_cb = &ocache_insert_sb_cb;
   return ocache;
 }
 
 void ocache_free(ocache_t *ocache) {
+  // Type specific free
+  if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+    for(int i = 0;i < ocache->tag_line_count;i++) {
+      DISH_scheme1_dict_free((DISH_scheme1_dict_t *)ocache->data[i].extra);
+    }
+  }
+  // ocache member free
   if(ocache->name != NULL) {
     free(ocache->name);
   }
@@ -2409,9 +2565,17 @@ void ocache_set_compression_type(ocache_t *ocache, const char *name) {
 #ifndef THESAURUS_LSH
     error_exit("Macro THESAURUS_LSH is not defined, Thesaurus is disabled\n");
 #endif
+    if(THESAURUS_FINGERPRINT_BITS == 0 || THESAURUS_INPUT_WORD_BITS == 0) {
+      error_exit("Thesaurus hash function is not configured properly!\n");
+    }
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_MBD_cb);
     ocache->access_hit_cb = ocache_access_hit_MBD_cb;
     ocache->MBD_type = OCACHE_MBD_Thesaurus;
+  } else if(streq(name, "DISH_scheme1") == 1) {
+    // Adding "extra" to every entry object; Register new insertion function
+    ocache_init_DISH(ocache);
+    ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_DISH_cb);
+    ocache->access_hit_cb = ocache_access_hit_DISH_cb;
   } else if(streq(name, "None") == 1) {
     ocache_set_get_compressed_size_cb(ocache, ocache_get_compressed_size_None_cb);
     ocache->access_hit_cb = ocache_access_hit_None_cb;
@@ -2639,7 +2803,6 @@ int ocache_get_sb_index(ocache_t *ocache, ocache_entry_t *entry, uint64_t oid, u
       printf("entry ptr %p offset (index) %d OID 0x%lX addr 0x%lX set %d\n", 
         entry, (int)(entry - ocache->data), oid, addr, 
         (int)(entry - ocache->data) / ocache->tag_way_count);
-      assert(0);
       error_exit("Invalid super block shape: %d\n", entry->shape);
     } break;
   }
@@ -2719,7 +2882,7 @@ uint64_t ocache_get_vertical_base_oid(ocache_t *ocache, uint64_t oid, int shape)
 }
 
 // This function performs multi-purpose lookup
-// If scan_all is one, then this function fills candidates arraym LRU entry and hit entry (if hits). This is usually
+// If scan_all is one, then this function fills candidates array, LRU entry and hit entry (if hits). This is usually
 // called for performing a write
 // Otherwise the function returns by only setting hit_entry and state
 // If update_lru is set, this function will update the LRU of the hit entry once a hit is found; Otherwise no LRU
@@ -3869,7 +4032,7 @@ void ocache_after_insert_adjust(
       ocache_entry_inv(curr_entry);
       curr_size = sizes[sorted_indices[i]];
     }
-    int line_index = indices[sorted_indices[i]]; // Current line lidex in the SB
+    int line_index = indices[sorted_indices[i]]; // Current line index in the SB
     // Update LRU if it is just inserted, otherwise just restore the old LRU
     //printf("oid %lX addr %lX line idx %d entry idx %d curr size %d\n", 
     //  oid, addr, line_index, curr_entry_index, curr_size);
@@ -3894,6 +4057,194 @@ void ocache_after_insert_adjust(
   // Invalidate the rest of the entries
   for(int i = curr_entry_index + 1;i < entry_count;i++) {
     ocache_entry_inv(entries[i]);
+  }
+  return;
+}
+
+//* ocache_DISH implementation (use super-block (YACC) mode)
+
+// Initializes DISH related data structures
+void ocache_init_DISH(ocache_t *ocache) {
+  assert(ocache->tag_line_count != 0);
+  // DISH only works with YACC which does not allow over-provisioning
+  if(ocache->tag_way_count != ocache->data_way_count) {
+    error_exit("DISH requires tags and data be of the same associativity (see %d and %d)\n",
+      ocache->tag_way_count, ocache->data_way_count);
+  }
+  // Initialize the dict object
+  for(int i = 0;i < ocache->tag_line_count;i++) {
+    ocache->data[i].extra = DISH_scheme1_dict_init();
+  }
+  // Set insert call back
+  ocache->insert_cb = ocache_insert_DISH_cb;
+  return;
+}
+
+// Call back function for DISH, only use as type indicator since we do not use the conventional insert
+int ocache_get_compressed_size_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  error_exit("This function is only a stub and is not supposed to be called\n");
+  return 0;
+}
+
+// Access hit latency call back function
+uint64_t ocache_access_hit_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  (void)ocache; (void)oid; (void)addr; (void)shape;
+  return OCACHE_DISH_DECOMP_LATENCY;
+}
+
+// This implements DISH, which is another inter-block compression algorithm. DISH uses the YACC tag array, but
+// requires a different insertion algorithm
+void ocache_insert_DISH_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, 
+  int shape, int dirty, ocache_op_result_t *result) {
+  ocache->insert_count++;
+  ocache_lookup_write(ocache, oid, addr, shape, result);
+  if(result->state == OCACHE_HIT_NORMAL) {
+    error_exit("DISH does not allow OCACHE_HIT_NORMAL\n");
+  }
+  dmap_entry_t *dmap_entry = dmap_find(ocache->dmap, oid, addr);
+  if(dmap_entry == NULL) {
+    error_exit("Could not find data to be compressed @ OID %lu Addr %lu\n", oid, addr);
+  }
+  ocache_entry_t *lru_entry = result->lru_entry;
+  assert(lru_entry != NULL);
+  // If hit on entry, save dirty bit, and remove it
+  if(result->state == OCACHE_HIT_COMPRESSED) {
+    // Save dirty bit, and OR with the given dirty bit
+    dirty = (dirty || ocache_entry_is_dirty(result->hit_entry, result->hit_index));
+    // Need this to determine whether to adjust the size of other blocks due to being the dictionary holder
+    int line_size = ocache_entry_get_size(result->hit_entry, result->hit_index);
+    // Remove entry
+    ocache_entry_inv_index(result->hit_entry, result->hit_index);
+    // In case this is the only block in the SB, we invalidate the entire SB and gets a fresh block
+    if(ocache_entry_is_all_invalid(result->hit_entry) == 1) {
+      ocache_entry_inv(result->hit_entry);
+      // Clear DISH dict; This is fine because if it is the only block, we just rebuild the dict
+      ocache_entry_inv_DISH(result->hit_entry);
+      // Since it is clear now, it must be an LRU, and will be used for insertion if none of the 
+      // other entries match
+      lru_entry = result->hit_entry;
+    } else if(line_size == (32 + 1 + DISH_SUCCESS_BITS / 8)) {
+      // Then there must be some other valid lines, and we just adjust its size to hold the dictionary
+      for(int i = 0;i < 4;i++) {
+        // This also skips the block we just removed
+        if(ocache_entry_is_valid(result->hit_entry, i) != 0) {
+          int t = ocache_entry_get_size(result->hit_entry, i);
+          if(t != (DISH_SUCCESS_BITS / 8)) {
+            error_exit("Unexpected compressed size during candidate selection: %d\n", t);
+          }
+          // Make its size consistent with the dict
+          ocache_entry_set_size(result->hit_entry, i, 32 + 1 + DISH_SUCCESS_BITS / 8);
+          break;
+        }
+      }
+    }
+  } 
+  // Then everything processes just like a miss
+  // Check candidates, find the one that can 
+  // Note that candidates can contain fresh blocks, since we may have removed the line from the SB
+  // If it is a full miss, then this is trivially just zero and the loop is skipped
+  for(int i = 0;i < result->cand_count;i++) {
+    ocache_entry_t *candid = result->candidates[i];
+    int candid_index = result->indices[i];
+    // Must have been cleared of the inserting block
+    assert(ocache_entry_is_valid(candid, candid_index) == 0);
+    // Skip the potentially invalid entry because we give it least priority
+    if(ocache_entry_is_all_invalid(candid) == 1) {
+      continue;
+    } else if(((DISH_scheme1_dict_t *)(candid->extra))->dict_count == 0) {
+      if(ocache_entry_get_valid_line_count(candid) != 1) {
+        error_exit("Non-compressible block should not colocate with another block\n");
+      }
+      // This means the block is not compressible
+      continue;
+    }
+    // Try compressing with the entry's dictionary
+    int bits = DISH_scheme1_get_comp_size_bits_with_dict(dmap_entry->data, (DISH_scheme1_dict_t *)(candid->extra));
+    // Successfully encoded with other blocks; This also updates candid->extra dictionary
+    if(bits == DISH_SUCCESS_BITS) {
+      ocache->DISH_success_count++;
+      if(candid->shape != OCACHE_SHAPE_1_4) {
+        error_exit("The shape of the candidate is not OCACHE_SHAPE_1_4\n");
+      }
+      ocache_entry_set_valid(candid, candid_index);
+      if(dirty == 1) {
+        ocache_entry_set_dirty(candid, candid_index);
+      }
+      ocache_update_entry_lru(ocache, candid);
+      // Co-locate with an existing block, so the size is just encoded data size
+      ocache_entry_set_size(candid, candid_index, DISH_SUCCESS_BITS / 8);
+      result->state = OCACHE_SUCCESS;
+      return;
+    }
+  } // for among candidate blocks
+  //
+  // No candidate can fulfill the insertion, now just evict an existing block, and put the block in
+  // Also update the dictionary of the new entry by running compression on it
+  //
+  // If some of the entries are still valid, then evict
+  if(ocache_entry_is_all_invalid(lru_entry) == 0) {
+    result->state = OCACHE_EVICT;
+    // We know only one will be evicted
+    ocache_entry_dup(result->insert_evict_entries + 0, lru_entry);
+    result->insert_evict_count = 1;
+    ocache_entry_inv(lru_entry);
+    ocache_entry_inv_DISH(lru_entry);
+  } else {
+    result->state = OCACHE_SUCCESS;
+  }
+  if(((DISH_scheme1_dict_t *)(lru_entry->extra))->dict_count != 0) {
+    error_exit("The dictionary of the LRU entry does not have an empty dictionary\n");
+  }
+  uint64_t base_oid = 0UL, base_addr = 0UL;
+  int index = 0;
+  ocache_get_sb_tag(ocache, oid, addr, shape, &base_oid, &base_addr, &index);
+  lru_entry->oid = base_oid;
+  lru_entry->addr = base_addr;
+  ocache_entry_set_valid(lru_entry, index);
+  if(dirty == 1) {
+    ocache_entry_set_dirty(lru_entry, index);
+  }
+  // Try compress with the empty dict
+  // (1) If the block itself is compressible, the dict will be non-empty, and later inserts can recognize it
+  // (2) Otherwise, the dict is empty, which will be recognized by later inserts
+  int bits = DISH_scheme1_get_comp_size_bits_with_dict(dmap_entry->data, (DISH_scheme1_dict_t *)(lru_entry->extra));
+  //printf("bits = %d\n", bits);
+  // First compressible block must also add dictionary size (32 * 8 bits) and dict entry valid bit (8 bits)
+  if(bits == DISH_SUCCESS_BITS) {
+    ocache->DISH_success_count++;
+    ocache_entry_set_size(lru_entry, index, 32 + 1 + DISH_SUCCESS_BITS / 8);
+  } else {
+    ocache->DISH_fail_count++;
+    ocache_entry_set_size(lru_entry, index, (int)UTIL_CACHE_LINE_SIZE);
+  }
+  ocache_update_entry_lru(ocache, lru_entry);
+  lru_entry->shape = OCACHE_SHAPE_1_4;
+  return;
+}
+
+// Prints the dict with the entry pointer, with a newline at the end
+void ocache_entry_print_dict_DISH(ocache_entry_t *entry) {
+  DISH_scheme1_dict_t *dict = (DISH_scheme1_dict_t *)entry->extra;
+  printf("Dict count %d contents [", dict->dict_count);
+  for(int i = 0;i < dict->dict_count;i++) {
+    printf("0x%X, ", dict->dict[i]);
+  }
+  printf("]\n");
+  return;
+}
+
+// Given a block address, print the dict of the super-block it belongs to, if it is in the cache
+void ocache_print_dict_DISH(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
+  ocache_op_result_t result;
+  _ocache_lookup(ocache, oid, addr, shape, 0, 0, &result);
+  if(result.state == OCACHE_MISS) {
+    printf("The address does not exit\n");
+  } else {
+    ocache_entry_t *hit_entry = result.hit_entry;
+    assert(hit_entry != NULL);
+    printf("Hit @ oid 0x%lX addr 0x%lX index %d\n", hit_entry->oid, hit_entry->addr, result.hit_index);
+    ocache_entry_print_dict_DISH(hit_entry);
   }
   return;
 }
@@ -3929,6 +4280,9 @@ void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache
   // If all lines are invalid, just invalidate the entire line (reset LRU, etc.)
   if(ocache_entry_is_all_invalid(hit_entry) == 1) {
     ocache_entry_inv(hit_entry);
+    if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+      ocache_entry_inv_DISH(hit_entry);
+    }
   }
   return;
 }
@@ -3998,6 +4352,9 @@ void ocache_reset(ocache_t *ocache) {
   // Invalidate lines
   for(int i = 0;i < ocache->tag_line_count;i++) {
     ocache_entry_inv(ocache->data + i);
+    if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+      ocache_entry_inv_DISH(ocache->data + i);
+    }
   }
   // Byte size since the type is uint8_t
   int size = ocache->stat_end - ocache->stat_begin;
@@ -4172,6 +4529,9 @@ int ocache_inv_range(ocache_t *ocache, uint64_t addr_lo, uint64_t addr_hi) {
     if(ocache_entry_is_all_invalid(curr) == 0) {
       if(curr->addr >= addr_lo && curr->addr < addr_hi) {
         ocache_entry_inv(curr);
+        if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+          ocache_entry_inv_DISH(curr);
+        }
         count++;
       }
     }
@@ -4189,6 +4549,9 @@ int ocache_inv_all(ocache_t *ocache) {
   for(int i = 0;i < ocache->tag_line_count;i++) {
     if(ocache_entry_is_all_invalid(curr) == 0) {
       ocache_entry_inv(curr);
+      if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+        ocache_entry_inv_DISH(curr);
+      }
       count++;
     }
     curr++;
@@ -4258,6 +4621,12 @@ void ocache_set_print(ocache_t *ocache, int set) {
       printf(" %d", ocache_entry_get_size(curr, index));
     }
     putchar('\n');
+    // DISH per-entry dictionary print
+    if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+      printf("  ");
+      // This will append a new line
+      ocache_entry_print_dict_DISH(curr);
+    }
     curr++;
   }
   printf("State bits and sizes are print from index 3 to index 0\n");
@@ -4310,6 +4679,13 @@ void ocache_conf_print(ocache_t *ocache) {
       #endif
       MBD_RUNAHEAD, MBD_THROUGHPUT,
       ocache_MBD_type_names[ocache->MBD_type]);
+    // Print Thesaurus parameters
+    if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+      printf("  Thesaurus hash unit bits %d fingerprint bits %d\n",
+        THESAURUS_INPUT_WORD_BITS, THESAURUS_FINGERPRINT_BITS);
+    }
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+    printf("DISH scheme 1 (success bits %d)\n", DISH_SUCCESS_BITS);
   } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_None_cb) {
     printf("None\n");
   } else {
@@ -4616,6 +4992,14 @@ void ocache_stat_print(ocache_t *ocache) {
       printf("[%d-%d] %lu ", i * 8 + 1, i * 8 + 8, ocache->MBD_size_counts[i]);
     }
     putchar('\n');
+    // Print Thesaurus parameters at the end of statistics
+    if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+      printf("MBD Thesaurus hash unit bits %d fingerprint bits %d\n",
+        THESAURUS_INPUT_WORD_BITS, THESAURUS_FINGERPRINT_BITS);
+    }
+  } else if(ocache->get_compressed_size_cb == ocache_get_compressed_size_DISH_cb) {
+    printf("DISH scheme 1 (success bits %d)\n", DISH_SUCCESS_BITS);
+    printf("DISH success %lu fail %lu\n", ocache->DISH_success_count, ocache->DISH_fail_count);
   } else {
     printf("Unknown compression method (debugging?)\n");
   }
@@ -4898,6 +5282,38 @@ static int scache_get_compressed_size_MBD_cb(scache_t *scache, uint64_t addr) {
   return bytes;
 }
 
+static int scache_get_compressed_size_Thesaurus_cb(scache_t *scache, uint64_t addr) {
+  scache->Thesaurus_attempt_count++;
+  scache->Thesaurus_attempt_size += UTIL_CACHE_LINE_SIZE;
+  dmap_entry_t *dmap_entry = dmap_find(scache->dmap, 0UL, addr);
+  if(dmap_entry == NULL) {
+    error_exit("Data to be compressed cannot be found on addr 0x%lX\n", addr);
+  }
+  int bits = 0;
+  uint32_t lsh = Thesaurus_hash_data(dmap_entry->data);
+  assert(lsh < (sizeof(Thesaurus_base_table) / sizeof(void *)));
+  if(Thesaurus_base_table[lsh] != NULL) {
+    void *ref = Thesaurus_base_table[lsh]->data;
+    bits = Thesaurus_get_comp_size_bits_AVX2(dmap_entry->data, ref, UTIL_CACHE_LINE_SIZE);
+  } else {
+    bits = UTIL_CACHE_LINE_BITS;
+  }
+  Thesaurus_base_table[lsh] = dmap_entry; 
+  if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
+    scache->Thesaurus_fail_count++;
+    scache->Thesaurus_uncomp_size += UTIL_CACHE_LINE_SIZE;
+    return UTIL_CACHE_LINE_SIZE;
+  }
+  int bytes = (bits + 7) / 8;
+  scache->Thesaurus_success_count++;
+  scache->Thesaurus_before_size += UTIL_CACHE_LINE_SIZE;
+  scache->Thesaurus_after_size += bytes;
+  assert(bytes > 0 && bytes <= 64);
+  // Update statistics for size classes. Note we must minus one to make value domain [0, 64)
+  scache->Thesaurus_size_counts[(bytes - 1) / 4]++;
+  return bytes;
+}
+
 // Trivial call back; No compression, always return full size cache line
 static int scache_get_compressed_size_None_cb(scache_t *scache, uint64_t addr) {
   (void)addr; (void)scache;
@@ -4925,6 +5341,11 @@ static uint64_t scache_access_hit_MBD_cb(scache_t *scache, uint64_t addr) {
   return 0UL;
 }
 
+static uint64_t scache_access_hit_Thesaurus_cb(scache_t *scache, uint64_t addr) {
+  (void)addr; (void)scache;
+  return SCACHE_THESAURUS_DECOMP_LATENCY;
+}
+
 static uint64_t scache_access_hit_None_cb(scache_t *scache, uint64_t addr) {
   (void)addr; (void)scache;
   return 0UL;
@@ -4949,6 +5370,12 @@ void scache_set_compression_type(scache_t *scache, const char *name) {
     error_exit("scache with MBD is not supported yet (need to sync with ocache_t's call backs)\n");
     scache->get_compressed_size_cb = scache_get_compressed_size_MBD_cb;
     scache->access_hit_cb = scache_access_hit_MBD_cb;
+  } else if(streq(name, "Thesaurus") == 1) {
+    if(THESAURUS_FINGERPRINT_BITS == 0 || THESAURUS_INPUT_WORD_BITS == 0) {
+      error_exit("Thesaurus hash function is not configured properly!\n");
+    }
+    scache->get_compressed_size_cb = scache_get_compressed_size_Thesaurus_cb;
+    scache->access_hit_cb = scache_access_hit_Thesaurus_cb;
   } else if(streq(name, "None") == 1) {
     scache->get_compressed_size_cb = scache_get_compressed_size_None_cb;
     scache->access_hit_cb = scache_access_hit_None_cb;
@@ -5278,6 +5705,9 @@ void scache_conf_print(scache_t *scache) {
     printf("CPACK\n");
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_MBD_cb) {
     printf("MBD\n");
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_Thesaurus_cb) {
+    printf("Thesaurus input word %d bits fingerprint %d bits\n",
+      THESAURUS_INPUT_WORD_BITS, THESAURUS_FINGERPRINT_BITS);
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
     printf("None\n");
   } else if(scache->get_compressed_size_cb == NULL) {
@@ -5366,6 +5796,25 @@ void scache_stat_print(scache_t *scache) {
     printf("Size classes ");
     for(int i = 0;i < 8;i++) {
       printf("[%d-%d] %lu ", i * 8, i * 8 + 8, scache->MBD_size_counts[i]);
+    }
+    putchar('\n');
+  } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_Thesaurus_cb) {
+    printf("Thesaurus input word %d bits fingerprint %d bits\n",
+      THESAURUS_INPUT_WORD_BITS, THESAURUS_FINGERPRINT_BITS);
+    printf("Thesaurus attempt %lu success %lu fail %lu (rate %.2lf%%)\n",
+      scache->Thesaurus_attempt_count, scache->Thesaurus_success_count, scache->Thesaurus_fail_count,
+      100.0 * scache->Thesaurus_success_count / (double)scache->Thesaurus_attempt_count);
+    printf("Thesaurus success only before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->Thesaurus_before_size, scache->Thesaurus_after_size,
+      100.0 * scache->Thesaurus_after_size / (double)scache->Thesaurus_before_size,
+      (double)scache->Thesaurus_before_size / (double)scache->Thesaurus_after_size);
+    printf("Thesaurus overall before %lu after %lu (ratio %.2lf%%, %.2lfx)\n",
+      scache->Thesaurus_attempt_size, scache->Thesaurus_uncomp_size + scache->Thesaurus_after_size,
+      100.0 * (scache->Thesaurus_uncomp_size + scache->Thesaurus_after_size) / (double)scache->Thesaurus_attempt_size,
+      (double)scache->Thesaurus_attempt_size / (double)(scache->Thesaurus_uncomp_size + scache->Thesaurus_after_size));
+    printf("Size classes ");
+    for(int i = 0;i < 16;i++) {
+      printf("[%d-%d] %lu ", i * 4, i * 4 + 4, scache->Thesaurus_size_counts[i]);
     }
     putchar('\n');
   } else if(scache->get_compressed_size_cb == &scache_get_compressed_size_None_cb) {
@@ -8038,6 +8487,19 @@ void oc_stat_print(oc_t *oc) {
 
 //* main_addr_map_t
 
+main_addr_map_alloc_entry_t *main_addr_map_alloc_entry_init() {
+  main_addr_map_alloc_entry_t *alloc_entry = \
+    (main_addr_map_alloc_entry_t *)malloc(sizeof(main_addr_map_alloc_entry_t));
+  SYSEXPECT(alloc_entry != NULL);
+  memset(alloc_entry, 0x00, sizeof(main_addr_map_alloc_entry_t));
+  return alloc_entry;
+}
+
+void main_addr_map_alloc_entry_free(main_addr_map_alloc_entry_t *alloc_entry) {
+  free(alloc_entry);
+  return;
+}
+
 main_addr_map_entry_t *main_addr_map_entry_init() {
   main_addr_map_entry_t *entry = (main_addr_map_entry_t *)malloc(sizeof(main_addr_map_entry_t));
   SYSEXPECT(entry != NULL);
@@ -8059,6 +8521,16 @@ main_addr_map_t *main_addr_map_init() {
 
 // Free all nodes in the hash table
 void main_addr_map_free(main_addr_map_t *addr_map) {
+  // Free alloc entries first
+  for(int i = 0;i < MAIN_ADDR_MAP_TYPE_ID_MAX;i++) {
+    main_addr_map_alloc_entry_t *alloc_entry = addr_map->alloc_entries[i];
+    while(alloc_entry != NULL) {
+      main_addr_map_alloc_entry_t *next = alloc_entry->next;
+      main_addr_map_alloc_entry_free(alloc_entry);
+      alloc_entry = next;
+    }
+  }
+  // Free mapping entries
   for(int i = 0;i < MAIN_ADDR_MAP_INIT_COUNT;i++) {
     main_addr_map_entry_t *curr = addr_map->entries[i];
     while(curr != NULL) {
@@ -8145,6 +8617,87 @@ main_addr_map_entry_t *main_addr_map_find(main_addr_map_t *addr_map, uint64_t ad
   return NULL;
 }
 
+// If the current base address of the type ID still has a slot, then use it
+// Otherwise, allocate on a new base address (which is just the input addr_1d)
+// NOTE: Different type IDs cannot share a block, because otherwise we will map the same
+// block address twice
+void main_addr_map_alloc(main_addr_map_t *addr_map, int type_id, uint64_t addr_1d, int size) {
+  if(type_id < 0 || type_id >= MAIN_ADDR_MAP_TYPE_ID_MAX) {
+    error_exit("The type ID (%d) is illegal\n", type_id);
+  } else if(size <= 0) {
+    error_exit("Invalid size %d\n", size);
+  }
+  uint64_t addr_1d_aligned = addr_1d & (UTIL_CACHE_LINE_MSB_MASK);
+  uint64_t addr_1d_end_aligned = (addr_1d + size - 1) & (UTIL_CACHE_LINE_MSB_MASK);
+  int line_count = ((addr_1d_end_aligned - addr_1d_aligned) / UTIL_CACHE_LINE_SIZE) + 1;
+  main_addr_map_alloc_entry_t *alloc_entry = addr_map->alloc_entries[type_id];
+  if(alloc_entry == NULL) {
+    alloc_entry = main_addr_map_alloc_entry_init();
+    alloc_entry->base_addr = addr_1d_aligned;
+    alloc_entry->mask = 0UL;
+    alloc_entry->type_id = type_id;
+    addr_map->alloc_entries[type_id] = alloc_entry;
+  }
+  // The current base addr has run out of OIDs
+  if(alloc_entry->mask == -1UL) {
+    main_addr_map_alloc_entry_t *new_entry = main_addr_map_alloc_entry_init();
+    // Use this address as the new base address
+    new_entry->base_addr = addr_1d_aligned;
+    new_entry->mask = 0UL;
+    new_entry->type_id = type_id;
+    addr_map->alloc_entries[type_id] = new_entry;
+    new_entry->next = alloc_entry;
+    alloc_entry = new_entry;
+  }
+  assert(alloc_entry->mask != -1UL);
+  // Take complement, 1 indicates available lowest OID
+  // FFS will return the bit index plus one
+  uint64_t oid_2d = (uint64_t)(ffs_uint64(~alloc_entry->mask) - 1);
+  assert(oid_2d < sizeof(uint64_t) * 8);
+  // Set the bit in the mask
+  alloc_entry->mask |= (0x1UL << oid_2d);
+  uint64_t addr_2d_aligned = alloc_entry->base_addr;
+  // Insert the mapping
+  for(int i = 0;i < line_count;i++) {
+    main_addr_map_entry_t *old_entry = main_addr_map_find(addr_map, addr_1d_aligned);
+    if(old_entry != NULL) {
+      error_exit("The 1D aligned address 0x%lX (unaligned offset %lu) has already been mapped\n",
+        addr_1d_aligned, addr_1d & UTIL_CACHE_LINE_LSB_MASK);
+    }
+    // Assume that addr_1d_aligned has not been mapped yet
+    main_addr_map_insert(addr_map, addr_1d_aligned, oid_2d, addr_2d_aligned);
+    addr_1d_aligned += UTIL_CACHE_LINE_SIZE;
+    addr_2d_aligned += UTIL_CACHE_LINE_SIZE;
+  }
+  return;
+}
+
+// Print all allocation info
+void main_addr_map_alloc_print(main_addr_map_t *addr_map) {
+  for(int i = 0;i < MAIN_ADDR_MAP_TYPE_ID_MAX;i++) {
+    if(addr_map->alloc_entries[i] != NULL) {
+      main_addr_map_alloc_entry_t *alloc_entry = addr_map->alloc_entries[i];
+      printf("Type ID %d\n", i);
+      while(alloc_entry != NULL) {
+        assert(alloc_entry->type_id == i);
+        printf("Base 0x%lX mask 0x%lX (", alloc_entry->base_addr, alloc_entry->mask);
+        for(int j = 63;j >= 0;j--) {
+          int bit = alloc_entry->mask & (0x1UL << j);
+          putchar(bit == 0 ? '0' : '1');
+          // One space for every 8 bits
+          if(j != 0 && (64 - j) % 8 == 0) {
+            putchar(' ');
+          }
+        }
+        printf(")\n");
+        alloc_entry = alloc_entry->next;
+      }
+    }
+  }
+  return;
+}
+
+// Print all mapping info
 void main_addr_map_print(main_addr_map_t *addr_map) {
   for(int i = 0;i < MAIN_ADDR_MAP_INIT_COUNT;i++) {
     main_addr_map_entry_t *entry = addr_map->entries[i];
@@ -8159,16 +8712,17 @@ void main_addr_map_print(main_addr_map_t *addr_map) {
 void main_addr_map_conf_print(main_addr_map_t *addr_map) {
   (void)addr_map;
   printf("---------- main_addr_map_t conf ----------\n");
-  printf("Init count %d\n", MAIN_ADDR_MAP_INIT_COUNT);
+  printf("Init count %d max type ID %d\n", MAIN_ADDR_MAP_INIT_COUNT, MAIN_ADDR_MAP_TYPE_ID_MAX);
   return;
 }
 
 void main_addr_map_stat_print(main_addr_map_t *addr_map) {
   printf("---------- main_addr_map_t stat ----------\n");
-  printf("Count entry %d insert %lu find %lu list %lu step %lu\n", 
+  printf("Addr map entry %d insert %lu find %lu list %lu step %lu\n", 
     addr_map->entry_count, addr_map->insert_count, addr_map->find_count, addr_map->list_count, addr_map->step_count);
-  printf("Avg steps %.2lf\n", 
+  printf("  Avg steps %.2lf\n", 
     (double)addr_map->step_count / (double)(addr_map->insert_count + addr_map->find_count));
+  printf("Alloc %lu free %lu\n", addr_map->alloc_count, addr_map->free_count);
   return;
 }
 
