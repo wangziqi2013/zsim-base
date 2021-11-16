@@ -1,3 +1,7 @@
+// Use 8-bit words to hash the fingerprint vector
+#define THESAURUS_INPUT_WORD_BITS 8
+// 12 bits in the final fingerprint
+#define THESAURUS_FINGERPRINT_BITS 12
 static uint16_t Thesaurus_hash_data(void *_data) {
   int8_t *data = (int8_t *)_data;
   uint16_t ret = 0U;
