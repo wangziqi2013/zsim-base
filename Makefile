@@ -198,8 +198,17 @@ deepsjeng_r:
 
 # Workload
 
-linked_list:
-	./build/release/zsim ./tests/2DOC/workload/linked_list/linked_list.cfg
+linked_list_64k_64k_40:
+	./build/release/zsim ./tests/2DOC/workload/linked_list_64k_64k_40/linked_list_64k_64k_40.cfg
+
+linked_list_-1_64k_40:
+	./build/release/zsim ./tests/2DOC/workload/linked_list_-1_64k_40/linked_list_-1_64k_40.cfg
+
+linked_list_64k_-1_40:
+	./build/release/zsim ./tests/2DOC/workload/linked_list_64k_-1_40/linked_list_64k_-1_40.cfg
+
+linked_list_-1_-1_40:
+	./build/release/zsim ./tests/2DOC/workload/linked_list_-1_-1_40/linked_list_-1_-1_40.cfg
 
 clean:
 	@rm ./.sconsign.dblite
