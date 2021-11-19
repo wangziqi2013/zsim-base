@@ -210,6 +210,68 @@ linked_list_64k_-1_40:
 linked_list_-1_-1_40:
 	./build/release/zsim ./tests/2DOC/workload/linked_list_-1_-1_40/linked_list_-1_-1_40.cfg
 
+linked_list_all:
+	make linked_list_64k_64k_40
+	make linked_list_-1_64k_40
+	make linked_list_64k_-1_40
+	make linked_list_-1_-1_40
+
+spec_all:
+	make bzip2_2006
+	make gcc_2006
+	make mcf_2006
+	make milc_2006
+	make zeusmp_2006
+	make leslie3d_2006
+	make soplex_2006
+	make gemsFDTD_2006
+	make libquantum_2006
+	make lbm_2006
+	make omnetpp_2006
+	make sphinx3_2006
+	make xalancbmk_2006
+
+	make cactuBSSN_r
+	make fotonik3d_r
+	make imagick_r
+	make lbm_r
+	make mcf_r
+	make parest_r
+	make roms_r
+	make wrf_r
+	make xalancbmk_r
+
+	#make perlbench_2006
+	#make bwaves_2006
+	#make gamess_2006
+	#make gromacs_2006
+	#make cactusADM_2006
+	#make namd_2006
+	#make gobmk_2006
+	#make dealII_2006
+	#make calculix_2006
+	#make hmmer_2006
+	#make sjeng_2006
+	#make h264ref_2006
+	#make tonto_2006
+	#make astar_2006
+	#make wrf_2006
+
+	#make exchange2_r
+	#make gcc_r
+	#make leela_r
+	#make omnetpp_r
+	#make perlbench_r
+	#make x264_r
+	#make xz_r
+	#make bwaves_r
+	#make namd_r
+	#make povray_r
+	#make blender_r
+	#make cam4_r
+	#make nab_r
+	#make deepsjeng_r
+
 clean:
 	@rm ./.sconsign.dblite
 	@rm -rf ./build
