@@ -1,0 +1,16 @@
+# All conf files share the same scheme selection
+%include tests/2DOC/scheme_conf.txt
+
+dram.bank_count = 16
+dram.read_latency = 300
+dram.write_latency = 300
+
+main.max_inst_count = 1B
+# Rely on start sim
+main.start_inst_count = 10000B
+main.ignore_magic_op_start_sim = 0
+
+main.app_name = linked_list_64k_-1_40
+main.result_dir_has_timestamp = 0
+
+main.result_top_level_dir = results_workload
