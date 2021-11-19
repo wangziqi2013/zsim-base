@@ -3124,23 +3124,37 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
     MBD_opt3_dict_invalidate(&dict);
   }
   uint64_t base_addr = addr;
-  if(ocache->MBD_type == OCACHE_MBD_V4) {
-    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
-  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
-    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
-  } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
-    assert(oid == 0UL);
-    uint32_t lsh = Thesaurus_hash_data((int32_t *)entry->data);
-    assert(lsh < (sizeof(Thesaurus_base_table) / sizeof(void *)));
-    // If there is already an entry, then use it; Otherwise ignore this and just perform normal compression
-    if(Thesaurus_base_table[lsh] != NULL) {
-      base_addr = Thesaurus_base_table[lsh]->addr;
+  uint64_t base_oid = oid;
+  // Default to 1, such that for MBDv0, this is never executed
+  int is_base = 1;
+  //uint64_t base_addr = addr;
+  if(shape == OCACHE_SHAPE_1_4) {
+    if(ocache->MBD_type == OCACHE_MBD_V4) {
+      base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
+    } else if(ocache->MBD_type == OCACHE_MBD_V2) {
+      base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+    } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+      assert(oid == 0UL);
+      uint32_t lsh = Thesaurus_hash_data((int32_t *)entry->data);
+      assert(lsh < (sizeof(Thesaurus_base_table) / sizeof(void *)));
+      // If there is already an entry, then use it; Otherwise ignore this and just perform normal compression
+      if(Thesaurus_base_table[lsh] != NULL) {
+        base_addr = Thesaurus_base_table[lsh]->addr;
+      }
+      Thesaurus_base_table[lsh] = entry; // Evict on every compression attempt to keep it "fresh"
     }
-    Thesaurus_base_table[lsh] = entry; // Evict on every compression attempt to keep it "fresh"
+    is_base = (base_addr == addr);
+  } else if(shape == OCACHE_SHAPE_4_1) {
+    if(ocache->MBD_type != OCACHE_MBD_V4) {
+      error_exit("OCACHE_SHAPE_4_1 only supports MBDv4 as MBD_type\n");
+    }
+    // 4_1 always assumes MBDv4
+    base_oid = oid & ~0x3UL;
+    is_base = (base_oid == oid);
   }
   // For MBDv0 this branch is never executed
-  if(base_addr != addr) {
-    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
+  if(is_base == 0) {
+    dmap_entry_t *base_entry = dmap_find(ocache->dmap, base_oid, base_addr);
     if(base_entry != NULL) {
       // Run comp on the ref block
       switch(ocache->MBD_opt_type) {
@@ -3170,7 +3184,7 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
         ocache->MBD_insert_base_miss++;
         // Access bcache if it is initialized
         if(ocache->bcache != NULL) {
-          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
+          int bcache_hit = bcache_read(ocache->bcache, base_oid, base_addr);
           if(bcache_hit == 1) {
             ocache->MBD_insert_bcache_hit++;
           } else {
@@ -3195,15 +3209,15 @@ int ocache_get_compressed_size_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t a
     } break;
     case OCACHE_MBD_OPT1: {
       // If it is the ref block itself, then just perform normal compression / decompression
-      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      int options = (is_base == 1) ? MBD_REF_BLOCK : 0;
       bits = __MBD_opt1_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
     } break;
     case OCACHE_MBD_OPT2: {
-      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      int options = (is_base == 1) ? MBD_REF_BLOCK : 0;
       bits = __MBD_opt2_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
     } break;
     case OCACHE_MBD_OPT3: {
-      int options = (base_addr == addr) ? MBD_REF_BLOCK : 0;
+      int options = (is_base == 1) ? MBD_REF_BLOCK : 0;
       bits = __MBD_opt3_get_comp_size_bits(entry->data, UTIL_CACHE_LINE_SIZE, &dict, options); 
     } break;
     default: {
@@ -3399,22 +3413,33 @@ uint64_t ocache_access_hit_CPACK_cb(ocache_t *ocache, uint64_t oid, uint64_t add
 // Returns extra cycles the read will incur
 uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape) {
   uint64_t base_addr = addr;
-  if(ocache->MBD_type == OCACHE_MBD_V4) {
-    base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
-  } else if(ocache->MBD_type == OCACHE_MBD_V2) {
-    base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
-  } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
-    assert(oid == 0UL);
+  uint64_t base_oid = oid;
+  int is_base = 1;
+  if(shape == OCACHE_SHAPE_1_4) {
+    if(ocache->MBD_type == OCACHE_MBD_V4) {
+      base_addr = addr & (~0x3UL << UTIL_CACHE_LINE_BITS);
+    } else if(ocache->MBD_type == OCACHE_MBD_V2) {
+      base_addr = addr & (~0x1UL << UTIL_CACHE_LINE_BITS);
+    } else if(ocache->MBD_type == OCACHE_MBD_Thesaurus) {
+      assert(oid == 0UL);
+    }
+    is_base = (base_addr == addr);
+  } else if(shape == OCACHE_SHAPE_4_1) {
+    if(ocache->MBD_type != OCACHE_MBD_V4) {
+      error_exit("ocache with shape 4_1 only works with MBDv4\n");
+    }
+    base_oid = oid & ~0x3UL;
+    is_base = (base_oid == oid);
   }
   // Simulate bcache hit on read requests
   // For MBDv0 and Thesaurus this is never executed
-  if(base_addr != addr) {
-    dmap_entry_t *base_entry = dmap_find(ocache->dmap, oid, base_addr);
+  if(is_base == 0) {
+    dmap_entry_t *base_entry = dmap_find(ocache->dmap, base_oid, base_addr);
     if(base_entry != NULL) {
       if(base_entry->MESI_entry.llc_state == MESI_STATE_I) {
         ocache->MBD_read_base_is_missing++;
         if(ocache->bcache != NULL) {
-          int bcache_hit = bcache_read(ocache->bcache, oid, base_addr);
+          int bcache_hit = bcache_read(ocache->bcache, base_oid, base_addr);
           if(bcache_hit == 1) {
             ocache->MBD_read_bcache_hit++;
           } else {
@@ -3429,7 +3454,6 @@ uint64_t ocache_access_hit_MBD_cb(ocache_t *ocache, uint64_t oid, uint64_t addr,
     // Just accessing the base itself
     ocache->MBD_read_base_is_present++;
   }
-  (void)shape;
   // Get data
   dmap_entry_t *dmap_entry = dmap_find(ocache->dmap, oid, addr);
   // One more decompression on cached block hit
@@ -5296,7 +5320,7 @@ static int scache_get_compressed_size_Thesaurus_cb(scache_t *scache, uint64_t ad
     void *ref = Thesaurus_base_table[lsh]->data;
     bits = Thesaurus_get_comp_size_bits_AVX2(dmap_entry->data, ref, UTIL_CACHE_LINE_SIZE);
   } else {
-    bits = UTIL_CACHE_LINE_BITS;
+    bits = (int)UTIL_CACHE_LINE_SIZE * 8;
   }
   Thesaurus_base_table[lsh] = dmap_entry; 
   if(bits >= (int)UTIL_CACHE_LINE_SIZE * 8) {
@@ -8775,7 +8799,7 @@ void main_latency_list_append(main_latency_list_t *list, int op, uint64_t addr, 
 main_latency_list_entry_t *main_latency_list_get(main_latency_list_t *list, int index) {
   assert(index >= 0);
   if(index >= list->count) {
-    error_exit("List size %d index %d\n", list->count, index);
+    error_exit("Invalid access to latency list (List size %d index %d)\n", list->count, index);
   }
   return &list->data[index];
 }
@@ -9112,6 +9136,8 @@ void main_sim_begin(main_t *main) {
   // Delayed start in report_progress() - This may be a little inaccurate if bbs are only reported sparsingly
   main->current_interval = -1; // Indicating that we have not started
   main->started = 0;
+  main->start_received = 0;
+  // Note that this will affect start_received, so we need special processing
   main->next_toggle_inst_count = main->param->start_inst_count;
   return;
 }
@@ -9266,6 +9292,12 @@ void main_bb_sim_finish(main_t *main) {
   }
   main->mem_op_index = 0;
   main_latency_list_reset(main->latency_list);
+  if(main->start_received == 1) {
+    // Toggle right now (set it to the previous inst count reported by the sim)
+    main->next_toggle_inst_count = main->last_inst_count;
+    // Avoid toggle indefinitely
+    main->start_received = 0;
+  }
   return;
 }
 
@@ -9331,6 +9363,7 @@ void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_u
   return;
 }
 
+/*
 // Calls main_read and main_write() after preparing for memory operations
 // Return finish cycle of the operation
 // This function is called from zsim pipeline simulation phase after a basic block has been finished
@@ -9338,7 +9371,7 @@ void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_u
 void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
   // If sim has not started, just return in the same cycle (fast-forward)
   if(main->started == 0) {
-    //*out_cycles = *in_cycles;
+    // *out_cycles = *in_cycles;
     error_exit("This function should not be called when started is zero\n");
     return;
   }
@@ -9384,6 +9417,47 @@ void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
     main_mem_op_after(main, op, oid_2d, addr_2d_unaligned, size, data);
   }
   assert(index == main->slave_count);
+  return;
+}
+*/
+
+// Non master-slave version
+void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
+  // If sim has not started, just return in the same cycle (fast-forward)
+  if(main->started == 0) {
+    error_exit("This function should not be called when started is zero\n");
+    return;
+  }
+  int op_index = main->mem_op_index++;
+  // This function also checks bound
+  main_latency_list_entry_t *entry = main_latency_list_get(main->latency_list, op_index);
+  // This is potentially unaligned, which is directly taken from the application's trace
+  uint64_t addr_1d = entry->addr;
+  int op = entry->op;
+  assert(op == MAIN_READ || op == MAIN_WRITE);
+  int size = entry->size;
+  void *data = entry->data; // Only meaningful for write
+  // Align the addr on 1D space
+  uint64_t addr_1d_aligned;
+  int line_count;
+  main_gen_aligned_line_addr(main, addr_1d, size, &addr_1d_aligned, &line_count);
+  // Use this to generate the exact 2D address to be accessed
+  int addr_1d_offset = addr_1d - addr_1d_aligned;
+  assert(addr_1d_offset >= 0 && addr_1d_offset < (int)UTIL_CACHE_LINE_SIZE);
+  uint64_t oid_2d, addr_2d_aligned;
+  // First translate address - this is shared by all slaves
+  main->addr_1d_to_2d_cb(main, addr_1d_aligned, &oid_2d, &addr_2d_aligned);
+  uint64_t addr_2d_unaligned = addr_2d_aligned + addr_1d_offset;
+  // Calling before function to populate data map
+  main_mem_op_before(main, addr_1d_aligned, oid_2d, addr_2d_aligned, line_count);
+  // Then call coherence controller
+  if(op == MAIN_READ) {
+    out_cycles[0] = oc_load(main->oc, 0, in_cycles[0], oid_2d, addr_2d_aligned, line_count);
+  } else {
+    out_cycles[0] = oc_store(main->oc, 0, in_cycles[0], oid_2d, addr_2d_aligned, line_count);
+    // Only update dmap with the newest data after calling all slaves
+    main_mem_op_after(main, op, oid_2d, addr_2d_unaligned, size, data);
+  }
   return;
 }
 
@@ -9449,6 +9523,7 @@ void main_zsim_start_sim(main_t *main) {
       printf("[2DOC] Received magic op; Simulation starts at inst %lu cycle %lu (wait progress %d)\n",
         main->last_inst_count, main->last_cycle_count, main->progress);
       main->param->start_inst_count = main->last_inst_count;
+      main->start_received = 1;
     }
   }
   return;

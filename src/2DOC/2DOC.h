@@ -2450,14 +2450,13 @@ typedef struct main_struct_t {
   main_addr_map_t *addr_map;         // Mapping from 1D address to 2D space
   main_latency_list_t *latency_list; // Recording mem op latency; zSim only input latency to the hierarchy after BB sim
   int mem_op_index;                  // Current index into the latency list; Used during simulation; Reset to 0 per bb
-  // Progress report
+  // The most recent inst and cycle counts reported by the simulator
   uint64_t last_inst_count;
   uint64_t last_cycle_count;
   uint64_t start_cycle_count; // Cycle count when it starts, default zero
   int progress;        // 0 - 100
   int started;         // Init 0, only set to 1 when the start_inst_count is reached
-  // Currently not used; May be used in the future
-  int warmup;          // Not started yet, but we start to bring data into the cache; Not stat'ed
+  int start_received;  // Init 0, if received the magic op, then set this. We delay the actual start.
   // Return values of time(NULL), filled on sim_begin and sim_end respectively
   uint64_t init_time;  // When object is inited
   uint64_t begin_time; // When started = 1
@@ -2468,6 +2467,7 @@ typedef struct main_struct_t {
   uint64_t next_toggle_inst_count;     // Absolute inst count of the next toggle point
   uint64_t last_toggle_inst_count;     // Absolute inst count since the last toggle
   uint64_t last_toggle_cycle_count;    // Absolute cycle count since the last toggle
+  // Inst and cycle counts that are actually simulated (when started == 1)
   uint64_t sim_inst_count;
   uint64_t sim_cycle_count;
   uint64_t since_last_stat_snapshot_inst_count; // As name suggests; only updated when sim is going on

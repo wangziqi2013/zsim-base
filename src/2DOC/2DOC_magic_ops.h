@@ -12,6 +12,8 @@
 #define ZSIM_MAGIC_OP_PRINT_STR              1
 // Allocate a 2D address on the main addr map
 #define ZSIM_MAGOC_OP_ADDR_MAP_ALLOC         10
+// Start simulation immediately; This can be overridden by simulator options
+#define ZSIM_START_SIM                       11
 
 // The struct that contains full information about the magic op
 typedef struct {
@@ -35,7 +37,7 @@ inline static void zsim_magic_op(zsim_magic_op_t *op) {
                      : "a"(op)
                      : "%r10");
   // XOR R10, R10
-  __asm__ __volatile__ (".byte 0x4D, 0x87, 0xDB");
+  __asm__ __volatile__ (".byte 0x4D, 0x87, 0xD2");
   return;
 }
 

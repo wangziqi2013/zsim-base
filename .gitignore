@@ -14,3 +14,16 @@ results_*
 workloads/*
 workload/linked_list
 simpoint/*
+*.s
+*.output
+*.264
+*.txt
+*.par
+*.dec
+*.h5
+*.out
+*.temp
+*.tga
+me.prm
+param-
+log

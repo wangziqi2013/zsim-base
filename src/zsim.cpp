@@ -1391,8 +1391,15 @@ VOID HandleMagicOp_zsim_magic_op(THREADID tid, ADDRINT _op) {
         case ZSIM_MAGIC_OP_PRINT_STR: {
             printf("%s", (char *)op->arg);
         } break;
+        case ZSIM_MAGOC_OP_ADDR_MAP_ALLOC: {
+            main_addr_map_alloc_data_t *alloc_data = (main_addr_map_alloc_data_t *)op->arg;
+            main_addr_map_alloc(zinfo->main->addr_map, alloc_data->type_id, alloc_data->addr_1d, alloc_data->size);
+        } break;
+        case ZSIM_START_SIM: {
+            main_zsim_start_sim(zinfo->main);
+        } break;
         default: {
-            printf("Unknow magic op %d with arg 0x%lX\n", op->op, op->arg);
+            printf("Unknow magic op %d with arg 0x%lX\n", op->op, (uint64_t)op->arg);
         } break;
     }
     return;

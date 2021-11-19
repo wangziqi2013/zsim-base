@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "*.ph": "cpp",
-        "*.tlh": "cpp"
+        "*.tlh": "cpp",
+        "spec_namd.C": "cpp"
     }
 }
