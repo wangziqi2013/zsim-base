@@ -12,4 +12,5 @@ write_test
 result_*
 results_*
 workloads/*
+workload/linked_list
 simpoint/*
