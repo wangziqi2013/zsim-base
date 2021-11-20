@@ -17,7 +17,6 @@ simpoint/*
 *.s
 *.output
 *.264
-*.txt
 *.par
 *.dec
 *.h5
@@ -27,3 +26,7 @@ simpoint/*
 me.prm
 param-
 log
+s.txt
+puzzles.txt
+db_table
+dataDec.txt
