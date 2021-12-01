@@ -1463,7 +1463,7 @@ int __MBD_opt1_get_comp_size_bits(void *_in_buf, int size, MBD_dict_t *dict, int
           source_cycle = -1;
         } 
         // If hits zero then does not matter because zeroth element is hardwired
-        if(dict_hit_index != 0 && source_cycle != -1) {
+        if(source_cycle != -1 && dict_hit_index != 0) {
           // A forward from ref to target happens
           dict->forward_count++;
           // We use the same cycle scale as the ref block's cycle
@@ -8839,6 +8839,520 @@ void main_zsim_info_free(main_zsim_info_t *info) {
   return;
 }
 
+//* obj_map_t;
+
+obj_map_node_t *obj_map_node_init() {
+  obj_map_node_t *node = (obj_map_node_t *)malloc(sizeof(obj_map_node_t));
+  SYSEXPECT(node != NULL);
+  memset(node, 0x00, sizeof(obj_map_node_t));
+  return node;
+}
+
+void obj_map_node_free(obj_map_node_t *node) {
+  free(node);
+  return;
+}
+
+// This function should be able to find the entry in normal cases
+// If called for insert(), it returns the (insertion point - 1)
+int obj_map_node_search(obj_map_node_t *node, uint64_t key) {
+  for(int i = node->key_count - 1;i >= 0;i--) {
+    if(key >= node->keys[i]) {
+      return i;
+    }
+  }
+  // This is for insert() - If the node is empty, then return -1, such that we insert on index zero
+  return -1;
+}
+
+// Insert on index - only used internally
+static void obj_map_node_insert_index(obj_map_node_t *node, int insert_index, uint64_t key, void *value) {
+  assert(insert_index >= 0 && insert_index <= node->key_count);
+  // Move elements if not inserting on the last of the array
+  if(insert_index != node->key_count) {
+    int move_count = node->key_count - insert_index;
+    void *key_dest = node->keys + (insert_index + 1);
+    void *key_src = node->keys + insert_index;
+    memmove(key_dest, key_src, sizeof(uint64_t) * move_count);
+    void *value_dest = node->values + (insert_index + 1);
+    void *value_src = node->values + insert_index;
+    memmove(value_dest, value_src, sizeof(void *) * move_count);
+  }
+  node->keys[insert_index] = key;
+  node->values[insert_index] = value;
+  node->key_count++;
+  return;
+}
+
+// Insert into a non-full node to maintain key ordering
+// Note that the node's left range is defined by keys[0], so insertion must not happen on index zero
+void obj_map_node_insert(obj_map_node_t *node, uint64_t key, void *value) {
+  assert(node->key_count >= 0 && node->key_count < OBJ_MAP_NODE_KEY_COUNT);
+  int insert_index = obj_map_node_search(node, key) + 1;
+  obj_map_node_insert_index(node, insert_index, key, value);
+  return;
+}
+
+static void obj_map_node_delete_index(obj_map_node_t *node, int delete_index) {
+  assert(delete_index >= 0 && delete_index < node->key_count);
+  // Move elements if not inserting on the last of the array
+  if(delete_index != (node->key_count - 1)) {
+    int move_count = node->key_count - 1 - delete_index;
+    void *key_dest = node->keys + delete_index;
+    void *key_src = node->keys + (delete_index + 1);
+    memmove(key_dest, key_src, sizeof(uint64_t) * move_count);
+    void *value_dest = node->values + delete_index;
+    void *value_src = node->values + (delete_index + 1);
+    memmove(value_dest, value_src, sizeof(void *) * move_count);
+  }
+  node->key_count--;
+  return;
+}
+
+// Delete a key from the node. Return value indicate whether the value exists
+// value stores the value object of the deleted key, if deletion happens. value is not changed if 
+// key does not exist
+int obj_map_node_delete(obj_map_node_t *node, uint64_t key, void **value) {
+  assert(node->key_count >= 0 && node->key_count <= OBJ_MAP_NODE_KEY_COUNT);
+  int delete_index = obj_map_node_search(node, key);
+  // Empty node deletion
+  if(delete_index == -1 || node->keys[delete_index] != key) {
+    return 0;
+  }
+  *value = node->values[delete_index];
+  obj_map_node_delete_index(node, delete_index);
+  return 1;
+}
+
+obj_map_node_t *obj_map_node_split(obj_map_node_t *node) {
+  assert(node->key_count >= 2 && node->key_count <= OBJ_MAP_NODE_KEY_COUNT);
+  // Higher half of the contents
+  obj_map_node_t *sibling = obj_map_node_init();
+  sibling->next = node->next;
+  node->next = sibling;
+  sibling->level = node->level;
+  int split_index = node->key_count / 2;
+  int sibling_count = node->key_count - split_index;
+  node->key_count = split_index;
+  sibling->key_count = sibling_count;
+  memcpy(sibling->keys, node->keys + split_index, sizeof(uint64_t) * sibling_count);
+  memcpy(sibling->values, node->values + split_index, sizeof(void *) * sibling_count);
+  return sibling;
+}
+
+void obj_map_node_merge(obj_map_node_t *node, obj_map_node_t *sibling) {
+  assert(node->level == sibling->level);
+  // Must satisfy the order
+  assert(node->keys[node->key_count - 1] < sibling->keys[0]);
+  node->next = sibling->next;
+  int start_index = node->key_count;
+  node->key_count += sibling->key_count;
+  assert(node->key_count >= 0 && node->key_count <= OBJ_MAP_NODE_KEY_COUNT);
+  memcpy(node->keys + start_index, sibling->keys, sizeof(uint64_t) * sibling->key_count);
+  memcpy(node->values + start_index, sibling->values, sizeof(void *) * sibling->key_count);
+  return;
+}
+
+obj_map_value_t *obj_map_value_init() {
+  obj_map_value_t *value = (obj_map_value_t *)malloc(sizeof(obj_map_value_t));
+  SYSEXPECT(value != NULL);
+  memset(value, 0x00, sizeof(obj_map_value_t));
+  return value;
+}
+
+void obj_map_value_free(obj_map_value_t *value) {
+  free(value);
+  return;
+}
+
+obj_map_stat_t *obj_map_stat_init() {
+  obj_map_stat_t *stat = (obj_map_stat_t *)malloc(sizeof(obj_map_stat_t));
+  SYSEXPECT(stat != NULL);
+  obj_map_stat_reset(stat);
+  stat->next = stat->prev = NULL;
+  return stat;
+}
+
+void obj_map_stat_free(obj_map_stat_t *stat) {
+  free(stat);
+  return;
+}
+
+void obj_map_stat_dup(obj_map_stat_t *dest, obj_map_stat_t *src) {
+  memcpy(dest, src, sizeof(obj_map_stat_t));
+  return;
+}
+
+void obj_map_stat_reset(obj_map_stat_t *stat) {
+  memset(stat, 0x00, sizeof(obj_map_stat_t));
+  return;
+}
+
+obj_map_t *obj_map_init() {
+  obj_map_t *obj_map = (obj_map_t *)malloc(sizeof(obj_map_t));
+  SYSEXPECT(obj_map != NULL);
+  memset(obj_map, 0x00, sizeof(obj_map_t));
+  obj_map->root = obj_map_node_init();
+  obj_map->root->level = 1;
+  obj_map->root->next = NULL;
+  obj_map->leaf = obj_map_node_init();
+  obj_map->leaf->level = 0;
+  obj_map->leaf->next = NULL;
+  // By default, values will be freed
+  obj_map->free_value_flag = 1;
+  // Add the leaf to the root
+  obj_map_node_insert(obj_map->root, 0UL, obj_map->leaf);
+  return obj_map;
+}
+
+// Frees inner nodes recursively
+static void obj_map_free_recursive(obj_map_node_t *node, int free_value_flag) {
+  if(node->level > 0) {
+    for(int i = 0;i < node->key_count;i++) {
+      obj_map_free_recursive((obj_map_node_t *)node->values[i], free_value_flag);
+    }
+  } else {
+    if(free_value_flag == 1) {
+      for(int i = 0;i < node->key_count;i++) {
+        obj_map_value_free((obj_map_value_t *)node->values[i]);
+      }
+    }
+  }
+  obj_map_node_free(node);
+  return;
+}
+
+void obj_map_free(obj_map_t *obj_map) {
+  // Free nodes
+  obj_map_free_recursive(obj_map->root, obj_map->free_value_flag);
+  // Free snapshot objects
+  obj_map_stat_t *stat = obj_map->snapshot_head;
+  while(stat != NULL) {
+    obj_map_stat_t *next = stat->next;
+    obj_map_stat_free(stat);
+    stat = next;
+  }
+  // Free the object itself
+  free(obj_map);
+  return;
+}
+
+obj_map_node_t *obj_map_traverse(obj_map_t *obj_map, uint64_t key) {
+  obj_map_node_t *parent = NULL;
+  obj_map_node_t *node = obj_map->root;
+  assert(node->key_count != 0);
+  // Check height reduction on root
+  // Must not merge if height is 1, because this is the minimum tree structure
+  if(node->key_count < 2 && node->level > 1) {
+    assert(node->key_count == 1);
+    obj_map->root = (obj_map_node_t *)node->values[0];
+    obj_map_node_free(node);
+    node = obj_map->root;
+    obj_map->height_reduction_count++;
+  }
+  while(node->level != 0) {
+    // If the node is full, split it
+    if(node->key_count == OBJ_MAP_NODE_KEY_COUNT) {
+      obj_map_node_t *sibling = obj_map_node_split(node);
+      uint64_t split_key = sibling->keys[0];
+      // Insert new node into parent (parent is guaranteed to not split)
+      if(parent != NULL) {
+        obj_map_node_insert(parent, split_key, sibling);
+        obj_map->height_reduction_count++;
+      } else {
+        // Root node split, create new root
+        obj_map_node_t *new_root = obj_map_node_init();
+        new_root->next = NULL;
+        new_root->level = node->level + 1;
+        assert(node == obj_map->root);
+        obj_map_node_insert(new_root, node->keys[0], node);
+        obj_map_node_insert(new_root, split_key, sibling);
+        obj_map->root = new_root;
+        obj_map->height_increase_count++;
+        obj_map->height_reduction_count++;
+      }
+      if(key >= split_key) {
+        node = sibling;
+      }
+    }
+    int child_index = obj_map_node_search(node, key);
+    assert(child_index != -1);
+    obj_map_node_t *next_level = (obj_map_node_t *)node->values[child_index];
+    // Merge, if the next level node is not the last one on the current node, and it has only one key
+    if(next_level->key_count < 2 && child_index != node->key_count - 1) {
+      obj_map_node_t *merge_sibling = next_level->next;
+      assert(merge_sibling != NULL && merge_sibling == node->values[child_index + 1]);
+      // Merge with next, and remove next
+      if((merge_sibling->key_count + next_level->key_count) < OBJ_MAP_NODE_KEY_COUNT) {
+        obj_map_node_delete_index(node, child_index + 1);
+        obj_map_node_merge(next_level, merge_sibling);
+        obj_map_node_free(merge_sibling);
+        if(next_level->level == 0) {
+          obj_map->leaf_merge_count++;
+        } else {
+          obj_map->inner_merge_count++;
+        }
+      }
+    }
+    parent = node;
+    node = next_level;
+  }
+  if(node->key_count == OBJ_MAP_NODE_KEY_COUNT) {
+    obj_map_node_t *sibling = obj_map_node_split(node);
+    uint64_t split_key = sibling->keys[0];
+    obj_map_node_insert(parent, split_key, sibling);
+    if(key >= split_key) {
+      node = sibling;
+    }
+    obj_map->leaf_split_count++;
+  }
+  return node;
+}
+
+int obj_map_find(obj_map_t *obj_map, uint64_t key, void **value) {
+  obj_map_node_t *node = obj_map_traverse(obj_map, key);
+  int index = obj_map_node_search(node, key);
+  // This happens on the first node
+  if((index == -1) || node->keys[index] != key) {
+    return 0;
+  }
+  *value = node->values[index];
+  return 1;
+}
+
+// If the base could not be found (i.e., the key is smaller than all keys in the tree), then return 0
+int obj_map_find_base(obj_map_t *obj_map, uint64_t key, void **value) {
+  obj_map_node_t *node = obj_map_traverse(obj_map, key);
+  int index = obj_map_node_search(node, key);
+  if(index == -1) {
+    return 0;
+  }
+  *value = node->values[index];
+  return 1;
+}
+
+// Returns 1 if key does not already exists; return 0 if key exists and we do not insert
+int obj_map_insert(obj_map_t *obj_map, uint64_t key, void *value) {
+  obj_map_node_t *node = obj_map_traverse(obj_map, key);
+  int insert_index = obj_map_node_search(node, key) + 1;
+  assert(insert_index != -1);
+  // Do not insert if the key already exists
+  // There used to be a bug: The insert_key should be checked against the size to avoid accessing uninit'ed memory
+  if(insert_index != node->key_count && node->keys[insert_index] == key) {
+    return 0;
+  }
+  obj_map_node_insert_index(node, insert_index, key, value);
+  obj_map->count++;
+  return 1;
+}
+
+int obj_map_delete(obj_map_t *obj_map, uint64_t key, void **value) {
+  obj_map_node_t *node = obj_map_traverse(obj_map, key);
+  int delete_index = obj_map_node_search(node, key);
+  // Do not insert if the key already exists
+  // There used to be a bug: The insert_key should be checked against the size to avoid accessing uninit'ed memory
+  if(delete_index == -1 || node->keys[delete_index] != key) {
+    return 0;
+  }
+  *value = node->values[delete_index];
+  obj_map_node_delete_index(node, delete_index);
+  obj_map->count--;
+  return 1;
+}
+
+obj_map_value_t *obj_map_insert_obj(obj_map_t *obj_map, uint64_t addr, uint64_t size) {
+  obj_map_value_t *value = obj_map_value_init();
+  value->size = size;
+  value->addr = addr;
+  int ret = obj_map_insert(obj_map, addr, value);
+  if(ret == 1) {
+    return value;
+  }
+  // This is slow, but it is supposed to be an error case for the caller
+  free(value);
+  return NULL;
+}
+
+obj_map_value_t *obj_map_find_obj(obj_map_t *obj_map, uint64_t addr) {
+  void *_value;
+  int ret = obj_map_find_base(obj_map, addr, &_value);
+  if(ret == 0) {
+    return NULL;
+  }
+  obj_map_value_t *value = (obj_map_value_t *)_value;
+  assert(addr >= value->addr);
+  if(addr < value->addr + value->size) {
+    return (obj_map_value_t *)value;
+  }
+  return NULL;
+}
+
+// Note that this emulates free(), so it just uses the base address
+// If the object is not found, then return 0
+int obj_map_delete_obj(obj_map_t *obj_map, uint64_t addr) {
+  void *node;
+  int ret = obj_map_delete(obj_map, addr, &node);
+  if(ret == 0) {
+    return 0;
+  }
+  obj_map_node_free((obj_map_node_t *)node);
+  return 1;
+}
+
+static void obj_map_refresh_stat_recursive(obj_map_t *obj_map, obj_map_node_t *node) {
+  if(node->level > 0) {
+    obj_map->stat.inner_count++;
+    obj_map->stat.inner_key_count += node->key_count;
+    for(int i = 0;i < node->key_count;i++) {
+      obj_map_refresh_stat_recursive(obj_map, (obj_map_node_t *)node->values[i]);
+    }
+  } else {
+    obj_map->stat.leaf_count++;
+    obj_map->stat.leaf_key_count += node->key_count;
+  }
+  return;
+}
+
+// This function is rather heavy-weight, because it 
+static void obj_map_refresh_stat_leaf(obj_map_t *obj_map) {
+  obj_map_node_t *node = obj_map->leaf;
+  uint64_t prev_end = 0UL;
+  while(node != NULL) {
+    for(int i = 0;i < node->key_count;i++) {
+      obj_map_value_t *value = (obj_map_value_t *)node->values[i];
+      if(value->size < 64) {
+        // Index is 0 -- 7
+        obj_map->stat.size_dist_within_64B[value->size / 8]++;
+        obj_map->stat.size_dist_64B_to_4KB[0]++;
+      } else if(value->size >= 4096) {
+        obj_map->stat.size_count_greather_than_4KB++;
+      } else {
+        obj_map->stat.size_dist_64B_to_4KB[value->size / 64]++;
+      }
+      if(value->addr < prev_end) {
+        printf("Object at addr %lX size %lu overlaps with its previous object ending at 0x%lX\n",
+          value->addr, value->size, prev_end);
+      }
+      prev_end = value->addr + value->size;
+    }
+    node = node->next;
+  }
+  return;
+}
+
+void obj_map_refersh_stat(obj_map_t *obj_map) {
+  obj_map_stat_reset(&obj_map->stat);
+  obj_map_refresh_stat_recursive(obj_map, obj_map->root);
+  // Only invoke this if value objects are used as values
+  if(obj_map->free_value_flag == 1) {
+    obj_map_refresh_stat_leaf(obj_map);
+  }
+  return;
+}
+
+void obj_map_append_stat_snapshot(obj_map_t *obj_map) {
+  int snapshot_id;
+  if(obj_map->snapshot_head == NULL) {
+    assert(obj_map->snapshot_tail == NULL);
+    obj_map->snapshot_head = obj_map->snapshot_tail = obj_map_stat_init();
+    snapshot_id = 0;
+  } else {
+    assert(obj_map->snapshot_tail->next == NULL);
+    obj_map->snapshot_tail->next = obj_map_stat_init();
+    obj_map->snapshot_tail->next->prev = obj_map->snapshot_tail;
+    obj_map->snapshot_tail = obj_map->snapshot_tail->next;
+    snapshot_id = obj_map->snapshot_tail->id + 1;
+  }
+  // Refresh stat, which operates on the embed stat object
+  obj_map_refersh_stat(obj_map);
+  // Copy to the tail (new one)
+  obj_map_stat_dup(obj_map->snapshot_tail, &obj_map->stat);
+  // Assign ID
+  obj_map->snapshot_tail->id = snapshot_id;
+  return;
+}
+
+void obj_map_save_stat_snapshot(obj_map_t *obj_map, const char *filename) {
+  FILE *fp = fopen(filename, "w");
+  SYSEXPECT(fp != NULL);
+  fprintf(fp, "id, inner_count, leaf_count, inner_key_count, leaf_key_count");
+  for(int i = 0;i < 8;i++) {
+    fprintf(fp, ", [%d %d)", i * 8, (i + 1) * 8);
+  }
+  for(int i = 0;i < 64;i++) {
+    fprintf(fp, ", [%d %d)", i * 64, (i + 1) * 64);
+  }
+  fprintf(fp, "[4096, inf)");
+  fputc('\n', fp);
+  // Iterate over the snapshots from increasing order
+  obj_map_stat_t *stat = obj_map->snapshot_head;
+  while(stat != NULL) {
+    fprintf(fp, "%d, %lu, %lu, %lu, %lu", stat->id, stat->inner_count, stat->leaf_count,
+      stat->inner_key_count, stat->leaf_key_count);
+    for(int i = 0;i < 8;i++) {
+      fprintf(fp, ", %lu", stat->size_dist_within_64B[i]);
+    }
+    for(int i = 0;i < 64;i++) {
+      fprintf(fp, ", %lu", stat->size_dist_64B_to_4KB[i]);
+    }
+    fprintf(fp, ", %lu", stat->size_count_greather_than_4KB);
+    fputc('\n', fp);
+    stat = stat->next;
+  }
+  fclose(fp);
+  return;
+}
+
+void obj_map_conf_print(obj_map_t *obj_map) {
+  printf("---------- obj_map_t conf ----------\n");
+  printf("Node key count %d inner size %lu leaf size %lu\n", 
+    OBJ_MAP_NODE_KEY_COUNT, sizeof(obj_map_node_t), sizeof(obj_map_node_t));
+  printf("Free value flag %d\n", obj_map->free_value_flag);
+  return;
+}
+
+void obj_map_stat_print(obj_map_t *obj_map) {
+  obj_map_refersh_stat(obj_map);
+  printf("---------- obj_map_t stat ----------\n");
+  printf("Total key count %lu root height %d\n", obj_map->count, obj_map->root->level);
+  printf("Inner %lu keys %lu (fullness %.2lf%%) leaf %lu keys %lu (fullness %.2lf%%)\n",
+    obj_map->stat.inner_count, obj_map->stat.inner_key_count, 
+    100.0F * (double)obj_map->stat.inner_key_count / ((double)obj_map->stat.inner_count * OBJ_MAP_NODE_KEY_COUNT),
+    obj_map->stat.leaf_count, obj_map->stat.leaf_key_count, 
+    100.0F * (double)obj_map->stat.leaf_key_count / ((double)obj_map->stat.leaf_count * OBJ_MAP_NODE_KEY_COUNT));
+  uint64_t total_size = sizeof(obj_map_node_t) * obj_map->stat.inner_count + obj_map->stat.leaf_count;
+  printf("Inner storage %lu leaf storage %lu total %lu bytes (",
+    sizeof(obj_map_node_t) * obj_map->stat.inner_count, sizeof(obj_map_node_t) * obj_map->stat.leaf_count, total_size);
+  if(total_size < 1024UL) {
+    printf("%lu B", total_size);
+  } else if(total_size < 1024UL * 1024UL) {
+    printf("%.2lf KB", total_size / 1024.0F);
+  } else if(total_size < 1024UL * 1024UL * 1024UL) {
+    printf("%.2lf MB", total_size / (1024.0F * 1024.0F));
+  } else if(total_size < 1024UL * 1024UL * 1024UL * 1024UL) {
+    printf("%.2lf GB", total_size / (1024.0F * 1024.0F * 1024.0F));
+  }
+  printf(")\n");
+  printf("Inner split %lu merge %lu leaf split %lu merge %lu\n",
+    obj_map->height_reduction_count, obj_map->inner_merge_count, 
+    obj_map->leaf_split_count, obj_map->leaf_merge_count);
+  printf("Root creation %lu destroy %lu\n",
+    obj_map->height_increase_count, obj_map->height_reduction_count);
+  // Print object size distribution on all size ranges
+  printf("Obj size dist [0, 64) step 8:");
+  for(int i = 0;i < 8;i++) {
+    printf(" [%d, %d) %lu", i * 8, (i + 1) * 8, obj_map->stat.size_dist_within_64B[i]);
+  }
+  putchar('\n');
+  printf("Obj size dist [0, 4KB) step 64:");
+  for(int i = 0;i < 64;i++) {
+    printf(" [%d, %d) %lu", i *64, (i + 1) * 64, obj_map->stat.size_dist_64B_to_4KB[i]);
+  }
+  putchar('\n');
+  printf("Obj size dist >= 4KB: %lu\n", obj_map->stat.size_count_greather_than_4KB);
+  return;
+}
+
 //* main_t
 
 // Read configuration file
@@ -9027,6 +9541,12 @@ main_t *main_init_conf(conf_t *conf) {
   main->oc = oc_init(main->conf);
   main->addr_map = main_addr_map_init();
   main->latency_list = main_latency_list_init();
+  // Initialize object map and its enable variable
+  main->obj_map = obj_map_init();
+  int obj_map_enabled_found = conf_find_bool(conf, "main.obj_map_enabled", &main->obj_map_enabled);
+  if(obj_map_enabled_found == 0) {
+    main->obj_map_enabled = 0;
+  }
   // Just for safety, check alignment of this field
   if((uint64_t)&main->zsim_write_buffer % 64 != 0) {
     error_exit("Field main->zsim_write_buffer is not properly aligned (alignment = %lu)\n",
@@ -9079,6 +9599,7 @@ void main_add_slave(main_t *main, main_t *slave) {
 void main_free(main_t *main) {
   // Free components
   main_latency_list_free(main->latency_list);
+  obj_map_free(main->obj_map);
   main_addr_map_free(main->addr_map);
   oc_free(main->oc);
   // Free owned classes
@@ -9187,6 +9708,7 @@ void main_sim_end(main_t *main) {
   // Then build the suffix
   strcat(save_dir, "/");
   oc_save_stat_snapshot(main->oc, save_dir);
+  // obj_map_save_stat_snapshot(main->obj_map, save_dir);
   main_save_conf_stat(main, save_dir);
   // Switch back to the working dir
   if(saved_cwd != NULL) {
@@ -9241,6 +9763,7 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
     if(main->since_last_stat_snapshot_inst_count >= main->param->stat_snapshot_inst_count) {
       main->since_last_stat_snapshot_inst_count = 0;
       oc_append_stat_snapshot(main->oc);
+      //obj_map_append_stat_snapshot(main->obj_map);
     }
   }
   main->last_inst_count = inst;
@@ -9445,7 +9968,7 @@ void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
   int addr_1d_offset = addr_1d - addr_1d_aligned;
   assert(addr_1d_offset >= 0 && addr_1d_offset < (int)UTIL_CACHE_LINE_SIZE);
   uint64_t oid_2d, addr_2d_aligned;
-  // First translate address - this is shared by all slaves
+  // First translate address
   main->addr_1d_to_2d_cb(main, addr_1d_aligned, &oid_2d, &addr_2d_aligned);
   uint64_t addr_2d_unaligned = addr_2d_aligned + addr_1d_offset;
   // Calling before function to populate data map
@@ -9497,6 +10020,58 @@ void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data) {
   uint64_t addr_2d, oid_2d;
   main->addr_1d_to_2d_cb(main, addr_1d, &oid_2d, &addr_2d);
   dmap_write(oc_get_dmap(main->oc), oid_2d, addr_2d, size, data);
+  return;
+}
+
+// main_obj_map
+
+void main_obj_map_malloc(main_t *main, uint64_t base, uint64_t size, uint64_t pc) {
+  if(main->obj_map_enabled == 0) {
+    return;
+  }
+  obj_map_value_t *value = obj_map_insert_obj(main->obj_map, base, size);
+  if(value != NULL) {
+    value->pc = pc;
+    value->flags |= OBJ_MAP_VALUE_MALLOC;
+  }
+  return;
+}
+
+void main_obj_map_realloc(main_t *main, uint64_t old_base, uint64_t size, uint64_t new_base, uint64_t pc) {
+  if(main->obj_map_enabled == 0) {
+    return;
+  }
+  obj_map_delete_obj(main->obj_map, old_base);
+  obj_map_value_t *value = obj_map_insert_obj(main->obj_map, new_base, size);
+  if(value != NULL) {
+    value->pc = pc;
+    value->flags |= OBJ_MAP_VALUE_REALLOC;
+  }
+  return;
+}
+
+// Implemented as multiple smaller allocations
+void main_obj_map_calloc(main_t *main, uint64_t base, uint64_t count, uint64_t size, uint64_t pc) {
+  if(main->obj_map_enabled == 0) {
+    return;
+  }
+  uint64_t curr_base = base;
+  for(uint64_t i = 0;i < count;i++) {
+    obj_map_value_t *value = obj_map_insert_obj(main->obj_map, curr_base, size);
+    if(value != NULL) {
+      value->pc = pc;
+      value->flags |= OBJ_MAP_VALUE_CALLOC;
+    }
+    curr_base += size;
+  }
+  return;
+}
+
+void main_obj_map_free(main_t *main, uint64_t base) {
+  if(main->obj_map_enabled == 0) {
+    return;
+  }
+  obj_map_delete_obj(main->obj_map, base);
   return;
 }
 
@@ -9576,6 +10151,12 @@ void main_conf_print(main_t *main) {
   main_addr_map_conf_print(main->addr_map);
   printf("latency list:\n");
   main_latency_list_conf_print(main->latency_list);
+  printf("object map:\n");
+  if(main->obj_map_enabled == 1) {
+    obj_map_conf_print(main->obj_map);
+  } else {
+    printf("Not enabled\n");
+  }
   return;
 }
 
@@ -9610,6 +10191,12 @@ void main_stat_print(main_t *main) {
   main_addr_map_stat_print(main->addr_map);
   printf("latency list:\n");
   main_latency_list_stat_print(main->latency_list);
+  printf("object map:\n");
+  if(main->obj_map_enabled == 1) {
+    obj_map_stat_print(main->obj_map);
+  } else {
+    printf("Not enabled\n");
+  }
   if(main->sim_end_cb != NULL) {
     printf("Sim end cb is registered\n");
   } else {

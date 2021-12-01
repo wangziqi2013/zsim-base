@@ -9,7 +9,7 @@
 #define THESAURUS_LSH
 
 #include "util.h"
-#include "2DOC_magic_ops.h"
+#include "zsim_magic_ops.h"
 
 // Header files for SIMD instructions and BMI intrinsics
 #ifdef INTEL_ISA
@@ -2390,6 +2390,116 @@ inline static int main_latency_list_get_count(main_latency_list_t *list) { retur
 void main_latency_list_conf_print(main_latency_list_t *list);
 void main_latency_list_stat_print(main_latency_list_t *list);
 
+//* obj_map_t - Segment tree implementation
+//              Optimized for read, because this map is accessed for every memory operation
+
+#define OBJ_MAP_NODE_KEY_COUNT     16
+
+typedef struct obj_map_node_struct_t {
+  // level 0 means leaf node
+  int level; 
+  int key_count;
+  // key i's node is responsible for range [keys[i], keys[j])
+  // Since we use uint64_t as key, it has a range in [0x0, (-1UL) - 1]. We use -1UL to represent infinity
+  uint64_t keys[OBJ_MAP_NODE_KEY_COUNT];
+  void *values[OBJ_MAP_NODE_KEY_COUNT];
+  struct obj_map_node_struct_t *next;
+} obj_map_node_t;
+
+obj_map_node_t *obj_map_node_init();
+void obj_map_node_free(obj_map_node_t *node);
+
+// Find the largest entry whose key >= key, return the index
+int obj_map_node_search(obj_map_node_t *node, uint64_t key);
+void obj_map_node_insert(obj_map_node_t *node, uint64_t key, void *value);
+int obj_map_node_delete(obj_map_node_t *node, uint64_t key, void **value);
+// Split from the middle
+obj_map_node_t *obj_map_node_split(obj_map_node_t *node);
+// Just merge, does not free sibling
+void obj_map_node_merge(obj_map_node_t *node, obj_map_node_t *sibling);
+
+// Whether the value is part of a large calloc
+#define OBJ_MAP_VALUE_MALLOC             0x1
+#define OBJ_MAP_VALUE_REALLOC            0x2
+#define OBJ_MAP_VALUE_CALLOC             0x4
+
+typedef struct {
+  uint64_t addr; // Base address of the allocation
+  uint64_t size; // Size of the mapping
+  uint64_t pc;   // The PC value of the malloc()
+  int flags;     // Used for masks
+} obj_map_value_t;
+
+obj_map_value_t *obj_map_value_init();
+void obj_map_value_free(obj_map_value_t *value);
+
+typedef struct obj_map_stat_struct_t {
+  // Only used for snapshot instances
+  int id; 
+  // Node and key statistics; Updated by invoking the stat function
+  uint64_t inner_count;
+  uint64_t leaf_count;
+  uint64_t inner_key_count;
+  uint64_t leaf_key_count;
+  // [0, 64B)
+  uint64_t size_dist_within_64B[8];
+  // Step 64B, first element is [0, 64B)
+  uint64_t size_dist_64B_to_4KB[64];
+  // Everything >= 4KB
+  uint64_t size_count_greather_than_4KB;
+  // Only used for snapshot instances
+  struct obj_map_stat_struct_t *next;
+  struct obj_map_stat_struct_t *prev;
+  // Refreshed by leaf traversal
+} obj_map_stat_t;
+
+obj_map_stat_t *obj_map_stat_init();
+void obj_map_stat_free(obj_map_stat_t *stat);
+void obj_map_stat_dup(obj_map_stat_t *dest, obj_map_stat_t *src);
+
+typedef struct {
+  obj_map_node_t *root;
+  obj_map_node_t *leaf;
+  int free_value_flag;
+  // Total number of keys, updated by insertion and deletion
+  uint64_t count;
+  uint64_t inner_split_count;
+  uint64_t leaf_split_count;
+  uint64_t inner_merge_count;
+  uint64_t leaf_merge_count;
+  uint64_t height_increase_count;
+  uint64_t height_reduction_count;
+  obj_map_stat_t stat;
+  // Snapshot instances
+  obj_map_stat_t *snapshot_head; // Always points to the first snapshot
+  obj_map_stat_t *snapshot_tail; // Append at this end
+} obj_map_t;
+
+obj_map_t *obj_map_init();
+void obj_map_free(obj_map_t *obj_map);
+void obj_map_stat_reset(obj_map_stat_t *stat);
+
+obj_map_node_t *obj_map_traverse(obj_map_t *obj_map, uint64_t key);
+int obj_map_find(obj_map_t *obj_map, uint64_t key, void **value);
+// Key does not need to be exact match; Just match the interval
+int obj_map_find_base(obj_map_t *obj_map, uint64_t key, void **value);
+int obj_map_insert(obj_map_t *obj_map, uint64_t key, void *value);
+int obj_map_delete(obj_map_t *obj_map, uint64_t key, void **value);
+
+// Returns the value object just inserted, if insertion happens. Otherwise return NULL
+obj_map_value_t *obj_map_insert_obj(obj_map_t *obj_map, uint64_t addr, uint64_t size);
+// Returns the object given any address in the object; If the address does not belong to any object then return NULL
+obj_map_value_t *obj_map_find_obj(obj_map_t *obj_map, uint64_t addr);
+int obj_map_delete_obj(obj_map_t *obj_map, uint64_t addr);
+
+void obj_map_refersh_stat(obj_map_t *obj_map);
+// Append a stat snapshot at the end of the snapshot chain
+void obj_map_append_stat_snapshot(obj_map_t *obj_map);
+void obj_map_save_stat_snapshot(obj_map_t *obj_map, const char *filename);
+
+void obj_map_conf_print(obj_map_t *obj_map);
+void obj_map_stat_print(obj_map_t *obj_map);
+
 //* main_t
 // We cannot use 2DOC as identifier since it begins with a number
 
@@ -2449,6 +2559,8 @@ typedef struct main_struct_t {
   oc_t *oc;                          // Overlay compression
   main_addr_map_t *addr_map;         // Mapping from 1D address to 2D space
   main_latency_list_t *latency_list; // Recording mem op latency; zSim only input latency to the hierarchy after BB sim
+  int obj_map_enabled;               // Whether the object is enabled
+  obj_map_t *obj_map;                // Object map
   int mem_op_index;                  // Current index into the latency list; Used during simulation; Reset to 0 per bb
   // The most recent inst and cycle counts reported by the simulator
   uint64_t last_inst_count;
@@ -2592,6 +2704,12 @@ void main_update_2d_addr(main_t *main, uint64_t addr_1d, int size, uint64_t oid_
 // Write data to dmap (if data is not in any cache yet, this is equivalent of preparing data in DRAM)
 // and bypass the coherence controller
 void main_update_data(main_t *main, uint64_t addr_1d, int size, void *data);
+
+// main_obj_map - zsim interface for object map
+void main_obj_map_malloc(main_t *main, uint64_t base, uint64_t size, uint64_t pc);
+void main_obj_map_realloc(main_t *main, uint64_t old_base, uint64_t size, uint64_t new_base, uint64_t pc);
+void main_obj_map_calloc(main_t *main, uint64_t base, uint64_t count, uint64_t size, uint64_t pc);
+void main_obj_map_free(main_t *main, uint64_t base);
 
 // zsim debug print
 void main_zsim_debug_print_all(main_t *main);
