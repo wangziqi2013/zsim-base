@@ -1401,7 +1401,16 @@ VOID HandleMagicOp_zsim_magic_op(THREADID tid, ADDRINT _op) {
             main_zsim_start_sim(zinfo->main);
         } break;
         case ZSIM_MAGIC_OP_GET_ADDR_MAPPING: {
-            op->arg = (void *)main_addr_map_find(zinfo->main->addr_map, (uint64_t)op->arg);
+            uint64_t addr_1d = (uint64_t)op->arg;
+            main_addr_map_entry_t *entry = main_addr_map_find(zinfo->main->addr_map, addr_1d);
+            op->arg = (void *)entry;
+            //printf("zsim Row 0x%lX oid_2d %lX addr_2d 0x%lX\n", addr_1d, entry->oid_2d, entry->addr_2d);
+        } break;
+        case ZSIM_MAGIC_OP_GET_RAND32: {
+            op->rand_32 = rand();
+        } break;
+        case ZSIM_MAGIC_OP_GET_RAND64: {
+            op->rand_64 = rand_64();
         } break;
         default: {
             printf("Unknow magic op %d with arg 0x%lX\n", op->op, (uint64_t)op->arg);
@@ -1632,34 +1641,72 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
     return EHR_CONTINUE_SEARCH; //we never solve anything at all :P
 }
 
+#define ALLOC_MAX_THREAD_COUNT    64
+
+struct {
+    union {
+        uint64_t malloc_before_size[ALLOC_MAX_THREAD_COUNT];
+        struct {
+            uint64_t calloc_before_size[ALLOC_MAX_THREAD_COUNT];
+            uint64_t calloc_before_count[ALLOC_MAX_THREAD_COUNT];
+        };
+        struct {
+            uint64_t realloc_before_size[ALLOC_MAX_THREAD_COUNT];
+            uint64_t realloc_before_ptr[ALLOC_MAX_THREAD_COUNT];
+        };
+    };
+} alloc_args;
+
 // Image instrumentation
 
-VOID MallocBefore(ADDRINT ip, ADDRINT size) {
-    printf("Malloc @ 0x%lX call, size %lu\n", ip, size);
+VOID MallocBefore(ADDRINT ip, THREADID tid, ADDRINT size) {
+    //printf("Malloc @ 0x%lX call, size %lu\n", ip, size);
+    alloc_args.malloc_before_size[tid] = size;
+    return;
 }
 
-VOID MallocAfter(ADDRINT ip, ADDRINT ptr) {
-    printf("Malloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+VOID MallocAfter(ADDRINT ip, THREADID tid, ADDRINT base) {
+    //printf("Malloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+    uint64_t size = alloc_args.malloc_before_size[tid];
+    main_obj_map_malloc(zinfo->main, base, size, ip);
+    return;
 }
 
-VOID CallocBefore(ADDRINT ip, ADDRINT items, ADDRINT size) {
-    printf("Calloc @ 0x%lX call, items %lu size %lu\n", ip, items, size);
+VOID CallocBefore(ADDRINT ip, THREADID tid, ADDRINT count, ADDRINT size) {
+    //printf("Calloc @ 0x%lX call, count %lu size %lu\n", ip, count, size);
+    alloc_args.calloc_before_size[tid] = size;
+    alloc_args.calloc_before_count[tid] = count;
+    return;
 }
 
-VOID CallocAfter(ADDRINT ip, ADDRINT ptr) {
-    printf("Calloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+VOID CallocAfter(ADDRINT ip, THREADID tid, ADDRINT base) {
+    //printf("Calloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+    uint64_t size = alloc_args.calloc_before_size[tid];
+    uint64_t count = alloc_args.calloc_before_count[tid];
+    main_obj_map_calloc(zinfo->main, base, count, size, ip);
+    return;
 }
 
-VOID ReallocBefore(ADDRINT ip, ADDRINT ptr, ADDRINT size) {
-    printf("Realloc @ 0x%lX call, ptr 0x%lX size %lu\n", ip, ptr, size);
+VOID ReallocBefore(ADDRINT ip, THREADID tid, ADDRINT ptr, ADDRINT size) {
+    //printf("Realloc @ 0x%lX call, ptr 0x%lX size %lu\n", ip, ptr, size);
+    alloc_args.realloc_before_size[tid] = size;
+    alloc_args.realloc_before_ptr[tid] = ptr;
+    return;
 }
 
-VOID ReallocAfter(ADDRINT ip, ADDRINT ptr) {
-    printf("Realloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+VOID ReallocAfter(ADDRINT ip, THREADID tid, ADDRINT new_base) {
+    //printf("Realloc @ 0x%lX returns 0x%lX\n", ip, ptr);
+    uint64_t size = alloc_args.realloc_before_size[tid];
+    uint64_t old_base = alloc_args.realloc_before_ptr[tid];
+    main_obj_map_realloc(zinfo->main, old_base, size, new_base, ip);
+    return;
 }
 
-VOID FreeBefore(ADDRINT ip, ADDRINT ptr) {
-    printf("Free @ 0x%lX call, ptr 0x%lX\n", ip, ptr);
+VOID FreeBefore(ADDRINT ip, THREADID tid, ADDRINT base) {
+    //printf("Free @ 0x%lX call, ptr 0x%lX\n", ip, ptr);
+    main_obj_map_free(zinfo->main, base);
+    (void)ip;
+    return;
 }
 
 VOID Image(IMG img, VOID *v)
@@ -1667,19 +1714,21 @@ VOID Image(IMG img, VOID *v)
     // Instrument the malloc() and free() functions.  Print the input argument
     // of each malloc() or free(), and the return value of malloc().
     //
-    //  Find the malloc() function.
+    // Find the malloc() function.
     RTN mallocRtn = RTN_FindByName(img, "malloc");
     if(RTN_Valid(mallocRtn)) {
         RTN_Open(mallocRtn);
         // Instrument malloc() to print the input argument value and the return value.
         RTN_InsertCall(mallocRtn, IPOINT_BEFORE, (AFUNPTR)MallocBefore,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
         RTN_InsertCall(mallocRtn, IPOINT_AFTER, (AFUNPTR)MallocAfter,
                        IARG_INST_PTR,
-                       IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
-
+                       IARG_THREAD_ID,
+                       IARG_FUNCRET_EXITPOINT_VALUE, 
+                       IARG_END);
         RTN_Close(mallocRtn);
     } else {
         printf("Could not find malloc() in the program\n");
@@ -1692,13 +1741,14 @@ VOID Image(IMG img, VOID *v)
         // Instrument malloc() to print the input argument value and the return value.
         RTN_InsertCall(callocRtn, IPOINT_BEFORE, (AFUNPTR)CallocBefore,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
                        IARG_END);
         RTN_InsertCall(callocRtn, IPOINT_AFTER, (AFUNPTR)CallocAfter,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
-
         RTN_Close(callocRtn);
     } else {
         printf("Could not find calloc() in the program\n");
@@ -1711,11 +1761,13 @@ VOID Image(IMG img, VOID *v)
         // Instrument malloc() to print the input argument value and the return value.
         RTN_InsertCall(reallocRtn, IPOINT_BEFORE, (AFUNPTR)ReallocBefore,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
                        IARG_END);
         RTN_InsertCall(reallocRtn, IPOINT_AFTER, (AFUNPTR)ReallocAfter,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
 
         RTN_Close(reallocRtn);
@@ -1730,6 +1782,7 @@ VOID Image(IMG img, VOID *v)
         // Instrument free() to print the input argument value.
         RTN_InsertCall(freeRtn, IPOINT_BEFORE, (AFUNPTR)FreeBefore,
                        IARG_INST_PTR,
+                       IARG_THREAD_ID,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
         RTN_Close(freeRtn);
@@ -1845,7 +1898,12 @@ int main(int argc, char *argv[]) {
     //Register instrumentation
     TRACE_AddInstrumentFunction(Trace_normal, 0);
     // Enable this for malloc()/calloc()/realloc() instrumentation
-    //IMG_AddInstrumentFunction(Image, 0);
+    if(zinfo->main->obj_map_enabled == 1) {
+        printf("--------------------\n");
+        printf("Object map is enabled. Instrumenting the image to intercept malloc()/calloc()/free()\n");
+        printf("--------------------\n");
+        IMG_AddInstrumentFunction(Image, 0);
+    }
     VdsoInit(); //initialized vDSO patching information (e.g., where all the possible vDSO entry points are)
 
     PIN_AddThreadStartFunction(ThreadStart, 0);
