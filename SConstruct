@@ -8,7 +8,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
     ''' Build the simulator with a specific base buid dir and config type'''
 
     buildDir = joinpath(dir, type)
-    print "Building " + type + " zsim at " + buildDir
+    print("Building " + type + " zsim at " + buildDir)
 
     env = Environment(ENV = os.environ, tools = ['default', 'textfile'])
     env["CPPFLAGS"] = cppFlags
@@ -37,7 +37,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
     if "PINPATH" in os.environ:
         PINPATH = os.environ["PINPATH"]
     else:
-       print "ERROR: You need to define the $PINPATH environment variable with Pin's path"
+       print("ERROR: You need to define the $PINPATH environment variable with Pin's path")
        sys.exit(1)
 
     ROOT = Dir('.').abspath
@@ -46,7 +46,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
     # NOTE (dsm 10 Jan 2013): Tested with Pin 2.10 thru 2.12 as well
     # NOTE: Original Pin flags included -fno-strict-aliasing, but zsim does not do type punning
     # NOTE (dsm 16 Apr 2015): Update flags code to support Pin 2.14 while retaining backwards compatibility
-    env["CPPFLAGS"] += " -g -std=c++0x -Wall -Wno-unknown-pragmas -fomit-frame-pointer -fno-stack-protector"
+    env["CPPFLAGS"] += " -g -std=c++0x -Wno-unknown-pragmas -fomit-frame-pointer -fno-stack-protector"
     env["CPPFLAGS"] += " -MMD -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -fPIC -DTARGET_LINUX"
     # NOTE: (mgao Jan 2017): Pin 2.14 requires ABI version of 1002, while gcc-5 and later bumps the API version.
     # Switch to gcc-4.x by using -fabi-version=2
@@ -155,7 +155,7 @@ def buildSim(cppFlags, dir, type, pgo=None):
         env["PINLIBS"] += ["hdf5_serial", "hdf5_serial_hl"]
         env["CPPFLAGS"] += ' -DHDF5INCPREFIX="hdf5/serial/"'
     else:
-       print "ERROR: You need to install libhdf5 in the system"
+       print("ERROR: You need to install libhdf5 in the system")
        sys.exit(1)
 
     # Harness needs these defined
@@ -209,11 +209,11 @@ pgoPhase = GetOption('pgoPhase')
 # when you move the files. Check the repo for a version that tries this.
 if GetOption('pgoBuild'):
     for type in buildTypes:
-        print "Building PGO binary"
+        print("Building PGO binary")
         root = Dir('.').abspath
         testsDir = joinpath(root, "tests")
         trainCfgs = [f for f in os.listdir(testsDir) if f.startswith("pgo")]
-        print "Using training configs", trainCfgs
+        print("Using training configs", trainCfgs)
 
         baseDir = joinpath(baseBuildDir, "pgo-" + type)
         genCmd = "scons -j16 --pgoPhase=generate-" + type
