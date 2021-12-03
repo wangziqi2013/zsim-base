@@ -385,6 +385,7 @@ char *conf_read_line(FILE *fp, int *line_number) {
     } else {
       ret = (char *)realloc(ret, strlen(ret) + len + 1);
       strcat(ret, curr_s);
+      free(curr_s);
     }
     //printf("line_cont = %d\n", line_cont);
     // Check for line continuation, \\\n
