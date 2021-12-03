@@ -12,6 +12,8 @@ main.ignore_magic_op_start_sim = 1
 main.app_name = mcf_2006
 main.result_dir_has_timestamp = 0
 
+main.obj_map_enabled = 1
+
 main.chdir = 429.mcf/data/ref/input/
 main.chdir_is_rel = 1
 main.result_top_level_dir = results_2006
