@@ -216,6 +216,15 @@ linked_list_64k_64k_20:
 linked_list_64k_64k_0:
 	-./build/release/zsim ./tests/2DOC/workload/linked_list_64k_64k_0/linked_list_64k_64k_0.cfg
 
+linked_list_64k_64k_60:
+	-./build/release/zsim ./tests/2DOC/workload/linked_list_64k_64k_60/linked_list_64k_64k_60.cfg
+
+linked_list_16k_16k_40:
+	-./build/release/zsim ./tests/2DOC/workload/linked_list_16k_16k_40/linked_list_16k_16k_40.cfg
+
+db_table_z_0:
+	-./build/release/zsim ./tests/2DOC/workload/db_table_z_0/db_table_z_0.cfg
+
 db_table_z_1:
 	-./build/release/zsim ./tests/2DOC/workload/db_table_z_1/db_table_z_1.cfg
 
@@ -229,14 +238,17 @@ db_table_z_4:
 	-./build/release/zsim ./tests/2DOC/workload/db_table_z_4/db_table_z_4.cfg
 
 linked_list_all:
-	-make linked_list_64k_64k_40
-	-make linked_list_-1_64k_40
-	-make linked_list_64k_-1_40
-	-make linked_list_-1_-1_40
-	-make linked_list_64k_64k_20
-	-make linked_list_64k_64k_0
+	#-make linked_list_64k_64k_40
+	#-make linked_list_-1_64k_40
+	#-make linked_list_64k_-1_40
+	#-make linked_list_-1_-1_40
+	#-make linked_list_64k_64k_20
+	#-make linked_list_64k_64k_0
+	-make linked_list_64k_64k_60
+	-make linked_list_16k_16k_40
 
 db_table_all:
+	-make db_table_z_0
 	-make db_table_z_1
 	-make db_table_z_2
 	-make db_table_z_3
