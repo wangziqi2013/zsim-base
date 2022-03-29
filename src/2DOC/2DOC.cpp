@@ -2,6 +2,10 @@
 #include "2DOC.h"
 #include "third_party/compression.h"
 
+#ifdef PINTOOL_FLAG
+#include "pin.H"
+#endif
+
 //* Thesaurus_LSH
 
 #ifdef THESAURUS_LSH
@@ -2181,6 +2185,7 @@ void pmap_insert_range(pmap_t *pmap, uint64_t addr, int size, int shape) {
     pmap_entry_t *entry = pmap_insert(pmap, start_addr, shape);
     assert(entry->shape == shape);
     start_addr += UTIL_PAGE_SIZE;
+    (void)entry;
   }
   return;
 }
@@ -2981,6 +2986,7 @@ static void ocache_insert_helper_uncompressed(
   (void)shape; // Maintain consistency of interface
   int state = lookup_result->state;
   assert(state == OCACHE_HIT_NORMAL || state == OCACHE_MISS);
+  (void)state;
   // This is the entry that needs to be updated after the insert
   ocache_entry_t *entry = NULL;
   if(lookup_result->state == OCACHE_HIT_NORMAL) {
@@ -4291,6 +4297,7 @@ void ocache_inv(ocache_t *ocache, uint64_t oid, uint64_t addr, int shape, ocache
   // Must be hit
   int state = lookup_result.state;
   assert(state == OCACHE_HIT_NORMAL || state == OCACHE_HIT_COMPRESSED);
+  (void)state;
   ocache_entry_t *hit_entry = lookup_result.hit_entry;
   int hit_index = lookup_result.hit_index;
   assert(hit_entry != NULL);
@@ -9320,9 +9327,11 @@ void obj_map_stat_print(obj_map_t *obj_map) {
     100.0F * (double)obj_map->stat.inner_key_count / ((double)obj_map->stat.inner_count * OBJ_MAP_NODE_KEY_COUNT),
     obj_map->stat.leaf_count, obj_map->stat.leaf_key_count, 
     100.0F * (double)obj_map->stat.leaf_key_count / ((double)obj_map->stat.leaf_count * OBJ_MAP_NODE_KEY_COUNT));
-  uint64_t total_size = sizeof(obj_map_node_t) * obj_map->stat.inner_count + obj_map->stat.leaf_count;
+  uint64_t total_size = sizeof(obj_map_node_t) * (obj_map->stat.inner_count + obj_map->stat.leaf_count);
   printf("Inner storage %lu leaf storage %lu total %lu bytes (",
-    sizeof(obj_map_node_t) * obj_map->stat.inner_count, sizeof(obj_map_node_t) * obj_map->stat.leaf_count, total_size);
+    sizeof(obj_map_node_t) * obj_map->stat.inner_count, 
+    sizeof(obj_map_node_t) * obj_map->stat.leaf_count, 
+    total_size);
   if(total_size < 1024UL) {
     printf("%lu B", total_size);
   } else if(total_size < 1024UL * 1024UL) {
@@ -9623,7 +9632,7 @@ void main_free(main_t *main) {
 // Change working dir to chdir, and save previous working dir in saved_cwd
 void main_chdir(main_t *main) {
   assert(main->param->chdir != NULL);
-  main->saved_cwd = get_current_dir_name();
+  main->saved_cwd = getcwd(NULL, 0);
   SYSEXPECT(main->saved_cwd != NULL);
   int chdir_ret;
   if(main->param->env_workload_path != NULL) {
@@ -9641,13 +9650,14 @@ void main_chdir(main_t *main) {
     chdir_ret = chdir(main->param->chdir);
   }
   SYSEXPECT(chdir_ret == 0);
-  char *test = get_current_dir_name();
+  char *test = getcwd(NULL, 0);
   printf("[main] Switched working dir to: \"%s\"\n", test);
   printf("[main]   ...from \"%s\"\n", main->saved_cwd);
   free(test);
   return;
 }
 
+// This is only called after initializing the main object, not for magic op to start sim
 void main_sim_begin(main_t *main) {
   // Print conf first
   main_conf_print(main);
@@ -9665,7 +9675,14 @@ void main_sim_begin(main_t *main) {
 
 // This can be called when report progress function finds out that the simulation has come to an end
 // This function does not return
-void main_sim_end(main_t *main) {
+// The "force_end" argument indicates whether the method is called within report progress, or by the external
+// driver of the simulation. If set to 1, then this method also updates the inst and cycle
+void main_sim_end(main_t *main, int force_end) {
+  // This is a force end when sim is running. Inst and cycle have not been updated to the sim counter
+  if(force_end == 1 && main->started == 1) {
+    main->sim_inst_count += (main->last_inst_count - main->last_toggle_inst_count);
+    main->sim_cycle_count += (main->last_cycle_count - main->last_toggle_cycle_count);
+  }
   printf("\n\n========== simulation end ==========\n");
   main->end_time = time(NULL);
   // Call this before printing confs and stats
@@ -9682,7 +9699,7 @@ void main_sim_end(main_t *main) {
   // If there is a different top level result dir than the current one, then switch to it
   char *saved_cwd = NULL;
   if(main->param->result_top_level_dir != NULL) {
-    saved_cwd = get_current_dir_name(); // This is malloc'ed by the library
+    saved_cwd = getcwd(NULL, 0); // This is malloc'ed by the library
     // First check if the dir is there, if not then mkdir
     struct stat st;
     if(stat(main->param->result_top_level_dir, &st) == -1) {
@@ -9708,7 +9725,9 @@ void main_sim_end(main_t *main) {
   // Then build the suffix
   strcat(save_dir, "/");
   oc_save_stat_snapshot(main->oc, save_dir);
-  // obj_map_save_stat_snapshot(main->obj_map, save_dir);
+  if(main->obj_map_enabled == 1) {
+    obj_map_save_stat_snapshot(main->obj_map, save_dir);
+  }
   main_save_conf_stat(main, save_dir);
   // Switch back to the working dir
   if(saved_cwd != NULL) {
@@ -9763,7 +9782,9 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
     if(main->since_last_stat_snapshot_inst_count >= main->param->stat_snapshot_inst_count) {
       main->since_last_stat_snapshot_inst_count = 0;
       oc_append_stat_snapshot(main->oc);
-      //obj_map_append_stat_snapshot(main->obj_map);
+      if(main->obj_map_enabled == 1) {
+        obj_map_append_stat_snapshot(main->obj_map);
+      }
     }
   }
   main->last_inst_count = inst;
@@ -9778,7 +9799,8 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
       main->progress = progress;
     }
   } else {
-    // Toggle
+    // Toggle - this is also the branch that will be executed when simulation ends by reaching the 
+    // instruction limit
     if(main->started == 1) {
       // Toggle to waiting
       main->started = 0;
@@ -9788,7 +9810,7 @@ void main_report_progress(main_t *main, uint64_t inst, uint64_t cycle) {
       main->next_toggle_inst_count = inst + main->param->interval_skip_inst_count;
       // End the sim if we have run out of intervals
       if(main->current_interval == main->param->interval_count - 1) {
-        main_sim_end(main);
+        main_sim_end(main, 0);
       }
     } else {
       // Toggle to sim
@@ -9867,10 +9889,25 @@ void main_mem_op_before(main_t *main,
     // Returns whether the entry is newly inserted in the last argument
     dmap_entry_t *entry = _dmap_insert(dmap, oid_2d, addr_2d_aligned, &new_entry);
     if(new_entry == 1) {
+      //char buf[64];
+      //printf("Before\n");
+      //memcpy(buf, (void *)addr_1d_aligned, UTIL_CACHE_LINE_SIZE);
+      //printf("middle\n");
+      //memcpy(entry->data, buf, UTIL_CACHE_LINE_SIZE);
+      //printf("After\n");
+      //printf("Addr 0x%lX index %d\n", addr_1d_aligned, i);
+      #ifdef PINTOOL_FLAG
+      PIN_SafeCopy(entry->data, (void *)addr_1d_aligned, UTIL_CACHE_LINE_SIZE);
+      #else
       memcpy(entry->data, (void *)addr_1d_aligned, UTIL_CACHE_LINE_SIZE);
+      #endif
+      //printf("After\n");
+      //((uint8_t *)entry->data)[0] = ((uint8_t *)addr_1d_aligned)[0];
+      //memset(entry->data, 0x02, UTIL_CACHE_LINE_SIZE);
     }
     addr_2d_aligned += UTIL_CACHE_LINE_SIZE;
     addr_1d_aligned += UTIL_CACHE_LINE_SIZE;
+    (void)entry;
   }
   return;
 }
@@ -9881,8 +9918,13 @@ void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_u
   if(op == MAIN_READ) {
     return;
   }
-  dmap_t *dmap = oc_get_dmap(main->oc);
-  dmap_write(dmap, oid_2d, addr_2d_unaligned, size, buf);
+  //if(main == NULL || main->oc == NULL) {
+  //  printf("Null pointer!\n");
+  //  exit(1);
+  //}
+  //dmap_t *dmap = oc_get_dmap(main->oc);
+  //dmap_write(dmap, oid_2d, addr_2d_unaligned, size, buf);
+  //(void)dmap;
   return;
 }
 
@@ -9976,10 +10018,13 @@ void _main_mem_op(main_t *main, uint64_t *in_cycles, uint64_t *out_cycles) {
   // Then call coherence controller
   if(op == MAIN_READ) {
     out_cycles[0] = oc_load(main->oc, 0, in_cycles[0], oid_2d, addr_2d_aligned, line_count);
+    //out_cycles[0] = in_cycles[0] + 1;
   } else {
     out_cycles[0] = oc_store(main->oc, 0, in_cycles[0], oid_2d, addr_2d_aligned, line_count);
+    //out_cycles[0] = in_cycles[0] + 1;
     // Only update dmap with the newest data after calling all slaves
     main_mem_op_after(main, op, oid_2d, addr_2d_unaligned, size, data);
+    (void)data; (void)addr_2d_unaligned;
   }
   return;
 }

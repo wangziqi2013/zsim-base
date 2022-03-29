@@ -9,9 +9,11 @@
 #include <limits.h>
 #include <string.h>
 #include <error.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
 #include <xmmintrin.h>
@@ -26,6 +28,7 @@
 
 // Error reporting and system call assertion
 #define SYSEXPECT(expr) do { if(!(expr)) { perror(__func__); assert(0); exit(1); } } while(0)
+#define SYSEXPECT_FILE(expr, path) do { if(!(expr)) { printf("File operation failed with path: \"%s\"\n", path); perror(__func__); assert(0); exit(1); } } while(0)
 #define error_exit(fmt, ...) do { fprintf(stderr, "%s error: " fmt, __func__, ##__VA_ARGS__); assert(0); exit(1); } while(0);
 #ifndef NDEBUG
 #define dbg_printf(fmt, ...) do { fprintf(stderr, fmt, ##__VA_ARGS__); } while(0);
@@ -140,9 +143,11 @@ inline static int streq(const char *a, const char *b) { return strcmp(a, b) == 0
 char *strclone(const char *s); // Duplicate a string by copying it (note that C lib already has strdup)
 char *strnclone(const char *s, int n);
 // Find the substring in the main string. The "times" argument specifies the number of substrings to
-// return, if multiple exists. Returns NULL if not found, including when "times" exceeds the number of
+// skip, if multiple exists. Returns NULL if not found, including when "times" exceeds the number of
 // occurrences
 char *strfind(const char *s, const char *sub, int times);
+// Whether the given string has a suffix as given in the second parameter
+int strsuffix(const char *s, const char *suffix);
 
 // We can support 32 outstanding calls to the convert function
 #define CONVERT_BUFFER_COUNT 32
@@ -170,6 +175,74 @@ inline static char *convertq_advance() {
 const char *to_abbr(uint64_t n);
 // Convert uint64_t to size representation (using KB, MB, GB suffix)
 const char *to_size(uint64_t n);
+
+//* Directory
+
+enum {
+  DIR_IS_FILE,
+  DIR_IS_DIR,
+  DIR_DOES_NOT_EXIST,
+};
+
+size_t get_file_size(const char *name);
+int test_path(const char *name);
+// Make a folder if it does not exist
+// Ignores if it exists and is a folder
+// Reports error if it exists and it is a name
+void mkdir_if_not_exist(const char *name);
+void chdir_path(const char *name, int force);
+
+// Initial capacity of the dir stack
+#define DIR_STACK_INIT_CAPACITY      16
+
+// This structure is used to save current working directory in a stack structure
+// and allows users to save the dir and restore to it later
+typedef struct {
+  char **data;   // char * array, malloc'ed and realloc'ed
+  int count;     // Current number of elements
+  int capacity;  // Capacity of the data array in number of elements
+} dir_stack_t;
+
+dir_stack_t *dir_stack_init();
+void dir_stack_free(dir_stack_t *dir_stack);
+void dir_stack_realloc(dir_stack_t *dir_stack, int capacity);
+
+int dir_stack_is_empty(dir_stack_t *dir_stack);
+
+void dir_stack_push(dir_stack_t *dir_stack, char *s);
+char *dir_stack_pop(dir_stack_t *dir_stack);
+void dir_stack_push_cwd(dir_stack_t *dir_stack);
+void _dir_stack_chdir(dir_stack_t *dir_stack, const char *new_dir, int force);
+void dir_stack_chdir(dir_stack_t *dir_stack, const char *new_dir);
+void dir_stack_chdir_force(dir_stack_t *dir_stack, const char *new_dir);
+void dir_stack_pop_cwd(dir_stack_t *dir_stack);
+void dir_stack_pop_all_cwd(dir_stack_t *dir_stack);
+
+void dir_stack_print(dir_stack_t *dir_stack);
+
+#define DIR_GLOB_FILE_ONLY     0x00000001
+#define DIR_GLOB_DIR_ONLY      0x00000002
+#define DIR_GLOB_RECURSIVE     0x00000004
+// Whether . and .. are included as directories
+#define DIR_GLOB_INCLUDE_DOT   0x00000008
+
+// Initial capacity of the list
+#define DIR_GLOB_INIT_CAPACITY   16
+
+typedef struct {
+  int capacity;
+  int count;
+  char **data;
+} dir_glob_result_t;
+
+dir_glob_result_t *dir_glob_result_init();
+void dir_glob_result_free(dir_glob_result_t *result);
+
+void dir_glob_result_append(dir_glob_result_t *result, char *s);
+void dir_glob_result_print(dir_glob_result_t *result);
+
+// Returns a list of files and directories. Exactly which entries are returned are specified by the flag
+void dir_glob(const char *path, int flag, dir_glob_result_t *result);
 
 //* spinlock_t
 
@@ -257,10 +330,12 @@ conf_t *conf_init(const char *filename);                    // Open a file and l
 conf_t *conf_init_empty();                                  // Initialize an empty conf object without reading file
 conf_t *conf_init_from_str(const char *s);                  // Initialize from a string
 void conf_free(conf_t *conf);
+conf_t *conf_clone(conf_t *src);                            // Clone all keys and values into another conf
 int conf_remove(conf_t *conf, const char *key); // Returns 1 if the entry exists
 int conf_rewrite(conf_t *conf, const char *key, const char *value); // Returns 1 if the entry exists
 inline static void conf_enable_warn_unused(conf_t *conf) { conf->warn_unused = 1; }
 
+int conf_get_count(conf_t *conf);                             // Returns number of items
 conf_node_t *conf_find(conf_t *conf, const char *key);        // Returns node pointer
 inline static int conf_exists(conf_t *conf, const char *key) { return conf_find(conf, key) != NULL; }
 int conf_find_str(conf_t *conf, const char *key, char **ret); // Returns 1 if found; 0 if not

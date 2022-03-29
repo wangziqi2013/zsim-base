@@ -60,9 +60,10 @@ char *strnclone(const char *s, int n) {
   return ret;
 }
 
-// Undefined if times <= 0
 char *strfind(const char *s, const char *sub, int times) {
-  assert(times > 0);
+  if(times <= 0) {
+    times = 1;
+  }
   while(1) {
     s = strstr(s, sub);
     if(s == NULL || times == 1) {
@@ -72,6 +73,21 @@ char *strfind(const char *s, const char *sub, int times) {
     s++;
   }
   return (char *)s;
+}
+
+int strsuffix(const char *s, const char *suffix) {
+  int len = strlen(s);
+  int suffix_len = strlen(suffix);
+  if(len < suffix_len) {
+    return 0;
+  }
+  const char *p = s + (len - suffix_len);
+  for(int i = 0;i < suffix_len;i++) {
+    if(p[i] != suffix[i]) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 convertq_t convert_queue;
@@ -142,6 +158,297 @@ const char *to_size(uint64_t n) {
     sprintf(buf, "%lu", n);
   }
   return buf;
+}
+
+//* Directory
+
+// Returns -1 if the file does not exist or other error occurs
+size_t get_file_size(const char *name) {
+  struct stat statbuf;
+  int ret = stat(name, &statbuf);
+  if(ret != 0) {
+    return -1UL;
+  }
+  return statbuf.st_size;
+}
+
+// Whether a path is a file, a dir, or does not exist
+// Returns one of the three status above
+int test_path(const char *name) {
+  struct stat statbuf;
+  int ret = stat(name, &statbuf);
+  if(ret != 0) {
+    if(errno == ENOENT) {
+      return DIR_DOES_NOT_EXIST;
+    } else {
+      error_exit("Error while stat'ing the path: \"%s\"\n", name);
+    }
+  } else if(S_ISDIR(statbuf.st_mode) == 0) {
+    return DIR_IS_FILE;
+  }
+  return DIR_IS_DIR;
+}
+
+// Make a directory if it does not already exists. Report error if a file of the same 
+// name already exists. 
+void mkdir_if_not_exist(const char *name) {
+  struct stat buf;
+  int ret = stat(name, &buf);
+  if(ret == 0) {
+    if(!S_ISDIR(buf.st_mode)) {
+      error_exit("The name \"%s\" is not a directory\n", name);
+    }
+  } else {
+    int ret = mkdir(name, 0777);
+    SYSEXPECT(ret == 0);
+  }
+  return;
+}
+
+// Chdir using a path; If force is set, then we create directory along the way it they do not exist
+// 1. Absolute path, relative path, and those using "." and ".." are all supported
+// 2. "~" is not supported as it is expanded by the shell, not the OS or the libraray call
+// 3. If "force" is set to 1, then the directory will be created with mode 0777 along the way
+// 4. Reports error and exit if the directory could not be entered or created (same rule as mkdir_if_not_exist)
+// 5. Multiple "/" as the path delimiter will be treated as a single level
+void chdir_path(const char *name, int force) {
+  int ret;
+  char *const name_dup = strclone(name);
+  char *p = name_dup;
+  // Deal with absolute directory first
+  if(*p == '/') {
+    ret = chdir("/");
+    SYSEXPECT(ret == 0);
+    p++;
+  }
+  while(1) {
+    // Skip as many delimiters as possible
+    while(*p == '/') {
+      p++;
+    }
+    if(*p == '\0') {
+      break;
+    }
+    char *q = p;
+    // Find next delimiter or the end of the string
+    while(*q != '/' && *q != '\0') {
+      q++;
+    }
+    char t = *q;
+    *q = '\0';
+    if(force == 1) {
+      mkdir_if_not_exist(p);
+    }
+    ret = chdir(p);
+    SYSEXPECT(ret == 0);
+    *q = t;
+    p = q + 1;
+    if(t == '\0') {
+      break;
+    }
+  }
+  free(name_dup);
+  return;
+}
+
+//* dir_stack
+
+dir_stack_t *dir_stack_init() {
+  dir_stack_t *dir_stack = (dir_stack_t *)malloc(sizeof(dir_stack_t));
+  SYSEXPECT(dir_stack != NULL);
+  memset(dir_stack, 0x00, sizeof(dir_stack_t));
+  dir_stack->data = (char **)malloc(sizeof(char *) * DIR_STACK_INIT_CAPACITY);
+  SYSEXPECT(dir_stack->data != NULL);
+  memset(dir_stack->data, 0x00, sizeof(char *) * DIR_STACK_INIT_CAPACITY);
+  dir_stack->capacity = DIR_STACK_INIT_CAPACITY;
+  dir_stack->count = 0;
+  return dir_stack;
+}
+
+void dir_stack_free(dir_stack_t *dir_stack) {
+  // Free all stored strings
+  for(int i = 0;i < dir_stack->count;i++) {
+    free(dir_stack->data[i]);
+  }
+  free(dir_stack->data);
+  free(dir_stack);
+  return;
+}
+
+void dir_stack_realloc(dir_stack_t *dir_stack, int capacity) {
+  assert(capacity > 0);
+  dir_stack->data = (char **)realloc(dir_stack->data, sizeof(char *) * capacity);
+  SYSEXPECT(dir_stack->data != NULL);
+  dir_stack->capacity = capacity;
+  return;
+}
+
+int dir_stack_is_empty(dir_stack_t *dir_stack) {
+  return dir_stack->count == 0;
+}
+
+// Does not take ownership of s; Caller still owns the string
+void dir_stack_push(dir_stack_t *dir_stack, char *s) {
+  if(dir_stack->count == dir_stack->capacity) {
+    dir_stack_realloc(dir_stack, dir_stack->capacity * 2);
+  }
+  dir_stack->data[dir_stack->count] = s;
+  dir_stack->count++;
+  return;
+}
+
+char *dir_stack_pop(dir_stack_t *dir_stack) {
+  assert(dir_stack->count > 0);
+  dir_stack->count--;
+  return dir_stack->data[dir_stack->count]; 
+}
+
+void dir_stack_push_cwd(dir_stack_t *dir_stack) {
+  // The getcwd() string is allocated via malloc()
+  char *cwd = getcwd(NULL, 0);
+  SYSEXPECT(cwd != NULL);
+  dir_stack_push(dir_stack, cwd);
+  return;
+}
+
+void _dir_stack_chdir(dir_stack_t *dir_stack, const char *new_dir, int force) {
+  dir_stack_push_cwd(dir_stack);
+  chdir_path(new_dir, force);
+  return;
+}
+
+// Push cwd and then chdir; This is the non-force version, i.e., non-existent
+// dirs will not be created along the way
+void dir_stack_chdir(dir_stack_t *dir_stack, const char *new_dir) {
+  _dir_stack_chdir(dir_stack, new_dir, 0);
+  return;
+}
+
+void dir_stack_chdir_force(dir_stack_t *dir_stack, const char *new_dir) {
+  _dir_stack_chdir(dir_stack, new_dir, 1);
+  return;
+}
+
+// This function restores the previous cwd
+void dir_stack_pop_cwd(dir_stack_t *dir_stack) {
+  char *cwd = dir_stack_pop(dir_stack);
+  int ret = chdir(cwd);
+  SYSEXPECT(ret == 0);
+  free(cwd);
+  return;
+}
+
+// Restore to the bottommost working directory; 
+// If the stack is empty, then do nothing
+void dir_stack_pop_all_cwd(dir_stack_t *dir_stack) {
+  while(dir_stack->count != 0) {
+    char *cwd = dir_stack_pop(dir_stack);
+    if(dir_stack->count == 0) {
+      int ret = chdir(cwd);
+      SYSEXPECT(ret == 0);
+    }
+    free(cwd);
+  }
+  return;
+}
+
+// Print all paths stored
+void dir_stack_print(dir_stack_t *dir_stack) {
+  printf("---------- dir_stack_t ----------\n");
+  for(int i = 0;i < dir_stack->count;i++) {
+    printf("Level %d: \"%s\"\n", i, dir_stack->data[i]);
+  }
+  return;
+}
+
+//* dir_glob
+
+dir_glob_result_t *dir_glob_result_init() {
+  dir_glob_result_t *result = (dir_glob_result_t *)malloc(sizeof(dir_glob_result_t));
+  SYSEXPECT(result != NULL);
+  memset(result, 0x00, sizeof(dir_glob_result_t));
+  result->data = (char **)malloc(sizeof(char *) * DIR_GLOB_INIT_CAPACITY);
+  SYSEXPECT(result->data != NULL);
+  memset(result->data, 0x00, sizeof(char *) * DIR_GLOB_INIT_CAPACITY);
+  result->capacity = DIR_GLOB_INIT_CAPACITY;
+  result->count = 0;
+  return result;
+}
+
+void dir_glob_result_free(dir_glob_result_t *result) {
+  for(int i = 0;i < result->count;i++) {
+    free(result->data[i]);
+  }
+  free(result->data);
+  free(result);
+  return;
+}
+
+void dir_glob_result_append(dir_glob_result_t *result, char *s) {
+  if(result->count == result->capacity) {
+    int new_capacity = result->capacity * 2;
+    result->data = (char **)realloc(result->data, sizeof(char *) * new_capacity);
+    SYSEXPECT(result->data != NULL);
+    result->capacity = new_capacity;
+  }
+  result->data[result->count] = s;
+  result->count++;
+  return;
+}
+
+void dir_glob_result_print(dir_glob_result_t *result) {
+  for(int i = 0;i < result->count;i++) {
+    printf("Index %d path \"%s\"\n", i, result->data[i]);
+  }
+  return;
+}
+
+void dir_glob(const char *path, int flag, dir_glob_result_t *result) {
+  if(test_path(path) != DIR_IS_DIR) {
+    error_exit("The given path \"%s\" is not a valid directory\n", path);
+  }
+  DIR *dir = opendir(path);
+  SYSEXPECT(dir != NULL);
+  struct dirent *entry;
+  char *buf = NULL;
+  int buf_size = 0;
+  int path_len = strlen(path);
+  int path_has_slash = 0;
+  if(path_len > 0) {
+    path_has_slash = (path[path_len - 1] == '/');
+  }
+  while((entry = readdir(dir)) != NULL) {
+    // '/' and '\0'
+    int len = strlen(entry->d_name) + path_len + 1 + 1;
+    if(len > buf_size) {
+      buf = (char *)realloc(buf, len);
+      SYSEXPECT(buf != NULL);
+      if(path_has_slash == 0) {
+        snprintf(buf, len, "%s/%s", path, entry->d_name);
+      } else {
+        snprintf(buf, len, "%s%s", path, entry->d_name);
+      }
+    }
+    int test_path_ret = test_path(buf);
+    if((flag & DIR_GLOB_FILE_ONLY) != 0 && test_path_ret == DIR_IS_FILE) {
+      dir_glob_result_append(result, strclone(buf));
+    }
+    if((flag & DIR_GLOB_DIR_ONLY) != 0 && test_path_ret == DIR_IS_DIR) {
+      if((flag & DIR_GLOB_INCLUDE_DOT) != 0 || 
+          (streq(entry->d_name, ".") == 0 && streq(entry->d_name, "..") == 0)) {
+        dir_glob_result_append(result, strclone(buf));
+      }
+      if((flag & DIR_GLOB_RECURSIVE) != 0) {
+        // Do not recursively glob . and ..
+        if(streq(entry->d_name, ".") == 0 && streq(entry->d_name, "..") == 0) {
+          dir_glob(buf, flag, result);
+        }
+      }
+    }
+  }
+  int close_ret = closedir(dir);
+  SYSEXPECT(close_ret == 0);
+  return;
 }
 
 //* conf_t
@@ -401,9 +708,9 @@ conf_t *conf_init(const char *filename) {
   assert(conf->filename == NULL);
   // Passing NULL as the second argument forces the lib call to allocate the buffer using malloc()
   conf->filename = realpath(filename, NULL);
-  SYSEXPECT(conf->filename != NULL);
+  SYSEXPECT_FILE(conf->filename != NULL, filename);
   FILE *fp = fopen(filename, "r");
-  SYSEXPECT(fp != NULL);
+  SYSEXPECT_FILE(fp != NULL, filename);
   int next_line = 0;
   while(1) {
     // Backup this value
@@ -464,7 +771,7 @@ conf_t *conf_init_from_str(const char *s) {
   snprintf(name_buf, sizeof(name_buf), "_conf_temp_%lu_%lu.txt", 
     (uint64_t)time(NULL), (uint64_t)__builtin_ia32_rdtsc());
   FILE *fp = fopen(name_buf, "w");
-  SYSEXPECT(fp != NULL);
+  SYSEXPECT_FILE(fp != NULL, name_buf);
   int len = strlen(s);
   int write_ret = fwrite(s, 1, len, fp);
   if(write_ret != len) {
@@ -501,6 +808,10 @@ void conf_free(conf_t *conf) {
   free(conf);
 }
 
+int conf_get_count(conf_t *conf) {
+  return conf->item_count;
+}
+
 // Returns the node if key exists; NULL if does not exist
 conf_node_t *conf_find(conf_t *conf, const char *key) {
   conf_node_t *curr = conf->head;
@@ -512,6 +823,16 @@ conf_node_t *conf_find(conf_t *conf, const char *key) {
     curr = curr->next;
   }
   return NULL;
+}
+
+conf_t *conf_clone(conf_t *src) {
+  conf_t *dest = conf_init_empty();
+  conf_node_t *curr = src->head;
+  while(curr != NULL) {
+    conf_insert(dest, curr->key, curr->value, strlen(curr->key), strlen(curr->value), curr->line);
+    curr = curr->next;
+  }
+  return dest;
 }
 
 int conf_remove(conf_t *conf, const char *key) {
@@ -831,7 +1152,7 @@ void conf_conf_print(conf_t *conf) {
 
 void conf_dump(conf_t *conf, const char *filename) {
   FILE *fp = fopen(filename, "w");
-  SYSEXPECT(fp != NULL);
+  SYSEXPECT_FILE(fp != NULL, filename);
   conf_node_t *node = conf->head;
   while(node) {
     fprintf(fp, "%s = %s\n\n", node->key, node->value);

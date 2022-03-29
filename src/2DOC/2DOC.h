@@ -10,6 +10,7 @@
 
 #include "util.h"
 #include "zsim_magic_ops.h"
+#include <unistd.h>
 
 // Header files for SIMD instructions and BMI intrinsics
 #ifdef INTEL_ISA
@@ -2617,7 +2618,7 @@ void main_chdir(main_t *main);
 
 // Called before and after the simulation respectively
 void main_sim_begin(main_t *main);
-void main_sim_end(main_t *main);
+void main_sim_end(main_t *main, int force_end);
 
 void main_register_sim_end_cb(main_t *main, void (*cb)(main_t *main, void *arg), void *arg);
 
