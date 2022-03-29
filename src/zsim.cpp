@@ -1228,7 +1228,8 @@ VOID Fini(int code, VOID * v) {
     //    printf("%lu ", mem_op_count[i]);
     //}
     // Print main stat
-    main_stat_print(zinfo->main);
+    main_sim_end(zinfo->main, 1);
+    //main_stat_print(zinfo->main);
     putchar('\n');
     //NOTE: In fini, it appears that info() and writes to stdout in general won't work; warn() and stderr still work fine.
     SimEnd();
@@ -1397,7 +1398,7 @@ VOID HandleMagicOp_zsim_magic_op(THREADID tid, ADDRINT _op) {
             main_addr_map_alloc_data_t *alloc_data = (main_addr_map_alloc_data_t *)op->arg;
             main_addr_map_alloc(zinfo->main->addr_map, alloc_data->type_id, alloc_data->addr_1d, alloc_data->size);
         } break;
-        case ZSIM_START_SIM: {
+        case ZSIM_MAGIC_OP_START_SIM: {
             main_zsim_start_sim(zinfo->main);
         } break;
         case ZSIM_MAGIC_OP_GET_ADDR_MAPPING: {
