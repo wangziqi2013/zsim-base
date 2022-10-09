@@ -1,2 +1,1 @@
-#%include tests/2DOC/cc_simple_MBDv4_4_1_seg_opt3_1pt5x_tag_conf.txt
-%include tests/2DOC/cc_scache_Thesaurus_conf.txt
+%include tests/2DOC/cc_simple_MBDv4_4_1_seg_opt3_1pt5x_tag_conf.txt

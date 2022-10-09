@@ -9,9 +9,9 @@ cc.simple.l2.way_count = 8
 cc.simple.l2.latency = 11
 
 # 1MB
-cc.simple.llc.size = 1048576
-cc.simple.llc.physical_way_count = 8
-cc.simple.llc.tag_way_count = 12
+cc.scache.llc.size = 2097152
+cc.scache.llc.physical_way_count = 16
+cc.simple.llc.tag_way_count = 24
 cc.simple.llc.latency = 30
 cc.simple.llc.algorithm = MBD_Thesaurus
 cc.simple.llc.MBD_opt_type = opt3
