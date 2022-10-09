@@ -9922,8 +9922,8 @@ void main_mem_op_after(main_t *main, int op, uint64_t oid_2d, uint64_t addr_2d_u
   //  printf("Null pointer!\n");
   //  exit(1);
   //}
-  //dmap_t *dmap = oc_get_dmap(main->oc);
-  //dmap_write(dmap, oid_2d, addr_2d_unaligned, size, buf);
+  dmap_t *dmap = oc_get_dmap(main->oc);
+  dmap_write(dmap, oid_2d, addr_2d_unaligned, size, buf);
   //(void)dmap;
   return;
 }
