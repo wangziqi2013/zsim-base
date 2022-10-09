@@ -9,8 +9,8 @@ cc.simple.l2.way_count = 8
 cc.simple.l2.latency = 11
 
 # 1MB
-cc.scache.llc.size = 2097152
-cc.scache.llc.physical_way_count = 16
+cc.simple.llc.size = 1048576
+cc.simple.llc.physical_way_count = 8
 cc.simple.llc.latency = 30
 cc.simple.llc.algorithm = CPACK
 

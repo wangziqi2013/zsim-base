@@ -12,8 +12,8 @@ cc.scache.l2.way_count = 8
 cc.scache.l2.latency = 11
 
 # 1MB
-cc.scache.llc.size = 2097152
-cc.scache.llc.physical_way_count = 16
+cc.scache.llc.size = 1048576
+cc.scache.llc.physical_way_count = 8
 cc.scache.llc.latency = 30
 cc.scache.core_count = 1
 
